@@ -1,70 +1,162 @@
 #!/usr/bin/env python
-"""
-TurtleRabbit Team Control — 2026 Season
-Main entry point. Starts up the core services and waits for you to stop it.
-
-Right now this just boots the base infrastructure (world model, config, cache).
-Vision, dispatcher, and robot processes will be wired in later.
-"""
 
 import argparse
 import sys
 import time
-from multiprocessing import Event
+from multiprocessing import Process, Queue, Event
 
-from teamcontrol.config import Config
-from teamcontrol.world import WorldModelManager
-from teamcontrol.utils.logger import LogSaver
+from TeamControl.process_workers.vision_runner import VisionProcess
+from TeamControl.process_workers.gcfsm_runner import GCfsm
+from TeamControl.process_workers.wm_runner import WMWorker
+from TeamControl.world.model_manager import WorldModelManager
+
+from TeamControl.utils.Logger import LogSaver
+from TeamControl.dispatcher.dispatch import Dispatcher
+from TeamControl.utils.yaml_config import Config
+
+from TeamControl.robot.goalie import run_goalie
+from TeamControl.robot.striker import run_striker
+from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
+from TeamControl.robot.team import run_team
+from TeamControl.robot.coop import run_coop
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="TurtleRabbit SSL Team Control — 2026",
+        description="RoboCup SSL Team Control — multi-mode launcher",
     )
     parser.add_argument(
-        "--config", type=str, default=None,
-        help="path to config.yaml (uses defaults if not given)",
-    )
-    parser.add_argument(
-        "--mode", choices=["test", "goalie", "1v1", "6v6"],
-        default="test",
-        help="operating mode (only 'test' works right now)",
+        "--mode",
+        choices=["goalie", "1v1", "obstacle", "coop", "6v6"],
+        default="goalie",
+        help=(
+            "goalie   — yellow goalie vs blue striker (default)\n"
+            "1v1      — yellow striker vs blue striker\n"
+            "obstacle — two robots chasing ball with obstacle avoidance\n"
+            "coop     — two robots cooperate to score (pass + shoot)\n"
+            "6v6      — full 6v6 match (1 goalie + 5 field per team)"
+        ),
     )
     args = parser.parse_args()
 
-    # load config
-    cfg = Config(config_path=args.config)
-    print(f"[main] config loaded: {cfg}")
+    preset = Config()
 
-    # shared state
+    # ── Queues ────────────────────────────────────────────────
+    vision_q = Queue()
+    gc_q = Queue()
+    dispatch_q = Queue()
+
+    logger = None
+
+    # ── Shared state ──────────────────────────────────────────
     is_running = Event()
 
-    # world model (shared across processes)
     wm_manager = WorldModelManager()
     wm_manager.start()
     wm = wm_manager.WorldModel()
 
-    print(f"[main] world model online: {wm}")
-    print(f"[main] mode: {args.mode}")
+    # ── Background processes (always needed) ──────────────────
+    background = [
+        Process(target=VisionProcess.run_worker,
+                args=(is_running, logger, vision_q,
+                      preset.use_grSim_vision, preset.vision[1])),
+        Process(target=GCfsm.run_worker,
+                args=(is_running, logger, gc_q,
+                      preset.us_yellow, preset.us_positive)),
+        Process(target=WMWorker.run_worker,
+                args=(is_running, logger, wm, vision_q, gc_q)),
+        Process(target=Dispatcher.run_worker,
+                args=(is_running, logger, dispatch_q, preset)),
+    ]
 
-    # ── start ──────────────────────────────────────────────────
+    # ── Mode-specific foreground processes ────────────────────
+    foreground = []
+
+    if args.mode == "goalie":
+        # Yellow goalie (robot 4) defends against blue striker (robot 0)
+        foreground.append(
+            Process(target=run_goalie,
+                    args=(is_running, dispatch_q, wm,
+                          3, preset.us_yellow)))
+        foreground.append(
+            Process(target=run_striker,
+                    args=(is_running, dispatch_q, wm,
+                          0, not preset.us_yellow)))
+
+    elif args.mode == "1v1":
+        # Yellow striker (robot 0) vs blue striker (robot 0)
+        foreground.append(
+            Process(target=run_striker,
+                    args=(is_running, dispatch_q, wm,
+                          0, True)))
+        foreground.append(
+            Process(target=run_striker,
+                    args=(is_running, dispatch_q, wm,
+                          0, False)))
+
+    elif args.mode == "obstacle":
+        # Two robots chasing ball with obstacle avoidance
+        foreground.append(
+            Process(target=run_navigator,
+                    args=(is_running, dispatch_q, wm,
+                          0, preset.us_yellow, WAYPOINTS_A)))
+        foreground.append(
+            Process(target=run_navigator,
+                    args=(is_running, dispatch_q, wm,
+                          1, preset.us_yellow, WAYPOINTS_B)))
+
+    elif args.mode == "coop":
+        # Two robots cooperate to score
+        foreground.append(
+            Process(target=run_coop,
+                    args=(is_running, dispatch_q, wm,
+                          0, 1, preset.us_yellow)))
+        foreground.append(
+            Process(target=run_coop,
+                    args=(is_running, dispatch_q, wm,
+                          1, 0, preset.us_yellow)))
+
+    elif args.mode == "6v6":
+        # Full match: one coordinator per team, goalie = robot 0
+        foreground.append(
+            Process(target=run_team,
+                    args=(is_running, dispatch_q, wm, True, 0)))
+        foreground.append(
+            Process(target=run_team,
+                    args=(is_running, dispatch_q, wm, False, 0)))
+
+    # ── Start everything ──────────────────────────────────────
     is_running.set()
-    print("[main] system ready")
-    print("[main] type 'exit' to shut down\n")
+    print(f"[main] Starting mode: {args.mode}")
 
-    # ── wait for exit ──────────────────────────────────────────
+    for p in background:
+        p.start()
+    for p in foreground:
+        p.start()
+
+    # ── Wait for exit ─────────────────────────────────────────
     while is_running.is_set():
         try:
+            print("Type 'exit' to quit: ")
             user_input = input()
-            if user_input.strip().lower() == "exit":
-                print("[main] shutting down...")
+            if user_input.lower() == "exit":
+                print("Shutdown signal received...")
                 is_running.clear()
                 break
-        except (KeyboardInterrupt, EOFError):
-            print("\n[main] shutting down...")
+        except KeyboardInterrupt:
+            print("\nShutdown signal received...")
             is_running.clear()
 
-    print("[main] all done")
+        print("Waiting for processes to shut down...")
+        time.sleep(1)
+
+    # ── Join all processes ────────────────────────────────────
+    for p in foreground:
+        p.join(timeout=5)
+    for p in background:
+        p.join(timeout=5)
+
+    print("All processes have been ended")
 
 
 if __name__ == "__main__":

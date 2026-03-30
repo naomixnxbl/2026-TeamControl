@@ -1,147 +1,178 @@
-"""
-World Model — the single source of truth.
+'''
+ World Model - Central Storage and access control
+- apply this in multiprocessing or equivalent 
+@author - Emma
+'''
 
-Everything the system knows about the current state of the game
-lives here. Vision data, game controller state, robot positions,
-ball tracking — all of it flows through the world model.
+from TeamControl.SSL.vision.frame_list import FrameList
+from TeamControl.SSL.vision.field import GeometryData,FieldSize
+from TeamControl.SSL.vision.frame import Frame
+from TeamControl.SSL.game_controller.common import Command,Stage,GameEventType,Team,PacketType, GameState
+from TeamControl.SSL.game_controller.Message import RefereeMessage,TeamInfo
 
-This gets wrapped in a multiprocessing Manager so multiple
-processes can read/write to it safely. See manager.py.
-
-@author Emma (original), TRP Team (v2 rewrite)
-"""
-
-from multiprocessing import Manager
-from teamcontrol.core.cache import Cache
+from multiprocessing import Queue,Manager
+import numpy as np
+import numpy.typing as npt
 import logging
 
-log = logging.getLogger(__name__)
+
+log = logging.getLogger()
+log.setLevel(logging.DEBUG)
 
 
 class WorldModel:
     """
-    Central game state. Shared across all processes via the manager proxy.
+    World Model aka wm
+    Description : 
+        ...
     """
 
-    def __init__(self, us_yellow=True, us_positive=True, max_frames=120):
+    def __init__(
+        self,
+        update_interval: int = 10,
+        history: int = 60,
+        use_sim: bool = True,
+        us_yellow: bool = True,
+        us_positive: bool = True,
+    ):
+        mgr = Manager()
         self._us_yellow = us_yellow
         self._us_positive = us_positive
-        self._robots_active = 6
+        self.count = 0
+        self.update_interval:int = update_interval
+        self.use_sim:bool = use_sim 
+        self.frame_list:FrameList[Frame] = FrameList(history=history)
+        self.geometry:GeometryData = None
+        self.field:FieldSize = None
+        self._version = mgr.Value('i', 0)   # int counter
+        self._state = None # current state from GC
+        self.robot_active = 6 # robots active
+        self.blf_location = None # ball left field location
+    
+    def update_game_data(self,game_data):
+        if game_data is None:
+            return
+        if isinstance(game_data,Command):
+            self.ref_data.command = game_data
 
-        # frame storage — just a rolling list for now
-        self._frames = []
-        self._max_frames = max_frames
+        elif isinstance(game_data, Stage):
+            self.ref_data.stage = game_data
 
-        # game controller state
-        self._game_state = None
-        self._ball_left_field = None
+        elif isinstance(game_data, tuple):
+            if isinstance(game_data[0], TeamInfo):
+                self.ref_data.yellow = game_data[0]
+                self.ref_data.blue = game_data[1]
 
-        # geometry gets set once vision sends it
-        self._geometry = None
-        self._field = None
+    def update_team(self, us_yellow: bool, us_positive: bool):
+        self.us_yellow = us_yellow
+        self.us_positive = us_positive
+        self.robot_active = 6 # robots active
+        self.blf_location = None
 
-        # version counter — bumped periodically so watchers know
-        # something changed without having to diff frames
-        mgr = Manager()
-        self._version = mgr.Value("i", 0)
-        self._frame_count = 0
-        self._update_every = 10  # bump version every N frames
-
-        # per-model cache for computed stuff
-        self._cache = Cache(ttl=2.0, max_size=256)
-
-    # ── frames ──────────────────────────────────────────────────
-
-    def add_frame(self, frame):
-        """Add a new vision frame."""
-        self._frames.append(frame)
-        if len(self._frames) > self._max_frames:
-            self._frames = self._frames[-self._max_frames:]
-
-        self._frame_count += 1
-        if self._frame_count >= self._update_every:
+    def add_new_frame(self, frame: Frame):
+        self.count += 1
+        if self.count >= self.update_interval:
             self._version.value += 1
-            self._frame_count = 0
+            self.count = 0
+        self.frame_list.append(frame)
 
-        # invalidate cached stuff that depends on frame data
-        self._cache.invalidate_ns("computed")
+    def update_geometry(self, geometry: GeometryData):
+        self.geometry = geometry
+        self.field = geometry.field
+        self.ball_model = geometry.models
 
-    @property
-    def latest_frame(self):
-        if not self._frames:
-            return None
-        return self._frames[-1]
+    def update_gc_data(self,packet):
+        t, data = packet[0],packet[1]
+        match t:
+            case PacketType.ROBOTS_ACTIVE:
+                self.update_robots_active(data)
+            case PacketType.NEW_STATE:
+                self.update_state(data)
+            case PacketType.SWITCH_TEAM:
+                self.update_team(data["YELLOW"], data["POSITIVE"])
+            case PacketType.BLF_LOCATION:
+                self.update_ball_left_field_location(data)
+            
+            case _: # if the packet type is unknown 
+                log.exception(f"undefined Packet - {t}, {data=}")
+            
+    def update_robots_active(self,new_active) : 
+        self.robot_active = new_active
+    
+    def update_state(self,new_state):
+        # when we have a new incoming state, it updates this
+        self._state = new_state 
 
-    def get_last_n_frames(self, n: int):
-        return self._frames[-n:]
+    def update_team(self, us_yellow: bool, us_positive: bool):
+        self._us_yellow = us_yellow
+        self._us_positive = us_positive
 
-    @property
-    def version(self):
-        return self._version.value
+    def update_ball_left_field_location(self, location):
+        self.blf_location = location
 
-    # ── team info ───────────────────────────────────────────────
+    def get_ball_left_field_location(self):
+        return self.blf_location
+    
+    def get_game_state(self):
+        return self._state
 
-    @property
     def us_yellow(self):
         return self._us_yellow
 
-    @property
     def us_positive(self):
         return self._us_positive
 
-    def switch_team(self, us_yellow: bool, us_positive: bool):
-        self._us_yellow = us_yellow
-        self._us_positive = us_positive
-        self._cache.clear()  # team changed, everything is stale
-        log.info(f"team switched: yellow={us_yellow}, positive={us_positive}")
+    # vision
+    def get_latest_frame(self):
+        return self.frame_list.latest
 
-    @property
-    def robots_active(self):
-        return self._robots_active
+    def get_last_n_frames(self, n: int):
+        return self.frame_list.get_last_n_frames(n)
 
-    @robots_active.setter
-    def robots_active(self, count):
-        self._robots_active = count
+    def get_version(self):
+        return self._version.value
 
-    # ── game controller ─────────────────────────────────────────
+    # high level
+    def get_all_in_team_except(self, us: bool, exclude: list[int]):
+        isYellow = self._us_yellow if us is True else not self._us_yellow
+        frame = self.frame_list.latest
 
-    @property
-    def game_state(self):
-        return self._game_state
+        if isYellow is True:
+            team = frame.robots_yellow
+        else:
+            team = frame.robots_blue
 
-    @game_state.setter
-    def game_state(self, state):
-        self._game_state = state
+        if exclude is None or len(exclude) == 0:
+            return team
+        # now check the list of wanting to be excluded.  
+        else: # returning except robot with excluded id
+            for e in list(exclude):
+                if e in team:
+                    team.remove(e)
+            return team
+        
+    # depeciated
+    def get_yellow_robots(self,isYellow, robot_id=None) -> object | list:
+        raise DeprecationWarning("use frame.get_yellow_robots() instead")
+        if isYellow is True:
+            if isinstance(robot_id, int):
+                return self.frame_list.latest.robots_yellow[robot_id]
+            return self.frame_list.latest.robots_yellow
+        elif isYellow is False:
+            if isinstance(robot_id, int):
+                return self.frame_list.latest.robots_blue[robot_id]
+            return self.frame_list.latest.robots_blue
+        
+    # Depeciated
+    def get_our_robots(self, us=True, robot_id=None) -> object | list:
+        raise DeprecationWarning("use frame.get_yellow_robots() instead")
+        frame = self.frame_list.latest
+        # set our team or enemy team color
+        is_yellow = self._us_yellow if us else not self._us_yellow
+        # get the team specified
+        robots = frame.robots_yellow if is_yellow else frame.robots_blue
+        # return the specific robot or team. 
+        return robots[robot_id] if isinstance(robot_id, int) else robots
 
-    @property
-    def ball_left_field(self):
-        return self._ball_left_field
-
-    @ball_left_field.setter
-    def ball_left_field(self, location):
-        self._ball_left_field = location
-
-    # ── geometry ────────────────────────────────────────────────
-
-    @property
-    def geometry(self):
-        return self._geometry
-
-    def set_geometry(self, geo):
-        self._geometry = geo
-        self._field = geo.field if hasattr(geo, "field") else None
-
-    @property
-    def field(self):
-        return self._field
-
-    # ── cache access ────────────────────────────────────────────
-
-    @property
-    def cache(self) -> Cache:
-        """Direct access to the model's cache for computed values."""
-        return self._cache
-
-    def __repr__(self):
-        n_frames = len(self._frames)
-        return f"WorldModel(v={self.version}, frames={n_frames}, yellow={self._us_yellow})"
+    def get_active_robots(self):
+        return self.robot_active
