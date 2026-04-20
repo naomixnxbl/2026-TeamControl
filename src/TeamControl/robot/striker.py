@@ -13,18 +13,10 @@ from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
     clamp, move_toward, wall_brake, rotation_compensate,
-<<<<<<< HEAD
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
-=======
-    turn_then_move, predict_ball,
-)
-from TeamControl.robot.navigator import _compute_avoidance
-from TeamControl.robot.kick_engine import KickState, kick_tick
-from TeamControl.robot.diamond_nav import DiamondNav
 from TeamControl.cache import TickCache
->>>>>>> d46006f50499ec35c506b92e73ba35945373e32f
 from TeamControl.robot.constants import (
     FIELD_LENGTH, HALF_LEN, HALF_WID,
     GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
@@ -66,8 +58,6 @@ def _pick_aim(cache, ball, goal_x, is_yellow):
     return (aim_x, aim_y)
 
 
-<<<<<<< HEAD
-=======
 def _get_opponent(cache, is_yellow):
     """Return first visible opponent as (x, y, orientation), or None."""
     for _oid, pos in cache.robots.iter_team(not is_yellow):
@@ -87,7 +77,6 @@ def _opponent_has_ball(opp, ball):
     return rel[0] > -30  # ball not behind them
 
 
->>>>>>> d46006f50499ec35c506b92e73ba35945373e32f
 # -- Main loop ------------------------------------------------------------
 
 def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
@@ -121,24 +110,12 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 time.sleep(LOOP_RATE)
                 continue
 
-<<<<<<< HEAD
-        try:
-            us_positive = wm.us_positive()
-        except Exception:
-            us_positive = True
-
-        if is_yellow:
-            goal_x = -HALF_LEN if us_positive else HALF_LEN
-        else:
-            goal_x = HALF_LEN if us_positive else -HALF_LEN
-=======
         # -- Ball velocity (cached, recomputed on new frame) ----------
         bvx, bvy, bspeed = cache.ball.velocity
 
         # -- Team / side info (cached) --------------------------------
         goal_x = cache.team.goal_x(is_yellow)
         our_goal_x = cache.team.their_goal_x(is_yellow)
->>>>>>> d46006f50499ec35c506b92e73ba35945373e32f
 
         # -- Robot-local vectors ----------------------------------------
         rel_ball = world2robot(rpos, ball)
@@ -147,9 +124,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         if ball_visible:
             last_d_ball = d_ball
 
-<<<<<<< HEAD
-        aim = _pick_aim(ball, goal_x, frame, is_yellow)
-=======
         # -- Opponent info ----------------------------------------------
         opp = _get_opponent(cache, is_yellow)
         opp_has_ball = _opponent_has_ball(opp, ball)
@@ -157,7 +131,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
             if opp is not None else float('inf')
 
         aim = _pick_aim(cache, ball, goal_x, is_yellow)
->>>>>>> d46006f50499ec35c506b92e73ba35945373e32f
 
         vx, vy, w = 0.0, 0.0, 0.0
         kick, dribble = 0, 0
