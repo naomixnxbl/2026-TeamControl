@@ -1,0 +1,38 @@
+[Multicast] joining 224.5.23.2 on 192.168.1.2
+[Multicast] joining 224.5.23.1 on 192.168.1.2
+Multi-robot dispatcher initialized!
+Sender :  ('192.168.1.2', 7347)
+Sending to GrSim : False
+[RobotRecv] listening on 192.168.1.2,:50513
+[RobotRecv] pkt #1 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=1
+[RobotRecv] pkt #2 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[RobotRecv] pkt #3 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.750000, Ball Detecti'
+[RobotRecv] pkt #4 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=4
+[RobotRecv] pkt #5 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=6
+[RobotRecv] pkt #7 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=8
+[RobotRecv] pkt #9 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.750000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=10
+[RobotRecv] pkt #11 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=12
+[RobotRecv] pkt #13 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=14
+[RobotRecv] pkt #15 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=16
+[RobotRecv] pkt #17 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=18
+[RobotRecv] pkt #19 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.750000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=20
+[RobotRecv] pkt #21 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=22
+[RobotRecv] pkt #23 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=24
+[RobotRecv] pkt #25 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+[wmr] onboard totals: ingested=0 rejected=26
+[RobotRecv] pkt #27 from ('192.168.1.4', 50514) len=64 head=b'Robot State: Active, Battery Voltage:22.875000, Ball Detecti'
+reseting all robots to 0 
+Dispatcher has been shutdown
+GameControl has stopped listening

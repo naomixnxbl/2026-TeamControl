@@ -36,7 +36,7 @@ class Dispatcher(BaseWorker):
         self.send_to_grSim = config.send_to_grSim
         self.yellow = config.yellow
         self.blue = config.blue
-        self.r_sender = Sender()
+        self.r_sender = Sender(device_ip=config.robot_ip)
         if self.send_to_grSim is True:
             self.g_sender = grSimSender(*config.grSim_addr)
         else:

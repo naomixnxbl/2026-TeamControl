@@ -109,7 +109,7 @@ class TestPanel(QWidget):
         super().__init__(parent)
         self._engine = engine
         self._field = field
-        self._sender = Sender()
+        self._sender = Sender(device_ip="192.168.1.2")
         self._grsim: grSimSender | None = None
         self._continuous_timer = QTimer(self)
         self._continuous_timer.setInterval(50)

@@ -15,8 +15,8 @@ log.setLevel(logging.DEBUG)
 from TeamControl.network.baseUDP import BaseSocket, SocketType
 
 class Sender(BaseSocket):
-    def __init__(self, type=SocketType.SOCK_UDP, binding=False) -> None:
-        device_ip = None # use 127.0.0.1 for local testing 
+    def __init__(self, device_ip, type=SocketType.SOCK_UDP, binding=False) -> None:
+        # device_ip = None # use 127.0.0.1 for local testing 
         device_port = self._generate_port()
         super().__init__(ip=device_ip,port=device_port,type=type,binding=binding)
     

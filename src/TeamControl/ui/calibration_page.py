@@ -89,7 +89,7 @@ class CalibrationPage(QWidget):
         self._engine = engine
         self._test_panel = test_panel
         self._our_id_spin = None
-        self._sender = Sender()
+        self._sender = Sender("192.168.1.2")
 
         # ── Load existing calibration ─────────────────────────
         self._cal = self._load_cal()
