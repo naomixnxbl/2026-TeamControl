@@ -1,0 +1,51 @@
+{
+  "speed_scale": 4.5,
+  "lateral_drift_per_m": 19.18,
+  "stop_overshoot_mm": -8.8,
+  "runs": [
+    {
+      "speed_cmd": 0.3,
+      "speed_actual": 0.4984,
+      "speed_ratio": 1.6614,
+      "dist_mm": 3736.5,
+      "time_s": 7.497,
+      "lateral_drift_mm": 74.9,
+      "drift_per_m": 20.04,
+      "overshoot_mm": 36.5,
+      "direction": 1
+    },
+    {
+      "speed_cmd": 0.3,
+      "speed_actual": 0.4253,
+      "speed_ratio": 1.4176,
+      "dist_mm": 3653.5,
+      "time_s": 8.591,
+      "lateral_drift_mm": 78.5,
+      "drift_per_m": 21.5,
+      "overshoot_mm": -46.5,
+      "direction": -1
+    },
+    {
+      "speed_cmd": 0.3,
+      "speed_actual": 0.579,
+      "speed_ratio": 1.9299,
+      "dist_mm": 3680.6,
+      "time_s": 6.357,
+      "lateral_drift_mm": 77.2,
+      "drift_per_m": 20.98,
+      "overshoot_mm": -19.4,
+      "direction": 1
+    },
+    {
+      "speed_cmd": 0.3,
+      "speed_actual": 0.3479,
+      "speed_ratio": 1.1597,
+      "dist_mm": 3694.2,
+      "time_s": 10.619,
+      "lateral_drift_mm": 52.4,
+      "drift_per_m": 14.19,
+      "overshoot_mm": -5.8,
+      "direction": -1
+    }
+  ]
+}
