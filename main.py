@@ -8,11 +8,13 @@ from multiprocessing import Process, Queue, Event
 from TeamControl.process_workers.vision_runner import VisionProcess
 from TeamControl.process_workers.gcfsm_runner import GCfsm
 from TeamControl.process_workers.wm_runner import WMWorker
+from TeamControl.process_workers.robot_recv_runner import RobotRecv
 from TeamControl.world.model_manager import WorldModelManager
 
 from TeamControl.utils.Logger import LogSaver
 from TeamControl.dispatcher.dispatch import Dispatcher
 from TeamControl.utils.yaml_config import Config
+from TeamControl.onboard_vision import build_ip_map
 
 from TeamControl.robot.goalie import run_goalie
 from TeamControl.robot.striker import run_striker
@@ -45,6 +47,8 @@ def main():
     vision_q = Queue()
     gc_q = Queue()
     dispatch_q = Queue()
+    recv_q = Queue()
+    ip_map = build_ip_map(preset)
 
     logger = None
 
@@ -64,9 +68,12 @@ def main():
                 args=(is_running, logger, gc_q,
                       preset.us_yellow, preset.us_positive)),
         Process(target=WMWorker.run_worker,
-                args=(is_running, logger, wm, vision_q, gc_q)),
+                args=(is_running, logger, wm, vision_q, gc_q,
+                      recv_q, ip_map)),
         Process(target=Dispatcher.run_worker,
                 args=(is_running, logger, dispatch_q, preset)),
+        Process(target=RobotRecv.run_worker,
+                args=(is_running, logger, recv_q)),
     ]
 
     # ── Mode-specific foreground processes ────────────────────

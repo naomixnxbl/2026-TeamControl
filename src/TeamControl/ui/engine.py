@@ -28,7 +28,7 @@ from TeamControl.robot.coop import run_coop
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.onboard_vision import (
-    OnboardObservationStore, parse_packet,
+    OnboardObservationStore, build_ip_map,
 )
 
 
@@ -101,6 +101,7 @@ class SimEngine(QObject):
 
         self._onboard_store = OnboardObservationStore()
         self._ip_to_robot: dict[str, tuple[bool, int]] = {}
+        self._onboard_last_ts: dict[tuple[bool, int], float] = {}
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(16)  # ~60 fps
@@ -153,7 +154,7 @@ class SimEngine(QObject):
 
         self._config = Config()
         preset = self._config
-        self._rebuild_ip_to_robot(preset)
+        self._ip_to_robot = build_ip_map(preset)
 
         self._vision_q = Queue()
         self._gc_q = Queue()
@@ -178,7 +179,8 @@ class SimEngine(QObject):
                     daemon=True),
             Process(target=WMWorker.run_worker,
                     args=(self._is_running, None, self._wm,
-                          self._vision_q, self._gc_q),
+                          self._vision_q, self._gc_q,
+                          self._recv_q, dict(self._ip_to_robot)),
                     daemon=True),
             Process(target=Dispatcher.run_worker,
                     args=(self._is_running, None, self._dispatch_q, preset,
@@ -332,7 +334,7 @@ class SimEngine(QObject):
         except Exception as exc:
             self.log_message.emit(f"[engine] poll error: {exc}")
 
-        self._drain_recv_queue()
+        self._sync_onboard_from_wm()
         self._drain_dispatch_info()
 
     def _drain_dispatch_info(self):
@@ -347,48 +349,23 @@ class SimEngine(QObject):
         if latest is not None:
             self.dispatch_info.emit(latest)
 
-    def _drain_recv_queue(self):
-        """Pull all pending robot responses from the receiver queue."""
-        if self._recv_q is None:
+    def _sync_onboard_from_wm(self):
+        """Mirror new onboard observations from the shared WM into the
+        UI-local store and emit signals. The recv_q is drained by WMWorker
+        (the sole consumer); the WM is the source of truth."""
+        if not self._wm:
             return
-        batch = 0
-        while batch < 50:
-            try:
-                data, addr = self._recv_q.get_nowait()
-                addr_str = f"{addr[0]}:{addr[1]}" if addr else "?"
-                self.log_message.emit(f"[recv] {addr_str} → {data}")
-                self._ingest_onboard_packet(data, addr)
-                batch += 1
-            except Exception:
-                break
-
-    def _rebuild_ip_to_robot(self, preset):
-        mapping = {}
-        for is_yellow, team_dict in ((True, preset.yellow),
-                                     (False, preset.blue)):
-            if not team_dict:
+        try:
+            snapshot = self._wm.onboard_snapshot()
+        except Exception:
+            return
+        for key, obs in snapshot.items():
+            ts = getattr(obs, "recv_ts", 0.0)
+            if ts <= self._onboard_last_ts.get(key, 0.0):
                 continue
-            for _key, r in team_dict.items():
-                ip = r.get("ip")
-                sid = r.get("shellID")
-                if ip and sid is not None:
-                    mapping[ip] = (is_yellow, int(sid))
-        self._ip_to_robot = mapping
-
-    def _ingest_onboard_packet(self, data, addr):
-        obs = parse_packet(data)
-        if obs is None:
-            return
-        obs.recv_ts = time.time()
-        if obs.robot_id < 0 and addr:
-            m = self._ip_to_robot.get(addr[0])
-            if m is not None:
-                obs.is_yellow = bool(m[0])
-                obs.robot_id = int(m[1])
-        if obs.robot_id < 0:
-            return
-        self._onboard_store.put(obs)
-        self.onboard_packet.emit(obs, addr)
+            self._onboard_last_ts[key] = ts
+            self._onboard_store.put(obs)
+            self.onboard_packet.emit(obs, None)
 
     def _extract_snapshot(self, frame) -> FrameSnapshot:
         snap = FrameSnapshot()

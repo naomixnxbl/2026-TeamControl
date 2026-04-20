@@ -14,6 +14,7 @@ from multiprocessing import Queue,Manager
 import numpy as np
 import numpy.typing as npt
 import logging
+import time
 
 
 log = logging.getLogger()
@@ -48,6 +49,7 @@ class WorldModel:
         self._state = None # current state from GC
         self.robot_active = 6 # robots active
         self.blf_location = None # ball left field location
+        self._onboard_store = {}  # (is_yellow, robot_id) -> OnboardObservation
     
     def update_game_data(self,game_data):
         if game_data is None:
@@ -176,3 +178,20 @@ class WorldModel:
 
     def get_active_robots(self):
         return self.robot_active
+
+    # onboard vision — per-robot ball observations from RobotFramework
+    def put_onboard_obs(self, obs):
+        if obs is None or getattr(obs, "robot_id", -1) < 0:
+            return
+        self._onboard_store[(bool(obs.is_yellow), int(obs.robot_id))] = obs
+
+    def get_onboard_obs(self, is_yellow, robot_id, max_age=None):
+        obs = self._onboard_store.get((bool(is_yellow), int(robot_id)))
+        if obs is None:
+            return None
+        if max_age is not None and (time.time() - obs.recv_ts) > max_age:
+            return None
+        return obs
+
+    def onboard_snapshot(self):
+        return dict(self._onboard_store)

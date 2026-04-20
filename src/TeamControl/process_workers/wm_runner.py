@@ -5,6 +5,7 @@ from TeamControl.SSL.vision.frame import Frame
 from TeamControl.world.model import WorldModel
 from TeamControl.utils.Logger import LogSaver
 from TeamControl.process_workers.worker import BaseWorker
+from TeamControl.onboard_vision import parse_packet
 import time
 
 
@@ -12,22 +13,37 @@ class WMWorker(BaseWorker):
     def __init__(self,is_running,logger):
         super().__init__(is_running=is_running,logger=logger)
         self.delay_time = 0.001 # s
+        self.recv_q: Queue | None = None
+        self.ip_map: dict = {}
 
-        
+
     def setup(self, *args):
         """ setup for wm :
-        expected in order : 
-            wm = world model shared object
-            vision_q (Queue): the shared queue between vision and this process
-            gc_q (Queue) : the shared queue between gcfsm and this  process
+        expected in order :
+            wm       = world model shared object
+            vision_q = Queue from vision
+            gc_q     = Queue from gcfsm
+            recv_q   = Queue from RobotRecv (optional)
+            ip_map   = dict ip -> (is_yellow, robot_id) (optional)
         """
-        wm,vision_q,gc_q = args
-        
+        if len(args) >= 5:
+            wm, vision_q, gc_q, recv_q, ip_map = args[:5]
+        elif len(args) == 4:
+            wm, vision_q, gc_q, recv_q = args
+            ip_map = {}
+        else:
+            wm, vision_q, gc_q = args
+            recv_q, ip_map = None, {}
+
         self.wm:WorldModel = wm
         self.vision_q:Queue = vision_q
         self.gc_q:Queue = gc_q
-        self.logger.info(f"[wmr] : L setup completed")
-            
+        self.recv_q = recv_q
+        self.ip_map = ip_map or {}
+        self.logger.info(
+            f"[wmr] : L setup completed (recv_q={'on' if recv_q else 'off'}, "
+            f"ip_map={len(self.ip_map)} entries)")
+
     def step(self):
         if not self.vision_q.empty() :
             item = self.vision_q.get()
@@ -37,12 +53,33 @@ class WMWorker(BaseWorker):
             elif isinstance(item,GeometryData):
                 self.logger.info("[wmr] : Updating World Model Geometry")
                 self.wm.update_geometry(item)
-                        
+
         if not self.gc_q.empty():
             new_info = self.gc_q.get_nowait()
             self.logger.info(f"[wmr] : Updating World Model Game Info {new_info[0]}")
             self.wm.update_game_data(new_info)
-        
+
+        if self.recv_q is not None:
+            drained = 0
+            while drained < 32:
+                try:
+                    data, addr = self.recv_q.get_nowait()
+                except Exception:
+                    break
+                obs = parse_packet(data)
+                if obs is None:
+                    drained += 1
+                    continue
+                obs.recv_ts = time.time()
+                if obs.robot_id < 0 and addr:
+                    m = self.ip_map.get(addr[0])
+                    if m is not None:
+                        obs.is_yellow = bool(m[0])
+                        obs.robot_id = int(m[1])
+                if obs.robot_id >= 0:
+                    self.wm.put_onboard_obs(obs)
+                drained += 1
+
         time.sleep(self.delay_time)
     
     def run(self):
