@@ -32,63 +32,133 @@ class OnboardObservation:
     is_yellow: bool = True
 
 
+# Map the robot's human-readable keys (lower-cased, whitespace
+# collapsed) to our canonical short keys.
+_KEY_ALIASES = {
+    "robot state": "state",
+    "state": "state",
+    "battery voltage": "voltage",
+    "voltage": "voltage",
+    "ball detection": "ball",
+    "ball detected": "ball",
+    "ball": "ball",
+    "pixel x": "px",
+    "pixel_x": "px",
+    "px": "px",
+    "pixel y": "py",
+    "pixel_y": "py",
+    "py": "py",
+    "radius": "radius",
+    "r": "radius",
+    "bearing": "bearing",
+    "confidence": "confidence",
+    "conf": "confidence",
+    "timestamp": "ts_ms",
+    "ts_ms": "ts_ms",
+    "robot id": "robot_id",
+    "robot_id": "robot_id",
+    "id": "robot_id",
+    "yellow": "yellow",
+    "is yellow": "yellow",
+    "is_yellow": "yellow",
+    "team": "team",
+}
+
+
+def _normalize_key(raw):
+    k = " ".join(raw.strip().lower().split())  # collapse whitespace
+    return _KEY_ALIASES.get(k, k)
+
+
 def _coerce(key, value):
+    v = value.strip() if isinstance(value, str) else value
     try:
         if key == "ball":
-            return bool(int(value))
-        if key in ("px", "py", "r", "radius", "bearing", "conf",
-                   "confidence", "voltage"):
-            return float(value)
-        if key in ("ts_ms", "robot_id", "id"):
-            return int(float(value))
-        if key in ("yellow", "is_yellow"):
-            return bool(int(value))
+            # accept "1"/"0", "true"/"false", "yes"/"no", "detected"/"none"
+            if isinstance(v, str):
+                low = v.lower()
+                if low in ("1", "true", "yes", "detected", "found", "on", "active"):
+                    return True
+                if low in ("0", "false", "no", "none", "off", "lost", "absent"):
+                    return False
+                return bool(int(float(v)))
+            return bool(v)
+        if key in ("px", "py", "radius", "bearing", "confidence", "voltage"):
+            return float(v)
+        if key in ("ts_ms", "robot_id"):
+            return int(float(v))
+        if key == "yellow":
+            if isinstance(v, str):
+                low = v.lower()
+                if low in ("yellow", "1", "true", "y"):
+                    return True
+                if low in ("blue", "0", "false", "b"):
+                    return False
+                return bool(int(float(v)))
+            return bool(v)
+        if key == "team":
+            if isinstance(v, str):
+                low = v.lower()
+                if "yellow" in low:
+                    return True
+                if "blue" in low:
+                    return False
     except (ValueError, TypeError):
         return None
-    return value
+    return v
 
 
 def parse_packet(payload):
     """Parse a RobotFramework telemetry packet.
 
-    Expected format: `state=active,voltage=...,ball=1,px=160,py=120,...`
-    Unknown keys are ignored. Returns an OnboardObservation with any
-    missing fields left at their defaults.
+    Accepts both:
+      `state=active,voltage=22.8,ball=1,px=160,py=120,bearing=0.1,conf=0.9`
+      `Robot State: Active, Battery Voltage: 22.8, Ball Detection: 1, ...`
+
+    Tokens are `,`-separated. Within a token the key/value separator may
+    be either `=` or `:`. Unknown keys are ignored. Returns an
+    `OnboardObservation` with missing fields left at defaults, or None
+    if the payload has no recognisable key/value pairs at all.
     """
     if isinstance(payload, (bytes, bytearray)):
         try:
             payload = payload.decode("utf-8", errors="replace")
         except Exception:
             return None
-    if not isinstance(payload, str) or "=" not in payload:
+    if not isinstance(payload, str):
+        return None
+    if "=" not in payload and ":" not in payload:
         return None
 
     kv = {}
     for token in payload.strip().split(","):
-        if "=" not in token:
+        if "=" in token:
+            k, v = token.split("=", 1)
+        elif ":" in token:
+            k, v = token.split(":", 1)
+        else:
             continue
-        k, v = token.split("=", 1)
-        k = k.strip().lower()
-        v = v.strip()
-        parsed = _coerce(k, v)
+        key = _normalize_key(k)
+        parsed = _coerce(key, v)
         if parsed is not None:
-            kv[k] = parsed
+            kv[key] = parsed
+
+    if not kv:
+        return None
 
     obs = OnboardObservation()
     if "ball" in kv:
         obs.found = bool(kv["ball"])
     obs.px = float(kv.get("px", 0.0))
     obs.py = float(kv.get("py", 0.0))
-    obs.radius = float(kv.get("r", kv.get("radius", 0.0)))
+    obs.radius = float(kv.get("radius", 0.0))
     obs.bearing = float(kv.get("bearing", 0.0))
-    obs.confidence = float(kv.get("conf", kv.get("confidence", 0.0)))
+    obs.confidence = float(kv.get("confidence", 0.0))
     obs.robot_ts_ms = int(kv.get("ts_ms", 0))
     if "robot_id" in kv:
         obs.robot_id = int(kv["robot_id"])
-    elif "id" in kv:
-        obs.robot_id = int(kv["id"])
     if "yellow" in kv:
         obs.is_yellow = bool(kv["yellow"])
-    elif "is_yellow" in kv:
-        obs.is_yellow = bool(kv["is_yellow"])
+    elif "team" in kv:
+        obs.is_yellow = bool(kv["team"])
     return obs
