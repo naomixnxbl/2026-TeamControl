@@ -20,3 +20,7 @@ chmod 777 installGameController.sh
 
 This will then install ssl-game-controller, ssl-status-board, TIGERS AutoRef, ERFORCE AutoRef onto your Home Directory, within the folder : "ssl-software"
 
+### Installing a distribution binary : 
+```powershell
+.\scripts\build_windows.ps1
+```

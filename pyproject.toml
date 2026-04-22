@@ -4,7 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "TeamControl"
-requires-python = ">=3.9"
+version = "0.1.0"
+description = "RoboCup SSL team control software for Team TurtleRabbits."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Team TurtleRabbits" }
+]
+keywords = [
+    "robocup",
+    "ssl",
+    "robotics",
+    "grsim",
+    "robot-control"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+
 dependencies = [
     "numpy",
     "matplotlib",
@@ -16,20 +39,33 @@ dependencies = [
     "networkx",
     "pygame",
     "PySide6",
-    # behaviour_tree is included locally in this repo for testing
 ]
-
-dynamic = [
-    "version"
-]
-
-[tools.setuptools.packages.find]
-where = ["src"]
-
-[tools.setuptools.dynamic]
-version = {attr = "TeamControl.__version__"}
 
 [project.optional-dependencies]
 testing = [
     "pytest",
+]
+build = [
+    "pyinstaller",
+]
+dev = [
+    "pytest",
+    "pyinstaller",
+]
+
+[project.urls]
+Homepage = "https://github.com/WSU-TurtleRabbit/2026-TeamControl"
+Repository = "https://github.com/WSU-TurtleRabbit/2026-TeamControl"
+Issues = "https://github.com/WSU-TurtleRabbit/2026-TeamControl/issues"
+
+[project.scripts]
+teamcontrol = "main:main"
+teamcontrol-ui = "ui_main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+TeamControl = [
+    "utils/*.yaml",
 ]
