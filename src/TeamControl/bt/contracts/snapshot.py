@@ -1,0 +1,65 @@
+"""Snapshot — read-only world state fed into the decision pipeline each tick.
+
+R001: Snapshot is the sole input to behaviour trees. It is frozen (immutable)
+and carries no behaviour or mutation methods. All world state lives here;
+the blackboard holds decision state only.
+"""
+from __future__ import annotations
+
+import dataclasses
+from enum import Enum
+from typing import Sequence
+
+
+class GamePhase(str, Enum):
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+    HALTED = "HALTED"
+
+
+@dataclasses.dataclass(frozen=True)
+class RobotState:
+    """Position and orientation of a single robot at a given tick."""
+    robot_id: int
+    position: tuple[float, float]
+    orientation: float  # radians
+
+
+@dataclasses.dataclass(frozen=True)
+class RefereeState:
+    """Referee-reported game state at a given tick."""
+    game_phase: GamePhase
+    score: tuple[int, int]  # (own, opponent)
+
+
+@dataclasses.dataclass(frozen=True)
+class Snapshot:
+    """Immutable world state snapshot — the sole read-only input to the BT pipeline.
+
+    One Snapshot is produced per tick by the network ingestion process and
+    passed (read-only) through: Coordinator → Behaviour trees → Skill functions.
+
+    No mutation is possible after construction (frozen dataclass).
+    No world state belongs on the blackboard; if a tree node needs world data,
+    it reads from the Snapshot passed to it.
+    """
+    ball_position: tuple[float, float]
+    ball_velocity: tuple[float, float]
+    own_robots: tuple[RobotState, ...]
+    opponent_robots: tuple[RobotState, ...]
+    referee_state: RefereeState
+
+    def __init__(
+        self,
+        ball_position: tuple[float, float],
+        ball_velocity: tuple[float, float],
+        own_robots: Sequence[RobotState],
+        opponent_robots: Sequence[RobotState],
+        referee_state: RefereeState,
+    ) -> None:
+        # Use object.__setattr__ because the dataclass is frozen.
+        object.__setattr__(self, "ball_position", tuple(ball_position))
+        object.__setattr__(self, "ball_velocity", tuple(ball_velocity))
+        object.__setattr__(self, "own_robots", tuple(own_robots))
+        object.__setattr__(self, "opponent_robots", tuple(opponent_robots))
+        object.__setattr__(self, "referee_state", referee_state)
