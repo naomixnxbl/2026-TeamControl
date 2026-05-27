@@ -2,6 +2,7 @@
 *.png
 *_samples.png
 .vscode
+.spacialdesk/
 
 bin/
 lib/
