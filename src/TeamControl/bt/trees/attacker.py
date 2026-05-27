@@ -138,9 +138,14 @@ class HasClearShot(py_trees.behaviour.Behaviour):
 
 
 class ChaseBall(py_trees.behaviour.Behaviour):
-    """Write IntentMove(target=ball_position). Always SUCCESS.
+    """Write IntentMove(target=ball_position, orientation=toward_ball). SUCCESS.
 
-    Used as the fallback when we don't have ball control.
+    Fallback when we don't have ball control. Crucially, this sets
+    ``target_orientation`` to the robot→ball bearing so the robot rotates to
+    face the ball as it closes in. Without this, the move_to skill defaults
+    target_orientation to 0.0 — the robot stays pointed east, holonomically
+    drifts toward the ball with the ball arriving behind/beside the kicker,
+    and HasBallControl never succeeds because its heading check fails.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -152,9 +157,16 @@ class ChaseBall(py_trees.behaviour.Behaviour):
         bb = self._tree._blackboard_ref[0]
         if snap is None or bb is None:
             return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        angle_to_ball = math.atan2(
+            snap.ball_position[1] - robot.position[1],
+            snap.ball_position[0] - robot.position[0],
+        )
         bb.current_intent = IntentMove(
             target_pos=snap.ball_position,
-            target_orientation=None,
+            target_orientation=angle_to_ball,
         )
         bb.intent_source = "ChaseBall"
         return py_trees.common.Status.SUCCESS

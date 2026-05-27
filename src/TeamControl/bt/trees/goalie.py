@@ -38,6 +38,13 @@ from TeamControl.bt.contracts.snapshot import Snapshot
 NEUTRAL_GOAL_POSITION: tuple[float, float] = (-4.0, 0.0)  # default goalie position in front of own goal
 GOALIE_ROBOT_ID: int = 0   # robot ID 0 is always GOALIE
 
+# us_positive convention: this tree (and the attacker/defender/supporter)
+# all assume us_positive=True means "we attack +x → own goal at -x". The
+# value handed to this tree at construction is sourced from
+# ``run_bt_v2_process``, which NEGATES ``wm.us_positive()`` before passing it
+# in — wm reports the inverse of the codebase convention in our grSim+GC
+# setup. See the comment in run_bt_v2_process.py for the full story.
+
 
 # -----------------------------------------------------------------------
 # Condition / action nodes
@@ -105,8 +112,9 @@ class DoBallTrajectory(py_trees.behaviour.Behaviour):
         self._tree = tree_ref
 
     def update(self) -> py_trees.common.Status:
-        # v1: linear extrapolation not yet implemented — use neutral position.
-        self._tree.predicted_intercept = NEUTRAL_GOAL_POSITION
+        # v1: linear extrapolation not yet implemented — use neutral position
+        # mirrored to the side we're actually defending.
+        self._tree.predicted_intercept = self._tree.neutral_goal_position
         return py_trees.common.Status.SUCCESS
 
 
@@ -168,14 +176,26 @@ class GoalieTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self) -> None:
+    def __init__(self, us_positive: bool = True) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
+        # Mirror NEUTRAL_GOAL_POSITION onto our actual half. The constant
+        # assumes us_positive=True (own goal at -x); when we attack the
+        # negative half instead, negate x so the goalie parks in front of
+        # OUR goal, not the opponent's. This is the same convention as the
+        # attacker/defender/supporter trees; see also the inversion note in
+        # run_bt_v2_process.py for why the value of us_positive itself is
+        # negated at the entry point.
+        self.us_positive = us_positive
+        self.neutral_goal_position: tuple[float, float] = (
+            NEUTRAL_GOAL_POSITION if us_positive
+            else (-NEUTRAL_GOAL_POSITION[0], NEUTRAL_GOAL_POSITION[1])
+        )
         # v1 state: single-frame ball history and trajectory prediction
         self.ball_history: tuple[float, float] | None = None
-        self.predicted_intercept: tuple[float, float] = NEUTRAL_GOAL_POSITION
+        self.predicted_intercept: tuple[float, float] = self.neutral_goal_position
         # Build tree and expose IsBallComing node for testability
         self.is_ball_coming_node = IsBallComing(self)
         self.root = self._build_tree()
