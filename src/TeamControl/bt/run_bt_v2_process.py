@@ -76,10 +76,10 @@ def _open_log_file() -> Path:
 def _build_coordinator(us_positive: bool) -> Coordinator:
     return Coordinator(
         trees={
-            RoleType.GOALIE: GoalieTree(),
-            RoleType.DEFENDER: DefenderTree(),
-            RoleType.SUPPORTER: SupporterTree(),
-            RoleType.ATTACKER: AttackerTree(),
+            RoleType.GOALIE: GoalieTree(us_positive=us_positive),
+            RoleType.DEFENDER: DefenderTree(us_positive=us_positive),
+            RoleType.SUPPORTER: SupporterTree(us_positive=us_positive),
+            RoleType.ATTACKER: AttackerTree(us_positive=us_positive),
         },
         us_positive=us_positive,
     )
@@ -103,15 +103,23 @@ def run_bt_v2_process(
     if robot_ids is None:
         robot_ids = DEFAULT_ROBOT_IDS
 
-    is_yellow = bool(wm.us_yellow())
+    # NOTE: do NOT cache wm.us_yellow() / wm.us_positive(). The GC FSM
+    # (gcfsm_runner.check_color_side) can flip these mid-run when referee
+    # messages name the teams — caching makes RobotCommands stamp the stale
+    # team colour, which makes the wrong team move in grSim.
     coordinator = _build_coordinator(us_positive=bool(wm.us_positive()))
+    coordinator_us_positive = bool(wm.us_positive())
     log_path = _open_log_file()
     log_fh = log_path.open("w", buffering=1)  # line-buffered
-    print(f"[BT] started — yellow={is_yellow}, robot_ids={robot_ids}")
+    print(f"[BT] started — yellow={bool(wm.us_yellow())}, "
+          f"us_positive={coordinator_us_positive}, robot_ids={robot_ids}")
     print(f"[BT] trace log → {log_path}")
 
     last_phase = None
     tick_count = 0
+    # Track the previous tick's intent source per robot so we can print
+    # a single line whenever the active BT node changes.
+    last_source: dict[int, str | None] = {}
 
     try:
         while is_running.is_set():
@@ -129,13 +137,33 @@ def run_bt_v2_process(
 
             coordinator.tick(snapshot, robot_ids)
 
+            # Print one line whenever a robot's active BT node changes.
+            for rid in robot_ids:
+                bb = coordinator.blackboards.get(rid)
+                if bb is None:
+                    continue
+                src = bb.intent_source
+                if src != last_source.get(rid):
+                    print(
+                        f"[BT] r{rid} ({bb.current_role.value}) "
+                        f"node={last_source.get(rid)} → {src}",
+                        flush=True,
+                    )
+                    last_source[rid] = src
+
             tick_count += 1
 
             # Log to disk every Nth tick.
             if tick_count % LOG_EVERY_N_TICKS == 0:
+                # Record the team-colour flag as-of this tick so we can spot
+                # GC-induced flips after the fact (gcfsm_runner.check_color_side
+                # rewrites wm._us_yellow whenever a referee message arrives).
+                raw_uy = wm.us_yellow()
                 record = {
                     "tick": tick_count,
                     "phase": phase.value,
+                    "us_yellow_raw": raw_uy,
+                    "us_yellow_bool": bool(raw_uy),
                     "ball": list(snapshot.ball_position),
                     "robots": {},
                 }
@@ -151,6 +179,7 @@ def run_bt_v2_process(
                         "pos": list(robot.position) if robot else None,
                         "orientation": robot.orientation if robot else None,
                         "intent": _intent_to_dict(bb.current_intent),
+                        "intent_source": bb.intent_source,
                     }
                 log_fh.write(json.dumps(record) + "\n")
 
@@ -161,7 +190,10 @@ def run_bt_v2_process(
                 for rid in robot_ids:
                     bb = coordinator.blackboards.get(rid)
                     if bb and bb.current_intent:
-                        print(f"  robot {rid} ({bb.current_role.value}): {bb.current_intent}", flush=True)
+                        print(f"  robot {rid} ({bb.current_role.value}): {bb.current_intent} intent source={bb.intent_source}", flush=True)
+
+            # Re-read team colour every tick (GC FSM may have flipped it).
+            is_yellow = bool(wm.us_yellow())
 
             if phase in _HALT_PHASES:
                 _send_stop_commands(robot_ids, is_yellow, dispatcher_q)
