@@ -201,6 +201,8 @@ class Coordinator:
     def __init__(self, trees: dict[RoleType, Any], us_positive: bool = True) -> None:
         self.trees = trees
         self.blackboards: dict[int, RobotBlackboard] = {}
+        self._free_kick_kicker_id: int | None = None
+        self._last_phase: GamePhase | None = None
         # Pre-compute mirrored position tables if we attack the negative goal.
         if us_positive:
             self._kickoff_pos = KICKOFF_POSITIONS
@@ -225,6 +227,10 @@ class Coordinator:
         self._ensure_blackboards(snapshot, robot_ids)
 
         phase = snapshot.referee_state.game_phase
+
+        if phase != self._last_phase:
+            self._free_kick_kicker_id = None
+            self._last_phase = phase
 
         if phase in (GamePhase.HALTED, GamePhase.HALF_TIME):
             # Robots must not move — produce no intents so the dispatcher
@@ -393,23 +399,24 @@ class Coordinator:
         return intents
 
     def _handle_free_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
-        """FREE_KICK: closest non-goalie robot kicks; others hold current positions."""
-        # Pick the closest robot to the ball (excluding goalie) as the kicker.
-        kicker_id: int | None = None
-        best_dist = float("inf")
-        for robot_id in robot_ids:
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
-                continue
-            robot = _find_robot(snapshot, robot_id)
-            if robot is None:
-                continue
-            d = math.hypot(
-                robot.position[0] - snapshot.ball_position[0],
-                robot.position[1] - snapshot.ball_position[1],
-            )
-            if d < best_dist:
-                best_dist = d
-                kicker_id = robot_id
+        """FREE_KICK: closest non-goalie robot kicks; others run BT."""
+        # Lock in the kicker once for the duration of the FREE_KICK phase.
+        if self._free_kick_kicker_id is None:
+            best_dist = float("inf")
+            for robot_id in robot_ids:
+                if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                    continue
+                robot = _find_robot(snapshot, robot_id)
+                if robot is None:
+                    continue
+                d = math.hypot(
+                    robot.position[0] - snapshot.ball_position[0],
+                    robot.position[1] - snapshot.ball_position[1],
+                )
+                if d < best_dist:
+                    best_dist = d
+                    self._free_kick_kicker_id = robot_id
+        kicker_id = self._free_kick_kicker_id
 
         from TeamControl.bt.contracts.intent import IntentKick
         intents: list[Intent] = []
@@ -419,7 +426,16 @@ class Coordinator:
                 continue
             bb = self.blackboards[robot_id]
             if robot_id == kicker_id:
-                bb.current_intent = IntentKick(target_pos=OPP_GOAL)
+                dist_to_ball = math.hypot(
+                    robot.position[0] - snapshot.ball_position[0],
+                    robot.position[1] - snapshot.ball_position[1],
+                )
+                if dist_to_ball > 0.2:
+                    bb.current_intent = IntentMove(
+                        target_pos=snapshot.ball_position, target_orientation=None
+                    )
+                else:
+                    bb.current_intent = IntentKick(target_pos=OPP_GOAL)
                 intents.append(bb.current_intent)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 bb.current_intent = IntentMove(
