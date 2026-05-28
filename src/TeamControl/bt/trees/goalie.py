@@ -35,7 +35,6 @@ from TeamControl.bt.contracts.snapshot import Snapshot
 # Constants
 # -----------------------------------------------------------------------
 
-NEUTRAL_GOAL_POSITION: tuple[float, float] = (-4.0, 0.0)  # default goalie position in front of own goal
 GOALIE_ROBOT_ID: int = 0   # robot ID 0 is always GOALIE
 
 
@@ -106,7 +105,7 @@ class DoBallTrajectory(py_trees.behaviour.Behaviour):
 
     def update(self) -> py_trees.common.Status:
         # v1: linear extrapolation not yet implemented — use neutral position.
-        self._tree.predicted_intercept = NEUTRAL_GOAL_POSITION
+        self._tree.predicted_intercept = self._tree._neutral_goal_position
         return py_trees.common.Status.SUCCESS
 
 
@@ -168,14 +167,17 @@ class GoalieTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self) -> None:
+    def __init__(self, us_positive: bool = False) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
         # v1 state: single-frame ball history and trajectory prediction
         self.ball_history: tuple[float, float] | None = None
-        self.predicted_intercept: tuple[float, float] = NEUTRAL_GOAL_POSITION
+        # Own goal is at +x when us_positive=True, -x otherwise.
+        neutral_x = 4.0 if us_positive else -4.0
+        self._neutral_goal_position: tuple[float, float] = (neutral_x, 0.0)
+        self.predicted_intercept: tuple[float, float] = self._neutral_goal_position
         # Build tree and expose IsBallComing node for testability
         self.is_ball_coming_node = IsBallComing(self)
         self.root = self._build_tree()

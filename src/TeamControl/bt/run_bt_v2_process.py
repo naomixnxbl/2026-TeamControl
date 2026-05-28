@@ -53,7 +53,7 @@ TICK_PERIOD: float = 0.01
 def _build_coordinator(us_positive: bool) -> Coordinator:
     c = Coordinator(
         trees={
-            RoleType.GOALIE: GoalieTree(),
+            RoleType.GOALIE: GoalieTree(us_positive=us_positive),
             RoleType.DEFENDER: DefenderTree(),
             RoleType.SUPPORTER: SupporterTree(),
             RoleType.ATTACKER: AttackerTree(),

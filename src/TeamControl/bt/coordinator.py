@@ -58,6 +58,17 @@ OWN_GOAL_LINE_X: float = -4.5
 # NOTE: ideally read this from wm.field.penalty_spot_from_field_line_dist if available.
 PENALTY_SPOT: tuple[float, float] = (3.5, 0.0)
 
+# Home positions robots return to during STOPPED — spread across own half (negative-x for us_positive=False).
+# Mirrored in Coordinator.__init__ when us_positive=True.
+STOPPED_HOME_POSITIONS: dict[int, tuple[float, float]] = {
+    0: (-4.2,  0.0),   # goalie near own goal
+    1: (-2.5, -1.0),
+    2: (-2.5,  1.0),
+    3: (-1.5,  0.0),
+    4: (-1.5, -1.5),
+    5: (-1.5,  1.5),
+}
+
 # FREE_KICK support positions — spread around ball area at legal distance (>0.5m from ball).
 # Kicker is assigned dynamically; these are fallback slots for non-kicker, non-goalie robots.
 FREE_KICK_SUPPORT_POSITIONS: list[tuple[float, float]] = [
@@ -76,9 +87,9 @@ KICKOFF_POSITIONS: dict[int, tuple[float, float]] = {
     0: (-4.0, 0.0),    # goalie — in front of own goal
     1: (-2.0, -1.5),   # defender left
     2: (-2.0,  1.5),   # defender right
-    3: (-1.0, -1.0),   # supporter left
+    3: (-0.3,  0.0),   # kicker — inside center circle, 30 cm behind ball on attack axis
     4: (-1.0,  1.0),   # supporter right
-    5: (0.0,   0.0),   # attacker — at centre, inside circle (§5.3.2 allows this)
+    5: (-1.0, -1.0),   # supporter left
 }
 
 # PENALTY_SHOOT: attacker at penalty spot, ALL others ≥ 1m behind ball (x ≤ 2.5).
@@ -213,12 +224,16 @@ class Coordinator:
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
+        self._kickoff_kicker_id: int | None = None
+        self._kickoff_kicker_ready: bool = False
+        self._kickoff_needs_slot: set[int] = set()  # robots that must reach their slot
         self._last_phase: GamePhase | None = None
         if us_positive:
             # We are on +x half → own goal at +x, opponent goal at -x, attack toward -x.
             self._kickoff_pos = _mirror_positions(KICKOFF_POSITIONS)
             self._penalty_shoot_pos = _mirror_positions(PENALTY_SHOOT_POSITIONS)
             self._penalty_defend_pos = _mirror_positions(PENALTY_DEFEND_POSITIONS)
+            self._stopped_home = _mirror_positions(STOPPED_HOME_POSITIONS)
             self._opp_goal: tuple[float, float] = OWN_GOAL   # (-4.5, 0)
             self._own_goal_line_x: float = -OWN_GOAL_LINE_X  # +4.5
             self._attack_sign: float = -1.0
@@ -230,6 +245,7 @@ class Coordinator:
             self._opp_goal = OPP_GOAL                         # (4.5, 0)
             self._own_goal_line_x = OWN_GOAL_LINE_X           # -4.5
             self._attack_sign: float = 1.0
+            self._stopped_home = dict(STOPPED_HOME_POSITIONS)
 
     # ------------------------------------------------------------------
     # Public API
@@ -250,6 +266,18 @@ class Coordinator:
             self._free_kick_kicker_id = None
             self._free_kick_support_slots = {}
             self._free_kick_kicker_ready = False
+            # Preserve kickoff state when GC skips straight from KICKOFF/PREPARE_KICKOFF
+            # to RUNNING before the kicker has fired — we finish the kick in RUNNING.
+            kickoff_carry = (
+                self._last_phase in (GamePhase.PREPARE_KICKOFF, GamePhase.KICKOFF)
+                and phase == GamePhase.RUNNING
+                and self._kickoff_kicker_id is not None
+                and not self._kickoff_kicker_ready
+            )
+            if not kickoff_carry:
+                self._kickoff_kicker_id = None
+                self._kickoff_kicker_ready = False
+            self._kickoff_needs_slot = set()
             self._last_phase = phase
 
         if phase in (GamePhase.HALTED, GamePhase.HALF_TIME):
@@ -264,7 +292,9 @@ class Coordinator:
             return self._handle_ball_placement(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_KICKOFF:
-            return self._handle_fixed_positions(snapshot, robot_ids, self._kickoff_pos)
+            # Lock in the kicker now so it carries into KICKOFF/RUNNING.
+            self._lock_kickoff_kicker(snapshot, robot_ids)
+            return self._handle_prepare_kickoff(snapshot, robot_ids)
 
         if phase == GamePhase.KICKOFF:
             return self._handle_kickoff(snapshot, robot_ids)
@@ -278,7 +308,14 @@ class Coordinator:
         if phase == GamePhase.PENALTY_DEFEND:
             return self._handle_penalty_defend(snapshot, robot_ids)
 
-        # RUNNING — normal role-tree dispatch.
+        # RUNNING — if a kickoff kick hasn't fired yet, finish it first.
+        if self._kickoff_kicker_id is not None:
+            result = self._handle_kickoff(snapshot, robot_ids)
+            if self._kickoff_kicker_ready:
+                # Kick was just issued — clear state so next tick returns to normal.
+                self._kickoff_kicker_id = None
+                self._kickoff_kicker_ready = False
+            return result
         return self._normal_tick(snapshot, robot_ids)
 
     # ------------------------------------------------------------------
@@ -328,21 +365,106 @@ class Coordinator:
             intents.append(bb.current_intent)
         return intents
 
-    def _handle_kickoff(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
-        """KICKOFF: attacker moves to ball at centre; others hold kickoff spots."""
+    def _handle_prepare_kickoff(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """PREPARE_KICKOFF: kicker moves to center-circle prep spot; others stay in own half.
+
+        Rule §5.3.2: all robots in own half excluding center circle, except one
+        kicker who may be anywhere inside the center circle. No robot touches ball.
+        Non-kicker robots hold their current position if already valid; otherwise
+        they move just inside own half at their current y.
+        """
+        CENTER_CIRCLE_R = 0.5  # m
+        kicker_id = self._kickoff_kicker_id  # already locked by caller
+        kicker_prep_x = -0.3 * self._attack_sign  # 30 cm behind ball on attack axis
+
         intents: list[Intent] = []
         for robot_id in robot_ids:
-            if _find_robot(snapshot, robot_id) is None:
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
                 continue
             bb = self.blackboards[robot_id]
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.ATTACKER:
-                # Drive to the ball (which should be at centre).
+
+            if robot_id == kicker_id:
                 bb.current_intent = IntentMove(
-                    target_pos=snapshot.ball_position, target_orientation=None
+                    target_pos=(kicker_prep_x, 0.0), target_orientation=None
                 )
             else:
-                target = self._kickoff_pos.get(robot_id, (0.0, 0.0))
+                rx, ry = robot.position
+                in_own_half = rx * self._attack_sign < 0
+                dist_center = math.hypot(rx, ry)
+                outside_circle = dist_center > CENTER_CIRCLE_R
+                slot = self._kickoff_pos.get(robot_id)
+                # Mark robot as needing to reach its slot if it starts in opponent half.
+                if not (in_own_half and outside_circle):
+                    self._kickoff_needs_slot.add(robot_id)
+                # Clear the flag once the robot arrives at its slot (within 0.15m).
+                if robot_id in self._kickoff_needs_slot and slot is not None:
+                    dist_to_slot = math.hypot(rx - slot[0], ry - slot[1])
+                    if dist_to_slot < 0.15:
+                        self._kickoff_needs_slot.discard(robot_id)
+                if robot_id in self._kickoff_needs_slot and slot is not None:
+                    target = slot
+                elif in_own_half and outside_circle:
+                    target = robot.position  # already valid — hold
+                else:
+                    target = slot if slot is not None else robot.position
                 bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
+
+            intents.append(bb.current_intent)
+        return intents
+
+    def _handle_kickoff(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """KICKOFF: closest non-goalie robot kicks; others hold kickoff positions.
+
+        Same two-stage approach as FREE_KICK: robot goes to approach_target first
+        (behind ball on attack axis), then drives into ball once aligned.
+        """
+        self._lock_kickoff_kicker(snapshot, robot_ids)
+        kicker_id = self._kickoff_kicker_id
+        from TeamControl.bt.contracts.intent import IntentKick
+        intents: list[Intent] = []
+
+        for robot_id in robot_ids:
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            bb = self.blackboards[robot_id]
+
+            if robot_id == kicker_id:
+                bx, by = snapshot.ball_position
+                dist_to_ball = math.hypot(robot.position[0] - bx, robot.position[1] - by)
+                approach_x = bx - 0.25 * self._attack_sign
+                dist_to_approach = math.hypot(
+                    robot.position[0] - approach_x, robot.position[1] - by
+                )
+                on_correct_side = (robot.position[0] - bx) * self._attack_sign < -0.05
+                if dist_to_ball < 0.15 and on_correct_side:
+                    self._kickoff_kicker_ready = True
+                if self._kickoff_kicker_ready:
+                    bb.current_intent = IntentKick(target_pos=self._opp_goal)
+                elif dist_to_approach < 0.10:
+                    bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
+                else:
+                    bb.current_intent = IntentMove(
+                        target_pos=(approach_x, by), target_orientation=None
+                    )
+            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                bb.current_intent = IntentMove(
+                    target_pos=robot.position, target_orientation=None
+                )
+            else:
+                # Keep moving to own half if not there yet; otherwise hold.
+                CENTER_CIRCLE_R = 0.5
+                rx, ry = robot.position
+                in_own_half = rx * self._attack_sign < 0
+                outside_circle = math.hypot(rx, ry) > CENTER_CIRCLE_R
+                if in_own_half and outside_circle:
+                    target = robot.position
+                else:
+                    safe_x = -self._attack_sign * max(abs(rx), CENTER_CIRCLE_R + 0.1)
+                    target = (safe_x, ry)
+                bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
+
             intents.append(bb.current_intent)
         return intents
 
@@ -547,6 +669,37 @@ class Coordinator:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    # Robot designated to take kickoffs — pre-positioned at center circle during PREPARE_KICKOFF.
+    KICKOFF_KICKER_ID: int = 3
+
+    def _lock_kickoff_kicker(self, snapshot: Snapshot, robot_ids: list[int]) -> None:
+        """Lock in the designated kickoff kicker (idempotent).
+
+        Robot 5 is always the kicker — it is pre-positioned inside the center
+        circle during PREPARE_KICKOFF and is the only robot allowed there per §5.3.2.
+        Falls back to closest non-goalie if robot 5 is absent from the snapshot.
+        """
+        if self._kickoff_kicker_id is not None:
+            return
+        if self.KICKOFF_KICKER_ID in robot_ids and _find_robot(snapshot, self.KICKOFF_KICKER_ID):
+            self._kickoff_kicker_id = self.KICKOFF_KICKER_ID
+            return
+        # Fallback: robot 5 absent — pick closest non-goalie.
+        best_dist = float("inf")
+        for robot_id in robot_ids:
+            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                continue
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            d = math.hypot(
+                robot.position[0] - snapshot.ball_position[0],
+                robot.position[1] - snapshot.ball_position[1],
+            )
+            if d < best_dist:
+                best_dist = d
+                self._kickoff_kicker_id = robot_id
 
     def _ensure_blackboards(self, snapshot: Snapshot, robot_ids: list[int]) -> None:
         """Create blackboards for any robot we haven't seen before."""
