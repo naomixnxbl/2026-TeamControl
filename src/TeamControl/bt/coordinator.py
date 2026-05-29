@@ -519,8 +519,10 @@ class Coordinator:
                         target_pos=(approach_x, by), target_orientation=None
                     )
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                by = snapshot.ball_position[1]
+                target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
                 bb.current_intent = IntentMove(
-                    target_pos=robot.position, target_orientation=None
+                    target_pos=target, target_orientation=None
                 )
             else:
                 # Keep moving to own half if not there yet; otherwise hold.
@@ -668,8 +670,10 @@ class Coordinator:
                     )
                 intents.append(bb.current_intent)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                by = snapshot.ball_position[1]
+                target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
                 bb.current_intent = IntentMove(
-                    target_pos=robot.position, target_orientation=None
+                    target_pos=target, target_orientation=None
                 )
                 intents.append(bb.current_intent)
             else:
