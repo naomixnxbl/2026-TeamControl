@@ -32,7 +32,7 @@ def main():
     # Game controller FSM — reads referee messages and fills gc_q with game states
     gc_wkr = Process(
         target=GCfsm.run_worker,
-        args=(is_running, None, gc_q, preset.us_yellow, preset.us_positive),
+        args=(is_running, None, gc_q, preset.us_yellow, preset.us_positive, preset.team_name),
     )
 
     # World model
@@ -47,7 +47,8 @@ def main():
     # v2 BT coordinator — fills dispatcher_q with RobotCommands
     bt = Process(
         target=run_bt_v2_process,
-        args=(is_running, wm, dispatcher_q, None, config_file),
+        args=(is_running, wm, dispatcher_q),
+        kwargs={"config_file": config_file},
     )
 
     # Dispatcher — reads dispatcher_q and sends commands to grSim
