@@ -82,10 +82,10 @@ gc:
   multicast-group: 224.5.23.1
   port: 10003
 network:
-  robot_ip: 0.0.0.0
+  robot_ip: 192.168.1.2
   vision_ip: 0.0.0.0
-use_grSim_vision: false
-us_yellow: true
-us_positive: true
-send_to_grSim: false
-team_name: TurtleRabbit
+use_grSim_vision: true
+us_yellow: false
+us_positive: false
+send_to_grSim: true
+team_name: UTBots
