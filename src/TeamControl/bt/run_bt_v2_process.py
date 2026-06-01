@@ -107,8 +107,17 @@ def run_bt_v2_process(
     # (gcfsm_runner.check_color_side) can flip these mid-run when referee
     # messages name the teams — caching makes RobotCommands stamp the stale
     # team colour, which makes the wrong team move in grSim.
-    coordinator = _build_coordinator(us_positive=bool(wm.us_positive()))
-    coordinator_us_positive = bool(wm.us_positive())
+    #
+    # us_positive INVERSION — wm.us_positive() reports a value opposite to
+    # the codebase convention. The Coordinator/trees document us_positive=True
+    # as "we attack +x → our goal at -x". In our grSim setup, when the YAML /
+    # GC say us_positive=True, our goal is actually at +x (yellow attacks -x).
+    # We negate once here so every downstream consumer sees the codebase's
+    # documented meaning. If you fix the root cause (the YAML or the GC FSM's
+    # us_positive computation), remove this negation.
+    cb_us_positive = not bool(wm.us_positive())
+    coordinator = _build_coordinator(us_positive=cb_us_positive)
+    coordinator_us_positive = cb_us_positive
     log_path = _open_log_file()
     log_fh = log_path.open("w", buffering=1)  # line-buffered
     print(f"[BT] started — yellow={bool(wm.us_yellow())}, "
@@ -159,11 +168,16 @@ def run_bt_v2_process(
                 # GC-induced flips after the fact (gcfsm_runner.check_color_side
                 # rewrites wm._us_yellow whenever a referee message arrives).
                 raw_uy = wm.us_yellow()
+                raw_up = wm.us_positive()
                 record = {
                     "tick": tick_count,
                     "phase": phase.value,
                     "us_yellow_raw": raw_uy,
                     "us_yellow_bool": bool(raw_uy),
+                    "us_positive_raw": raw_up,
+                    # After the negation in run_bt_v2_process, this is what
+                    # the trees/coordinator actually see.
+                    "us_positive_resolved": not bool(raw_up),
                     "ball": list(snapshot.ball_position),
                     "robots": {},
                 }

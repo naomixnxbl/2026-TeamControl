@@ -66,7 +66,7 @@ class MoveToSpace(py_trees.behaviour.Behaviour):
         if bb is None:
             return py_trees.common.Status.FAILURE
         bb.current_intent = IntentMove(
-            target_pos=OPEN_SPACE_POSITION,
+            target_pos=self._tree.open_space_position,
             target_orientation=None,
         )
         return py_trees.common.Status.SUCCESS
@@ -128,7 +128,7 @@ class BlockOpponent(py_trees.behaviour.Behaviour):
         if bb is None:
             return py_trees.common.Status.FAILURE
         bb.current_intent = IntentMove(
-            target_pos=BLOCKING_POSITION,
+            target_pos=self._tree.blocking_position,
             target_orientation=None,
         )
         return py_trees.common.Status.SUCCESS
@@ -149,11 +149,23 @@ class SupporterTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self) -> None:
+    def __init__(self, us_positive: bool = True) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
+        # Mirror side-dependent constants onto the half we're playing on.
+        # The module constants assume us_positive=True; if we attack the
+        # negative half, negate the x of each position.
+        self.us_positive = us_positive
+        self.open_space_position: tuple[float, float] = (
+            OPEN_SPACE_POSITION if us_positive
+            else (-OPEN_SPACE_POSITION[0], OPEN_SPACE_POSITION[1])
+        )
+        self.blocking_position: tuple[float, float] = (
+            BLOCKING_POSITION if us_positive
+            else (-BLOCKING_POSITION[0], BLOCKING_POSITION[1])
+        )
         self.root = self._build_tree()
 
     # ------------------------------------------------------------------

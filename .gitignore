@@ -2,7 +2,8 @@
 *.png
 *_samples.png
 .vscode
-
+.spacialdesk
+out/
 bin/
 lib/
 pyvenv.cfg

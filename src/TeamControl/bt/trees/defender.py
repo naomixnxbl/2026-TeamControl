@@ -3,10 +3,10 @@
 Topology (from docs/defending_node.png):
 
     DefendingSequenceNode (Sequence)
-    ├── LookAtBall         → writes IntentOrient(angle_to_ball)
+    ├── LookAtBall         → stashes angle_to_ball on the tree (no intent)
     ├── DefendZoneFallback (Selector — OR logic)
-    │   ├── InDefendingZone  (Condition — reads Snapshot)
-    │   └── GoToDefendZone   → writes IntentMove(defend_zone_pos) on failure
+    │   ├── InDefendingZone  → IntentMove(hold pos, facing ball) when x<0
+    │   └── GoToDefendZone   → IntentMove(defend_zone, facing ball) otherwise
     └── ChallengeSequence (Sequence)
         ├── IsCloseEnough    (Condition — reads Snapshot)
         └── ClearBall        → writes IntentKick(clear_direction)
@@ -27,7 +27,7 @@ import math
 import py_trees
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
-from TeamControl.bt.contracts.intent import IntentKick, IntentMove, IntentOrient
+from TeamControl.bt.contracts.intent import IntentKick, IntentMove
 from TeamControl.bt.contracts.snapshot import Snapshot
 
 # -----------------------------------------------------------------------
@@ -45,10 +45,13 @@ DEFENDER_ROLE_ID: int = 1                                    # defender robot ID
 # -----------------------------------------------------------------------
 
 class LookAtBall(py_trees.behaviour.Behaviour):
-    """Compute the angle to the ball and write IntentOrient; always returns SUCCESS.
+    """Compute the angle from defender to ball and stash it on the tree.
 
-    This node runs first every tick so the robot always faces the ball.
-    Later nodes may overwrite current_intent with a more specific action.
+    Does NOT write an intent — earlier versions wrote IntentOrient here, which
+    clobbered every downstream movement intent (the adapter translates
+    IntentOrient as zero linear velocity). Subsequent movement nodes pick up
+    this angle via ``self._tree.look_angle`` and apply it as the target
+    orientation on their IntentMove.
     """
 
     def __init__(self, tree_ref: DefenderTree) -> None:
@@ -65,16 +68,21 @@ class LookAtBall(py_trees.behaviour.Behaviour):
         if robot is None:
             return py_trees.common.Status.FAILURE
 
-        angle = math.atan2(
+        self._tree.look_angle = math.atan2(
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
         )
-        bb.current_intent = IntentOrient(target_orientation=angle)
         return py_trees.common.Status.SUCCESS
 
 
 class InDefendingZone(py_trees.behaviour.Behaviour):
-    """Succeed when the defender robot is in its own half (x < 0)."""
+    """Hold current position facing the ball when defender is in its own half.
+
+    If x < 0 (in zone): write IntentMove(target=current_pos, orientation=look_angle)
+    so the defender stops in place but stays oriented toward the ball, and
+    return SUCCESS to short-circuit the selector.
+    If x >= 0 (out of zone): return FAILURE so GoToDefendZone runs next.
+    """
 
     def __init__(self, tree_ref: DefenderTree) -> None:
         super().__init__("InDefendingZone")
@@ -90,7 +98,17 @@ class InDefendingZone(py_trees.behaviour.Behaviour):
         if robot is None:
             return py_trees.common.Status.FAILURE
 
-        if robot.position[0] < 0.0:
+        # "In zone" means x < 0 when we attack +x; x > 0 when we attack -x.
+        in_zone = (
+            robot.position[0] < 0.0
+            if self._tree.us_positive
+            else robot.position[0] > 0.0
+        )
+        if in_zone:
+            bb.current_intent = IntentMove(
+                target_pos=robot.position,
+                target_orientation=self._tree.look_angle,
+            )
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -112,8 +130,8 @@ class GoToDefendZone(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         bb.current_intent = IntentMove(
-            target_pos=DEFEND_ZONE_POSITION,
-            target_orientation=None,
+            target_pos=self._tree.defend_zone_position,
+            target_orientation=self._tree.look_angle,
         )
         return py_trees.common.Status.SUCCESS
 
@@ -156,7 +174,7 @@ class ClearBall(py_trees.behaviour.Behaviour):
         if bb is None:
             return py_trees.common.Status.FAILURE
 
-        bb.current_intent = IntentKick(target_pos=CLEAR_DIRECTION)
+        bb.current_intent = IntentKick(target_pos=self._tree.clear_direction)
         return py_trees.common.Status.SUCCESS
 
 
@@ -175,11 +193,29 @@ class DefenderTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self) -> None:
+    def __init__(self, us_positive: bool = True) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
+        # Updated each tick by LookAtBall; consumed by movement nodes as the
+        # target_orientation for their IntentMove. 0.0 is a safe initial value
+        # in case a movement node runs before LookAtBall (shouldn't happen
+        # given the sequence order, but defensive).
+        self.look_angle: float = 0.0
+        # Mirror side-dependent constants onto the half we're actually
+        # defending. Module constants assume us_positive=True (own goal at
+        # negative x). When we attack the negative half instead, negate x so
+        # the defender parks in OUR half and clears toward the OPPONENT goal.
+        self.us_positive = us_positive
+        self.defend_zone_position: tuple[float, float] = (
+            DEFEND_ZONE_POSITION if us_positive
+            else (-DEFEND_ZONE_POSITION[0], DEFEND_ZONE_POSITION[1])
+        )
+        self.clear_direction: tuple[float, float] = (
+            CLEAR_DIRECTION if us_positive
+            else (-CLEAR_DIRECTION[0], CLEAR_DIRECTION[1])
+        )
         self.root = self._build_tree()
 
     # ------------------------------------------------------------------

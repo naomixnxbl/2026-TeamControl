@@ -34,11 +34,11 @@ from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
 # index 0 → GOALIE, 1-2 → DEFENDER, 3-4 → SUPPORTER, 5 → ATTACKER
 ROLE_ASSIGNMENT: dict[int, RoleType] = {
     0: RoleType.GOALIE,
-    1: RoleType.DEFENDER,
-    2: RoleType.DEFENDER,
+    1: RoleType.ATTACKER,
+    2: RoleType.SUPPORTER,
     3: RoleType.SUPPORTER,
     4: RoleType.SUPPORTER,
-    5: RoleType.ATTACKER,
+    5: RoleType.SUPPORTER,
 }
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,13 @@ LEGAL_BALL_CLEARANCE: float = 0.50   # actual SSL rule threshold
 OWN_GOAL: tuple[float, float] = (-4.5, 0.0)
 OPP_GOAL: tuple[float, float] = (4.5, 0.0)
 OWN_GOAL_LINE_X: float = -4.5
+
+# us_positive convention: this module and all four role trees (goalie,
+# attacker, defender, supporter) interpret ``us_positive=True`` as
+# "we attack +x → own goal at -x". The value reaching this module from
+# ``run_bt_v2_process`` is the NEGATION of ``wm.us_positive()`` — wm reports
+# the inverse of the codebase convention in our grSim+GC setup. See the
+# comment in run_bt_v2_process.py for the full story.
 
 # Div B field (9m × 6m): goal line at x=±4.5m, penalty mark 1m from goal line.
 # §2.1.3: penalty mark is 1m from goal line toward centre → x = 4.5 - 1.0 = 3.5m.
@@ -445,6 +452,7 @@ class Coordinator:
             bb = self.blackboards[robot_id]
             bb.last_intent = bb.current_intent
             bb.current_intent = None
+            bb.intent_source = None
 
             tree = self.trees[bb.current_role]
             if hasattr(tree, "set_snapshot") and hasattr(tree, "tick"):

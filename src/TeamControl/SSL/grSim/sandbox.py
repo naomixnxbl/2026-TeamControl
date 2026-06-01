@@ -1,15 +1,17 @@
-from multiprocessing import Process, Queue, Event
+from multiprocessing import Process, Queue, Event, freeze_support
 from TeamControl.process_workers.vision_runner import VisionProcess
 from TeamControl.process_workers.gcfsm_runner import GCfsm
 from TeamControl.world.model_manager import WorldModelManager
 from TeamControl.process_workers.wm_runner import WMWorker
 from TeamControl.SSL.grSim.sandbox_process import run_grsim_sandbox_process
 from TeamControl.bt.run_bt_v2_process import run_bt_v2_process
+
 from TeamControl.dispatcher.dispatch import Dispatcher
 from TeamControl.utils.yaml_config import Config
 
 
 def main():
+    freeze_support()
     vision_port = 10006
     is_running = Event()
     is_running.set()
