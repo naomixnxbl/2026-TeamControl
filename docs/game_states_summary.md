@@ -17,6 +17,8 @@ Referee data flows: GC → `gcfsm_runner` → `gc_q` → `WMWorker` → `WorldMo
 
 When `us_positive=False` (we attack toward negative-x), all fixed position maps are mirrored on startup so robot positions are always correct.
 
+> **⚠ `us_positive` is negated at the entry point.** In the current grSim + SSL-GC setup, `wm.us_positive()` reports a value opposite to the codebase convention (the codebase uses `us_positive=True ⇒ we attack +x ⇒ own goal at -x`). To keep the convention consistent across the whole BT, `run_bt_v2_process` negates `wm.us_positive()` once before handing it to the `Coordinator` and the four role trees. The trees and the coordinator's set-piece tables all then agree. If you later fix the upstream value (e.g. flip the YAML default or correct `gcfsm_runner.check_color_side`), **remove the negation in `run_bt_v2_process`** so the values stop double-inverting. The negation site is the single place to look — search the file for "us_positive INVERSION".
+
 ---
 
 ## States

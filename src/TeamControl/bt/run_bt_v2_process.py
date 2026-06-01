@@ -54,9 +54,9 @@ def _build_coordinator(us_positive: bool) -> Coordinator:
     c = Coordinator(
         trees={
             RoleType.GOALIE: GoalieTree(us_positive=us_positive),
-            RoleType.DEFENDER: DefenderTree(),
-            RoleType.SUPPORTER: SupporterTree(),
-            RoleType.ATTACKER: AttackerTree(),
+            RoleType.DEFENDER: DefenderTree(us_positive=us_positive),
+            RoleType.SUPPORTER: SupporterTree(us_positive=us_positive),
+            RoleType.ATTACKER: AttackerTree(us_positive=us_positive),
         },
         us_positive=us_positive,
     )
@@ -68,6 +68,7 @@ def run_bt_v2_process(
     is_running: Event,
     wm: WorldModel,
     dispatcher_q: Queue,
+    is_yellow: bool | None = None,
     robot_ids: list[int] | None = None,
     config_file: str = "ipconfig.yaml",
 ) -> None:
@@ -78,7 +79,13 @@ def run_bt_v2_process(
         wm: shared WorldModel proxy.
         dispatcher_q: queue consumed by the dispatcher; items are
             ``[RobotCommand, run_time_seconds]``.
-        robot_ids: which robot ids to tick this process. Defaults to 0..5.
+        is_yellow: team perspective for this BT instance. ``None`` falls
+            back to ``wm.us_yellow()`` (single-team mode). For 6v6 spawn
+            two processes and pass ``True`` and ``False`` explicitly.
+        robot_ids: which robot ids to tick. Defaults to 0..5.
+        role_assignment: per-robot role override; defaults to the
+            module-level ``ROLE_ASSIGNMENT`` in ``coordinator.py``.
+        tick_period: seconds to sleep between ticks.
     """
     if robot_ids is None:
         robot_ids = DEFAULT_ROBOT_IDS
@@ -109,8 +116,9 @@ def run_bt_v2_process(
 
             coordinator.tick(snapshot, robot_ids)
 
-            # Print intents every 100 ticks (~1 sec)
             tick_count += 1
+
+            # Print intents every 100 ticks (~1 sec)
             if tick_count % 100 == 0:
                 bx, by = snapshot.ball_position
                 print(f"{tag} tick={tick_count} phase={phase.value} ball=({bx:.2f},{by:.2f})", flush=True)

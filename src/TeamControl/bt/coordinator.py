@@ -35,10 +35,10 @@ from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
 ROLE_ASSIGNMENT: dict[int, RoleType] = {
     0: RoleType.GOALIE,
     1: RoleType.ATTACKER,
-    2: RoleType.ATTACKER,
-    3: RoleType.ATTACKER,
-    4: RoleType.ATTACKER,
-    5: RoleType.ATTACKER,
+    2: RoleType.SUPPORTER,
+    3: RoleType.SUPPORTER,
+    4: RoleType.SUPPORTER,
+    5: RoleType.SUPPORTER,
 }
 
 # ---------------------------------------------------------------------------
