@@ -12,9 +12,24 @@ from typing import Sequence
 
 
 class GamePhase(str, Enum):
-    RUNNING = "RUNNING"
-    STOPPED = "STOPPED"
+    # Halted — robots must not move
     HALTED = "HALTED"
+    HALF_TIME = "HALF_TIME"
+    # Stopped — all robots keep 500 mm from ball
+    STOPPED = "STOPPED"
+    # Set-piece states (our team has the privilege)
+    PREPARE_KICKOFF = "PREPARE_KICKOFF"   # move to kickoff positions
+    KICKOFF = "KICKOFF"                   # attacker kicks off from centre
+    OPP_KICKOFF = "OPP_KICKOFF"          # opponent kickoff — all robots to own half
+    FREE_KICK = "FREE_KICK"               # attacker takes free kick
+    OPP_FREE_KICK = "OPP_FREE_KICK"       # opponent free kick — keep 0.5m from ball
+    BALL_PLACEMENT = "BALL_PLACEMENT"     # we place the ball
+    PREPARE_PENALTY = "PREPARE_PENALTY"   # pre-kick: position robots before we shoot
+    PREPARE_PENALTY_OPP = "PREPARE_PENALTY_OPP"  # pre-kick: position robots before opponent shoots
+    PENALTY_SHOOT = "PENALTY_SHOOT"       # we shoot a penalty
+    PENALTY_DEFEND = "PENALTY_DEFEND"     # we defend a penalty
+    # Normal play
+    RUNNING = "RUNNING"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,6 +45,9 @@ class RefereeState:
     """Referee-reported game state at a given tick."""
     game_phase: GamePhase
     score: tuple[int, int]  # (own, opponent)
+    # Target position for BALL_PLACEMENT — None in all other states.
+    # Coordinates are in the same unit as robot/ball positions (metres).
+    ball_placement_pos: tuple[float, float] | None = None
 
 
 @dataclasses.dataclass(frozen=True)

@@ -53,11 +53,24 @@ from TeamControl.SSL.game_controller.common import GameState
 _MM_TO_M = 0.001
 
 
-# Map the 2026 GameState enum into the BT's GamePhase string enum.
+# Map every GC-produced GameState into the BT's GamePhase.
+# The GC FSM already resolves ours-vs-theirs before storing GameState,
+# so no extra colour check is needed here.
 _PHASE_MAP = {
-    GameState.HALTED: GamePhase.HALTED,
-    GameState.STOPPED: GamePhase.STOPPED,
-    GameState.RUNNING: GamePhase.RUNNING,
+    GameState.HALTED:          GamePhase.HALTED,
+    GameState.HALF_TIME:       GamePhase.HALF_TIME,
+    GameState.STOPPED:         GamePhase.STOPPED,
+    GameState.PREPARE_KICKOFF: GamePhase.PREPARE_KICKOFF,
+    GameState.OPP_KICKOFF:    GamePhase.OPP_KICKOFF,
+    GameState.KICKOFF:         GamePhase.KICKOFF,
+    GameState.FREE_KICK:       GamePhase.FREE_KICK,
+    GameState.OPP_FREE_KICK:   GamePhase.OPP_FREE_KICK,
+    GameState.BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
+    GameState.PREPARE_PENALTY:     GamePhase.PREPARE_PENALTY,
+    GameState.PREPARE_PENALTY_OPP: GamePhase.PREPARE_PENALTY_OPP,
+    GameState.PENALTY_SHOOT:       GamePhase.PENALTY_SHOOT,
+    GameState.PENALTY_DEFEND:      GamePhase.PENALTY_DEFEND,
+    GameState.RUNNING:         GamePhase.RUNNING,
 }
 
 
@@ -80,6 +93,7 @@ def _ball_pos_vel(frame) -> tuple[tuple[float, float], tuple[float, float]]:
     ball = frame.ball if frame is not None else None
     if ball is None:
         return (0.0, 0.0), (0.0, 0.0)
+    # Vision protocol sends positions in mm; BT uses metres.
     return (_mm_to_m(ball.x), _mm_to_m(ball.y)), (0.0, 0.0)
 
 
@@ -89,6 +103,7 @@ def _team_to_states(team) -> tuple[RobotState, ...]:
         out.append(
             RobotState(
                 robot_id=int(robot.id),
+                # Vision protocol sends positions in mm; BT uses metres.
                 position=(_mm_to_m(robot.x), _mm_to_m(robot.y)),
                 orientation=float(robot.o),
             )
@@ -117,6 +132,9 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
     own_team = frame.robots_yellow if is_yellow else frame.robots_blue
     opp_team = frame.robots_blue if is_yellow else frame.robots_yellow
 
+    raw_placement = wm.get_ball_placement_pos()
+    placement_pos = (float(raw_placement[0]), float(raw_placement[1])) if raw_placement else None
+
     return Snapshot(
         ball_position=ball_pos,
         ball_velocity=ball_vel,
@@ -125,6 +143,7 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
         referee_state=RefereeState(
             game_phase=_phase_from_state(wm.get_game_state()),
             score=(0, 0),  # TODO: read from wm.ref_data once exposed
+            ball_placement_pos=placement_pos,
         ),
     )
 
@@ -151,6 +170,7 @@ def intent_to_motion_target(
                 robot_id,
                 intent.target_pos,
                 intent.target_orientation,
+                intent.max_speed,
             )
         if isinstance(intent, IntentKick):
             return kick_at(snapshot, robot_id, intent.target_pos)
@@ -182,7 +202,7 @@ def _angular_velocity_to_target(
 ) -> float:
     """Wrap angle error to [-pi, pi] and apply a proportional gain."""
     err = (target_orientation - current_orientation + math.pi) % (2 * math.pi) - math.pi
-    return float(err * gain)
+    return float(max(-6.0, min(6.0, err * gain)))
 
 
 def intent_to_robot_command(
@@ -203,7 +223,14 @@ def intent_to_robot_command(
     current_o = robot.orientation if robot is not None else 0.0
     w = _angular_velocity_to_target(current_o, target.target_orientation)
 
-    vx, vy = target.target_velocity
+    # Rotate world-frame velocity into robot-local frame.
+    # grSim expects veltangent/velnormal in the robot's own coordinate frame.
+    vx_w, vy_w = target.target_velocity
+    cos_o = math.cos(current_o)
+    sin_o = math.sin(current_o)
+    vx = vx_w * cos_o + vy_w * sin_o
+    vy = -vx_w * sin_o + vy_w * cos_o
+
     kick = 1 if isinstance(intent, (IntentKick, IntentPass)) else 0
     dribble = 1 if isinstance(intent, IntentDribble) else 0
 

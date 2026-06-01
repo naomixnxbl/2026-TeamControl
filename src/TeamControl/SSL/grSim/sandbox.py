@@ -1,5 +1,6 @@
 from multiprocessing import Process, Queue, Event
 from TeamControl.process_workers.vision_runner import VisionProcess
+from TeamControl.process_workers.gcfsm_runner import GCfsm
 from TeamControl.world.model_manager import WorldModelManager
 from TeamControl.process_workers.wm_runner import WMWorker
 from TeamControl.SSL.grSim.sandbox_process import run_grsim_sandbox_process
@@ -9,6 +10,9 @@ from TeamControl.utils.yaml_config import Config
 
 
 def main():
+    import sys
+    import multiprocessing
+    multiprocessing.freeze_support()
     vision_port = 10006
     is_running = Event()
     is_running.set()
@@ -16,12 +20,19 @@ def main():
     gc_q = Queue()
     dispatcher_q = Queue()
 
-    preset = Config()
+    config_file = sys.argv[1] if len(sys.argv) > 1 else "ipconfig.yaml"
+    preset = Config(config_file)
 
     # Vision input
     vision_wkr = Process(
         target=VisionProcess.run_worker,
         args=(is_running, None, vision_q, True, vision_port),
+    )
+
+    # Game controller FSM — reads referee messages and fills gc_q with game states
+    gc_wkr = Process(
+        target=GCfsm.run_worker,
+        args=(is_running, None, gc_q, preset.us_yellow, preset.us_positive),
     )
 
     # World model
@@ -36,7 +47,7 @@ def main():
     # v2 BT coordinator — fills dispatcher_q with RobotCommands
     bt = Process(
         target=run_bt_v2_process,
-        args=(is_running, wm, dispatcher_q),
+        args=(is_running, wm, dispatcher_q, None, config_file),
     )
 
     # Dispatcher — reads dispatcher_q and sends commands to grSim
@@ -46,11 +57,13 @@ def main():
     )
 
     vision_wkr.start()
+    gc_wkr.start()
     wmr.start()
     bt.start()
     dispatcher.start()
 
     vision_wkr.join()
+    gc_wkr.join()
     wmr.join()
     bt.join()
     dispatcher.join()

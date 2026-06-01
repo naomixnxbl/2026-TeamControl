@@ -50,6 +50,7 @@ def move_to(
     robot_id: int,
     target_pos: tuple[float, float],
     target_orientation: float | None = None,
+    max_speed: float | None = None,
 ) -> MotionTarget:
     """Navigate robot *robot_id* to *target_pos*.
 
@@ -67,8 +68,11 @@ def move_to(
         ValueError: If *robot_id* is not present in *snapshot*.
     """
     robot = _get_robot(snapshot, robot_id)
-    velocity = _proportional_velocity(robot.position, target_pos)
-    orientation = target_orientation if target_orientation is not None else 0.0
+    velocity = _proportional_velocity(
+        robot.position, target_pos, max_speed=max_speed if max_speed is not None else _MAX_SPEED
+    )
+    # Keep current orientation when none specified — avoids spinning to face 0.0.
+    orientation = target_orientation if target_orientation is not None else robot.orientation
     return MotionTarget(
         target_velocity=velocity,
         target_orientation=float(orientation),
