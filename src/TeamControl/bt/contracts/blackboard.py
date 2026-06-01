@@ -46,3 +46,7 @@ class RobotBlackboard:
     current_role: RoleType
     current_intent: Intent | None = dataclasses.field(default=None)
     last_intent: Intent | None = dataclasses.field(default=None)
+    # Name of the BT node (or phase handler) that wrote ``current_intent``
+    # this tick. Used for debug logging — lets traces show which branch of
+    # the tree fired without parsing the intent payload.
+    intent_source: str | None = dataclasses.field(default=None)

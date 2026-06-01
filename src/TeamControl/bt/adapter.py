@@ -175,8 +175,22 @@ def intent_to_motion_target(
         if isinstance(intent, IntentKick):
             return kick_at(snapshot, robot_id, intent.target_pos)
         if isinstance(intent, IntentDribble):
-            # No dribble skill yet — drive toward the target like move_to.
-            return move_to(snapshot, robot_id, intent.target_pos, None)
+            # No dribble skill yet — drive toward the target like move_to,
+            # but compute target_orientation so the robot faces the dribble
+            # target. Without this, move_to defaults orientation to 0.0 and
+            # the robot rotates east while trying to dribble west, leaving
+            # the ball behind.
+            robot = next(
+                (r for r in snapshot.own_robots if r.robot_id == robot_id), None
+            )
+            if robot is not None:
+                angle = math.atan2(
+                    intent.target_pos[1] - robot.position[1],
+                    intent.target_pos[0] - robot.position[0],
+                )
+            else:
+                angle = None
+            return move_to(snapshot, robot_id, intent.target_pos, angle)
         if isinstance(intent, IntentPass):
             return kick_at(snapshot, robot_id, intent.target_pos)
         if isinstance(intent, IntentOrient):
@@ -216,28 +230,32 @@ def intent_to_robot_command(
     if target is None:
         return None
 
-    # Pull the current orientation so we can compute an angular velocity.
+    # Pull the current orientation so we can compute an angular velocity AND
+    # rotate the velocity from world frame into the robot's body frame.
     robot = next(
         (r for r in snapshot.own_robots if r.robot_id == robot_id), None
     )
     current_o = robot.orientation if robot is not None else 0.0
     w = _angular_velocity_to_target(current_o, target.target_orientation)
 
-    # Rotate world-frame velocity into robot-local frame.
-    # grSim expects veltangent/velnormal in the robot's own coordinate frame.
-    vx_w, vy_w = target.target_velocity
+    # Skills produce target_velocity in WORLD frame. grSim's RobotCommand
+    # expects body-frame velocities (veltangent = forward, velnormal = left).
+    # Without this rotation the robot drives correctly only when its heading
+    # happens to be ~0 — for any other heading the motion direction is
+    # rotated by -orientation, producing curved / circular paths.
+    vx_world, vy_world = target.target_velocity
     cos_o = math.cos(current_o)
     sin_o = math.sin(current_o)
-    vx = vx_w * cos_o + vy_w * sin_o
-    vy = -vx_w * sin_o + vy_w * cos_o
+    vt = vx_world * cos_o + vy_world * sin_o    # forward along heading
+    vn = -vx_world * sin_o + vy_world * cos_o   # left perpendicular
 
     kick = 1 if isinstance(intent, (IntentKick, IntentPass)) else 0
     dribble = 1 if isinstance(intent, IntentDribble) else 0
 
     return RobotCommand(
         robot_id=robot_id,
-        vx=float(vx),
-        vy=float(vy),
+        vx=float(vt),
+        vy=float(vn),
         w=float(w),
         kick=kick,
         dribble=dribble,
