@@ -179,6 +179,10 @@ class GCfsm (BaseWorker):
             state = GameState.BALL_PLACEMENT if self.us_yellow is False else GameState.STOPPED
         elif command == Command.FORCE_START:
             state = GameState.RUNNING
+        elif command == Command.PREPARE_PENALTY_YELLOW:
+            state = GameState.PREPARE_PENALTY if self.us_yellow is True else GameState.PREPARE_PENALTY_OPP
+        elif command == Command.PREPARE_PENALTY_BLUE:
+            state = GameState.PREPARE_PENALTY if self.us_yellow is False else GameState.PREPARE_PENALTY_OPP
         elif command in {Command.DIRECT_FREE_YELLOW, Command.INDIRECT_FREE_YELLOW}:
             state = GameState.FREE_KICK if self.us_yellow is True else GameState.OPP_FREE_KICK
         elif command in {Command.DIRECT_FREE_BLUE, Command.INDIRECT_FREE_BLUE}:

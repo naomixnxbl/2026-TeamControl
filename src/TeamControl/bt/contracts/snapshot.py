@@ -24,6 +24,8 @@ class GamePhase(str, Enum):
     FREE_KICK = "FREE_KICK"               # attacker takes free kick
     OPP_FREE_KICK = "OPP_FREE_KICK"       # opponent free kick — keep 0.5m from ball
     BALL_PLACEMENT = "BALL_PLACEMENT"     # we place the ball
+    PREPARE_PENALTY = "PREPARE_PENALTY"   # pre-kick: position robots before we shoot
+    PREPARE_PENALTY_OPP = "PREPARE_PENALTY_OPP"  # pre-kick: position robots before opponent shoots
     PENALTY_SHOOT = "PENALTY_SHOOT"       # we shoot a penalty
     PENALTY_DEFEND = "PENALTY_DEFEND"     # we defend a penalty
     # Normal play

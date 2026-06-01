@@ -28,6 +28,8 @@ class GameState(Enum):
     HALF_TIME = auto()
     # TIME_OUT = auto()
     
+    PREPARE_PENALTY = auto()
+    PREPARE_PENALTY_OPP = auto()
     PENALTY_SHOOT = auto()
     PENALTY_DEFEND = auto()
     
