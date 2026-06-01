@@ -66,7 +66,7 @@ def main():
                       preset.use_grSim_vision, preset.vision[1])),
         Process(target=GCfsm.run_worker,
                 args=(is_running, logger, gc_q,
-                      preset.us_yellow, preset.us_positive)),
+                      preset.us_yellow, preset.us_positive, preset.team_name)),
         Process(target=WMWorker.run_worker,
                 args=(is_running, logger, wm, vision_q, gc_q,
                       recv_q, ip_map)),

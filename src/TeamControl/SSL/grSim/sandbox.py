@@ -29,7 +29,7 @@ def main():
     )
     gc_wkr = Process(
         target=GCfsm.run_worker,
-        args=(is_running, None, gc_q, preset.us_yellow, preset.us_positive),
+        args=(is_running, None, gc_q, preset.us_yellow, preset.us_positive, preset.team_name),
     )
     wm_manager = WorldModelManager()
     wm_manager.start()
