@@ -4,11 +4,13 @@ from TeamControl.network.sender import Sender
 from multiprocessing import Event
 
 # --- Configure these ---
-ROBOT_IP   = "192.168.0.73"  # robot's IP from ipconfig.yaml
+ROBOT_IP   = "192.168.0.73"   # robot's IP from ipconfig.yaml
 ROBOT_PORT = 50514            # robot's listen port
 LISTEN_PORT = 50515           # port on THIS PC to listen for robot replies (pick any free port)
 # -----------------------
 
+
+# sends a dummy command to the robot. if this works, then your network configs are correct.
 def robot_ping_test():
     is_running = Event()
     is_running.set()

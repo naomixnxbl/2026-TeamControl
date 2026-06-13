@@ -18,7 +18,7 @@ yellow:
     shellID: 2
     has_chip_kick: false
   D:
-    ip:  192.168.0.73
+    ip: 192.168.0.73
     port: 50514
     grSimID: 3
     shellID: 3
@@ -82,10 +82,10 @@ gc:
   multicast-group: 224.5.23.1
   port: 10003
 network:
-  robot_ip: 192.168.0.72 # set this to 0.0.0.0 OR your computer's IP
-  vision_ip: 192.168.0.72 # set this to 0.0.0.0 OR your computer's IP
+  robot_ip: 0.0.0.0 # set this to 0.0.0.0 for grSim OR your computer's IP
+  vision_ip: 0.0.0.0 # set this to 0.0.0.0 for grSim OR your computer's IP
 use_grSim_vision: true
 us_yellow: true
 us_positive: true
-send_to_grSim: false # turn on if you need to test on grSim
+send_to_grSim: true # turn on if you need to test on grSim
 team_name: TurtleRabbit
