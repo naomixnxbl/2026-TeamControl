@@ -4,6 +4,131 @@ Everything below is **software/AI/decision-making only** — no hardware or netw
 
 ---
 
+## 0. Known Bugs & Short-Term BT Fixes
+
+These are active issues observed in grSim and on real robots that should be
+resolved before moving to the longer-term improvements below.
+
+### 0.1 Attacker: `POSSESSION_DIST` oscillation loop
+
+**File:** `src/TeamControl/bt/trees/attacker.py` — `HasBallControl`, constant `POSSESSION_DIST`
+
+**Symptom:** The robot approaches the ball, stops just short of triggering the
+dribbler, then oscillates — orienting toward the opponent goal (thinking it has
+possession), then back toward the ball (realising it doesn't), endlessly. The
+dribbler fires on every other tick but the ball never actually sticks.
+
+**Root cause:** `POSSESSION_DIST` (currently `0.13 m`) is too tight. The robot
+physically reaches a distance that passes the check on one tick but not the
+next, because the `HasBallControl` heading check also fires simultaneously. The
+two checks together create a flickering boundary: possession is true → orient
+toward goal → ball slips behind kicker → possession false → re-orient to ball →
+ball in front again → repeat.
+
+**Fix direction:**
+- Tune `POSSESSION_DIST` empirically on the physical robot (start at `0.18 m`,
+  reduce until false positives disappear).
+- Add possession **hysteresis**: once possession is lost, require the ball to be
+  within a *smaller* re-acquisition radius (e.g. `0.08 m`) before
+  `HasBallControl` can succeed again. This breaks the flip-flop cycle.
+
+---
+
+### 0.2 Attacker: over-eager kicking
+
+**File:** `src/TeamControl/bt/trees/attacker.py` — `ShootSequence`
+
+**Symptom:** The attacker kicks the ball prematurely instead of holding
+possession and working into a better position.
+
+**Root cause:** `HasClearShot` only checks for opponent robots in the shooting
+corridor. It fires `IntentKick` any time the corridor is geometrically clear,
+even if the robot is far from goal or in a poor angle.
+
+**Fix direction:**
+- Gate `ShootSequence` with a **minimum shot quality** check (distance to goal
+  ≤ threshold AND shot angle ≥ minimum cone width).
+- Prioritise `DribbleSequence` over `ShootSequence` when inside a configurable
+  "dribble zone" distance from the ball's current position. The robot should
+  only shoot when it has both possession *and* a high-quality look at goal.
+
+---
+
+### 0.3 Attacker: no field boundary enforcement
+
+**File:** `src/TeamControl/bt/trees/attacker.py`
+
+**Symptom:** The attacker can be commanded to move outside the field boundary
+when chasing a ball that rolls out of play, or when dribbling to a computed
+target position that lies beyond the sideline.
+
+**Fix direction:**
+- Clamp every `IntentMove.target_pos` computed by the attacker to the legal
+  field rectangle (e.g. `x ∈ [−4.5, 4.5]`, `y ∈ [−3.0, 3.0]` with a small
+  inward margin).
+- This mirrors the approach already used by the goalie, which is restricted to
+  its penalty box. The attacker simply needs a softer constraint: stay inside
+  the outer field lines.
+- Implement as a utility function `clamp_to_field(pos, margin=0.1)` so all
+  trees can share it.
+
+---
+
+### 0.4 Supporter: static position and no ball awareness (redesign planned)
+
+**File:** `src/TeamControl/bt/trees/supporter.py`
+
+**Current behaviour (v1):** The supporter always moves to a single hardcoded
+position `(1.0, 2.0)` and stays there. `IsBallComing` is stubbed to always
+return FAILURE so the receive branch never fires.
+
+**Planned redesign — proposed topology:**
+
+```
+SupporterRoot (Selector)
+├── BallPossessionSequence (Sequence)
+│   ├── IsClosestToBall        → FAILURE if another own robot is closer
+│   └── GoToBall               → IntentMove(ball_position)  [reuse ChaseBall logic]
+├── PossessionSequence (Sequence)
+│   ├── InPossession           → FAILURE if ball not in dribbler range
+│   └── DistributeSelector (Selector)
+│       ├── PassSequence (Sequence)
+│       │   ├── FindOpenTeammate   → finds least-marked own robot (excl. goalie)
+│       │   └── PassToTeammate     → IntentPass(target_robot_id, target_pos)
+│       ├── ShootIfClose       → IntentKick(opp_goal) if within shooting threshold
+│       └── DribbleToGoal      → IntentDribble(opp_goal_pos)
+└── RepositionToSpace          → IntentMove(least_crowded_open_position)
+```
+
+**Node specifications:**
+
+- **`IsClosestToBall`** — computes `dist(own_robot, ball)` for every robot in
+  `snapshot.own_robots`. Returns SUCCESS only if this robot's distance is the
+  minimum. Ensures only one supporter chases.
+
+- **`GoToBall`** — reuse the existing `ChaseBall` logic from `attacker.py`:
+  `IntentMove(target_pos=ball, target_orientation=angle_to_ball)`.
+
+- **`InPossession`** — same check as `HasBallControl` in `attacker.py`
+  (`dist ≤ POSSESSION_DIST` AND heading within tolerance). Share as a utility.
+
+- **`FindOpenTeammate`** — for each own robot (excluding goalie, excluding self),
+  compute a "marking pressure" score: the distance to the nearest opponent.
+  The robot with the highest score (most space) is the pass target. Writes the
+  chosen robot and position to tree state. Returns FAILURE if all teammates
+  are within `MARKED_THRESHOLD` of an opponent.
+
+- **`ShootIfClose`** — fires `IntentKick` at the opponent goal only when
+  `dist(robot, opp_goal) ≤ SHOOT_DIST_THRESHOLD`. Prevents long-range
+  speculative shots.
+
+- **`RepositionToSpace`** — divides the field into a grid and scores each cell
+  by `min(dist_to_nearest_opponent, dist_to_nearest_own_robot)`. Picks the
+  highest-scoring cell within a sensible area of the field (not too close to
+  own goal, not offside). Writes `IntentMove` to that position.
+
+---
+
 ## 1. Ball Physics & Prediction
 
 ### Current state

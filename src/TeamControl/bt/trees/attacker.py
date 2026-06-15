@@ -21,6 +21,27 @@ The original pass branch (PassOrPlaySequence) and the (now-unused)
 IsBallInRangeOrMove node are kept in the source as commented references
 for future re-enablement once a real "passing" play is added.
 
+Known bugs / areas for improvement
+-----------------------------------
+1. **POSSESSION_DIST oscillation** — ``POSSESSION_DIST`` (0.13 m) is too
+   tight. The robot flickers between possession and no-possession on
+   consecutive ticks, causing it to alternate between orienting toward goal
+   and re-chasing the ball. Fix: add hysteresis (separate acquire/lose
+   thresholds) and tune ``POSSESSION_DIST`` empirically on the physical
+   robot. See ``docs/future.md §0.1``.
+
+2. **Over-eager kicking** — ``HasClearShot`` fires ``IntentKick`` whenever
+   the shot corridor is geometrically clear, ignoring distance and angle to
+   goal. The robot should prefer dribbling into a better position and only
+   shoot when shot quality (distance + cone width) exceeds a threshold.
+   See ``docs/future.md §0.2``.
+
+3. **No field boundary enforcement** — target positions in ``ChaseBall``
+   and ``HoldPossession`` are not clamped to the legal field rectangle.
+   The robot can be directed outside the sidelines when the ball rolls out
+   of play. Add a shared ``clamp_to_field(pos, margin=0.1)`` utility.
+   See ``docs/future.md §0.3``.
+
 Design notes
 ------------
 - Snapshot is injected via ``set_snapshot()`` before each ``tick()``.
@@ -51,7 +72,9 @@ GOAL_POSITION: tuple[float, float] = (4.5, 0.0)   # opponent goal centre
 # Distance at which we consider the ball to be in the dribbler (we "have" it).
 # SSL robot diameter ~0.18 m, ball ~0.043 m → centre-to-centre ~0.11 m when
 # touching. 0.15 m gives a small margin so the predicate doesn't flicker.
-POSSESSION_DIST: float = 0.128
+
+##   note: This is really a threshold value for the robot turn bug   ##
+POSSESSION_DIST: float = 0.122
 
 # Maximum angular error between the robot's heading and the direction to the
 # ball before we say we "have" the ball. The kicker plate is on the front of

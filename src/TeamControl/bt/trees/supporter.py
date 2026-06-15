@@ -26,6 +26,35 @@ fails. The Selector therefore always succeeds on ``MoveToSpace`` (first
 child), which writes ``IntentMove(target_pos=(1.0, 2.0))``. This means
 the supporter ALWAYS produces ``IntentMove`` in v1. This is correct
 per spec R007.
+
+Known issue / planned redesign (v2)
+-------------------------------------
+The v1 supporter is effectively inert — it moves to one hardcoded position
+and never reacts to the ball or teammates. The planned v2 topology:
+
+    SupporterRoot (Selector)
+    ├── BallPossessionSequence (Sequence)
+    │   ├── IsClosestToBall    → SUCCESS only if this robot is nearest to ball
+    │   └── GoToBall           → IntentMove(ball_position)
+    ├── PossessionSequence (Sequence)
+    │   ├── InPossession       → SUCCESS if dist(robot, ball) ≤ POSSESSION_DIST
+    │   └── DistributeSelector (Selector)
+    │       ├── PassSequence (Sequence)
+    │       │   ├── FindOpenTeammate   → highest-space own robot (excl. goalie)
+    │       │   └── PassToTeammate     → IntentPass(target)
+    │       ├── ShootIfClose           → IntentKick if dist ≤ SHOOT_DIST_THRESHOLD
+    │       └── DribbleToGoal          → IntentDribble(opp_goal_pos)
+    └── RepositionToSpace      → IntentMove(least-crowded open field cell)
+
+Key new nodes:
+- ``IsClosestToBall`` — prevents multiple robots from chasing the same ball.
+- ``InPossession`` — share logic with ``HasBallControl`` in attacker.py.
+- ``FindOpenTeammate`` — score own robots by distance-to-nearest-opponent;
+  return FAILURE if all are within ``MARKED_THRESHOLD`` of an opponent.
+- ``RepositionToSpace`` — grid-score field cells by separation from all
+  robots; pick highest-scoring cell within a sensible attacking area.
+
+See ``docs/future.md §0.4`` for the full design specification.
 """
 from __future__ import annotations
 

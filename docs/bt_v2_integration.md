@@ -171,21 +171,50 @@ stack to run — `py_trees` is the only non-stdlib dep.
 
 ## Known gaps / follow-ups
 
+### Adapter / data quality
+
 1. **Ball velocity** is hard-coded to `(0, 0)`. Wire `velocity_est` or
    compute from frame history so `IsBallComing` and pass logic can use
    real motion data.
 2. **Referee score** is hard-coded `(0, 0)`; expose from `wm.ref_data`.
-3. **Dribble** is mapped to `move_to`; build a real dribble skill that
-   keeps the ball glued to the kicker.
-4. **`IntentReceive`** holds station — should reposition to the predicted
-   reception point once the pass play is wired.
-5. **Angular controller** in the adapter is a simple P-controller. If the
+3. **Angular controller** in the adapter is a simple P-controller. If the
    motion layer expects a target heading rather than `w`, push the
    conversion downstream and stop setting `w` here.
-6. **Snapshot per-tick allocation**: each tick currently builds a fresh
+4. **Snapshot per-tick allocation**: each tick currently builds a fresh
    `Snapshot` (frozen dataclass + tuple coercions). If this shows up in
    profiling, batch the conversion or expose `WorldModel` accessors that
    yield the underlying objects in-place.
+
+### Skill gaps
+
+5. **Dribble** is mapped to `move_to`; build a real dribble skill that
+   keeps the ball glued to the kicker.
+6. **`IntentReceive`** holds station — should reposition to the predicted
+   reception point once the pass play is wired.
+
+### Active BT bugs (observed on grSim + real robot)
+
+7. **Attacker: `POSSESSION_DIST` oscillation** — robot flickers between
+   possession and no-possession every few ticks, causing it to alternate
+   between orienting toward goal and chasing the ball. Needs hysteresis
+   (separate acquire/lose thresholds) and empirical tuning of
+   `POSSESSION_DIST` on the physical robot. See `future.md §0.1`.
+
+8. **Attacker: over-eager kicking** — `HasClearShot` fires `IntentKick`
+   whenever the shot corridor is geometrically clear, regardless of
+   distance or angle. Should gate on shot quality (distance + cone width)
+   and prefer dribbling when inside a "dribble zone". See `future.md §0.2`.
+
+9. **Attacker: no field boundary enforcement** — target positions can
+   exceed field lines when chasing a ball that has rolled out of play.
+   Needs a shared `clamp_to_field(pos, margin)` utility applied to all
+   `IntentMove` targets. See `future.md §0.3`.
+
+10. **Supporter: hardcoded position, no dynamic repositioning** — the
+    supporter always moves to `(1.0, 2.0)` and `IsBallComing` is stubbed
+    to always return FAILURE. A full redesign is planned (ball-chasing,
+    pass distribution, open-space positioning). See `future.md §0.4` for
+    the full node-by-node spec.
 
 ---
 
