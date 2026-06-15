@@ -119,6 +119,44 @@ has not received its first vision frame yet, the tick is skipped.
 
 ---
 
+## Field side convention (`us_positive`)
+
+Every tree that cares about field direction (`GoalieTree`, `AttackerTree`,
+`DefenderTree`, `SupporterTree`) receives a single `us_positive: bool`
+argument at construction time.
+
+```
+us_positive = True   →   OUR team occupies the +x half of the field
+                         Our goal is at  x ≈ +4.5 m  (goalie defends +x end)
+                         Opponent goal is at  x ≈ −4.5 m  (attacker shoots −x)
+
+us_positive = False  →   OUR team occupies the −x half of the field
+                         Our goal is at  x ≈ −4.5 m  (goalie defends −x end)
+                         Opponent goal is at  x ≈ +4.5 m  (attacker shoots +x)
+```
+
+This value is read from `ipconfig.yaml` (`us_positive: true/false`) and
+**must not be hardcoded** to a team colour. Yellow and blue can each occupy
+either half depending on the match setup.
+
+### How `us_positive` is derived in `run_bt_v2_process`
+
+```python
+cfg_us_positive = bool(_cfg.us_positive)   # our team's side from yaml
+cfg_us_yellow   = bool(_cfg.us_yellow)     # which colour is "us" in yaml
+
+# Same team as configured → use yaml value directly.
+# Opponent team → flip it (they're on the other half).
+_us_positive = cfg_us_positive if (is_yellow == cfg_us_yellow) else not cfg_us_positive
+```
+
+**Common mistake:** using `_us_positive = not is_yellow` (i.e. always
+putting yellow on −x and blue on +x). This only works in one specific
+field setup and will cause the goalie to defend the wrong goal and the
+attacker to shoot into its own goal when the team is on the +x side.
+
+---
+
 ## Running the moved tests
 
 ```powershell

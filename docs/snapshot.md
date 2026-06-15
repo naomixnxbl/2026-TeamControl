@@ -100,6 +100,30 @@ Conventions worth knowing:
 - The Snapshot is **shared** across all robots being ticked. Treat it as
   read-only — `tuple` and `frozen=True` will catch most accidental mutation.
 
+### Field coordinate frame
+
+```
+          −x  ←──────── 0 ────────→  +x
+  (one goal)    field centre    (other goal)
+```
+
+- Origin is the **centre of the field**.
+- +x and −x each hold one goal. Which goal belongs to which team depends on
+  the match setup, not on team colour.
+- The `us_positive` flag (from `ipconfig.yaml`) tells the BT which side is
+  ours:
+
+| `us_positive` | Our goal | Opponent goal |
+|---|---|---|
+| `True` | x ≈ +4.5 m | x ≈ −4.5 m |
+| `False` | x ≈ −4.5 m | x ≈ +4.5 m |
+
+- Orientations are in **radians**, counter-clockwise from the +x axis,
+  wrapped to `[−π, π]`. A robot facing +x has orientation `0`; facing +y
+  (left of field from +x perspective) has orientation `π/2`.
+- All positions in `Snapshot` are already in metres — `adapter.py` applies
+  the `mm → m` conversion from SSL vision before populating the Snapshot.
+
 ---
 
 ## How to produce a Snapshot (or alternate implementations)

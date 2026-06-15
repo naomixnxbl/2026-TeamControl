@@ -95,8 +95,11 @@ def run_bt_v2_process(
     _cfg = _YamlConfig(config_file)
     if is_yellow is None:
         is_yellow = bool(_cfg.us_yellow)
-    # Blue team is always on the opposite side from yellow.
-    _us_positive = not is_yellow if is_yellow is not None else bool(_cfg.us_positive)
+    # Derive us_positive from config: our team's side is read directly from
+    # yaml; the opposing team is on the opposite side.
+    cfg_us_positive = bool(_cfg.us_positive)
+    cfg_us_yellow   = bool(_cfg.us_yellow)
+    _us_positive = cfg_us_positive if (is_yellow == cfg_us_yellow) else not cfg_us_positive
     coordinator = _build_coordinator(us_positive=_us_positive)
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
 

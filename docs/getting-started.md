@@ -37,8 +37,9 @@ Point to:
 | `true` : grSim Controls are active | `false` : grSim Controls are NOT active |
 - `us_yellow` - default team color
 | `true` : yellow | `false` : blue |
-- `us_positive` - default team side (x-axis) is on positive
-| `true` : positive | `false` : negative |
+- `us_positive` - which half of the field OUR team occupies (independent of colour)
+| `true` : our goal is at +x, we attack toward −x | `false` : our goal is at −x, we attack toward +x |
+| ⚠️ This must match the actual field setup. Getting it wrong causes the goalie to defend the wrong goal and the attacker to shoot into its own goal. |
 - grSim IP/port - connection sending address of grSim network `ip` and `port`
 | `internal` : '127.0.0.1' | `external` : xxx.xxx.xxx.xxx | 
 | `port` See grSim - Command listening port | `default` 20010 |
