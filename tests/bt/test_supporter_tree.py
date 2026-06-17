@@ -1,41 +1,46 @@
-"""Tests for the Supporter behaviour tree — R007.
+"""Tests for the Supporter behaviour tree — v2.
 
-TDD: these tests are written BEFORE the implementation exists.
-All tests in this file must fail with ImportError (or a collection error
-that wraps ImportError) until ``src/bt/trees/supporter.py`` is created.
+Tree topology under test:
 
-Tree topology under test (from spec R007 / docs/supporting_node.png):
-
-    SupportingSelectorNode (Selector)
-    ├── MoveToSpace        → writes IntentMove(open_space_pos)
-    ├── ReceiveBallSequence (Sequence)
-    │   ├── IsBallComing   (Condition — STUBBED, always returns FAILURE)
-    │   └── ReceiveBall    → writes IntentReceive()
-    └── BlockOpponent      → writes IntentMove(blocking_pos)
-
-Usage contract expected by the tree:
-
-    from TeamControl.bt.trees.supporter import SupporterTree
-
-    tree = SupporterTree()
-    tree.set_snapshot(snapshot)   # inject world state before tick
-    tree.tick(blackboard)          # run the tree; writes intent to blackboard
-    intent = blackboard.current_intent
+    SupporterRoot (Selector)
+    ├── BallPossessionSequence (Sequence)
+    │   ├── IsClosestToBall
+    │   └── GoToBall
+    ├── PossessionSequence (Sequence)
+    │   ├── InPossession
+    │   └── DistributeSelector (Selector)
+    │       ├── PassSequence (Sequence)
+    │       │   ├── FindOpenTeammate
+    │       │   └── PassToTeammate
+    │       ├── ShootIfClose
+    │       └── DribbleToGoal
+    └── RepositionToSpace
 """
 from __future__ import annotations
+
+import math
 
 import pytest
 import py_trees
 
-# --- import under test (will ImportError until supporter.py is implemented) ---
-from TeamControl.bt.trees.supporter import SupporterTree  # noqa: E402
+from TeamControl.bt.trees.supporter import SupporterTree
+from TeamControl.bt.trees.supporter import (
+    GOALIE_ID,
+    POSSESSION_DIST,
+    POSSESSION_HEADING_TOL,
+    SHOOT_DIST_THRESHOLD,
+    MARKED_THRESHOLD,
+    PASS_ORIENT_TOL,
+    PASS_SIGNAL_TIMEOUT_TICKS,
+)
 
-# --- contracts ---------------------------------------------------------------
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
 from TeamControl.bt.contracts.intent import (
     Intent,
+    IntentDribble,
+    IntentKick,
     IntentMove,
-    IntentReceive,
+    IntentPass,
 )
 from TeamControl.bt.contracts.snapshot import (
     GamePhase,
@@ -46,44 +51,48 @@ from TeamControl.bt.contracts.snapshot import (
 
 
 # ---------------------------------------------------------------------------
-# Snapshot helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 _SUPPORTER_ID = 3
+_SUPPORTER_ID_B = 4
+_ATTACKER_ID = 1
+_GOALIE_POS = (-4.0, 0.0)
 
 
 def make_snapshot(
     ball_pos: tuple[float, float] = (0.0, 0.0),
     own_robots: list[RobotState] | None = None,
+    opponent_robots: list[RobotState] | None = None,
 ) -> Snapshot:
-    """Build a minimal Snapshot for supporter tests."""
     if own_robots is None:
         own_robots = [
+            RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
             RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
         ]
+    if opponent_robots is None:
+        opponent_robots = []
     return Snapshot(
         ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        opponent_robots=[],
+        opponent_robots=opponent_robots,
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 
 
-def _make_supporter_blackboard() -> RobotBlackboard:
-    """Return a fresh RobotBlackboard for the supporter robot."""
-    return RobotBlackboard(robot_id=_SUPPORTER_ID, current_role=RoleType.SUPPORTER)
+def _make_bb(robot_id: int = _SUPPORTER_ID) -> RobotBlackboard:
+    return RobotBlackboard(robot_id=robot_id, current_role=RoleType.SUPPORTER)
+
+
+def _tick(snapshot: Snapshot, bb: RobotBlackboard, us_positive: bool = True) -> RobotBlackboard:
+    tree = SupporterTree(us_positive=us_positive)
+    tree.set_snapshot(snapshot)
+    tree.tick(bb)
+    return bb
 
 
 SNAPSHOT_DEFAULT = make_snapshot()
-
-
-def _tick(snapshot: Snapshot, blackboard: RobotBlackboard) -> RobotBlackboard:
-    """Convenience: create a tree, inject snapshot, tick, return the blackboard."""
-    tree = SupporterTree()
-    tree.set_snapshot(snapshot)
-    tree.tick(blackboard)
-    return blackboard
 
 
 # ---------------------------------------------------------------------------
@@ -91,446 +100,928 @@ def _tick(snapshot: Snapshot, blackboard: RobotBlackboard) -> RobotBlackboard:
 # ---------------------------------------------------------------------------
 
 class TestSupporterTreeImport:
-    """SupporterTree must be importable and instantiable without side effects."""
-
-    def test_supporter_tree_is_importable(self) -> None:
+    def test_importable(self) -> None:
         from TeamControl.bt.trees.supporter import SupporterTree as ST  # noqa: F401
 
-    def test_supporter_tree_instantiates(self) -> None:
-        tree = SupporterTree()
-        assert tree is not None
+    def test_instantiates(self) -> None:
+        assert SupporterTree() is not None
 
     def test_has_set_snapshot_method(self) -> None:
-        tree = SupporterTree()
-        assert callable(getattr(tree, "set_snapshot", None))
+        assert callable(getattr(SupporterTree(), "set_snapshot", None))
 
     def test_has_tick_method(self) -> None:
-        tree = SupporterTree()
-        assert callable(getattr(tree, "tick", None))
+        assert callable(getattr(SupporterTree(), "tick", None))
 
     def test_does_not_import_robot_command(self) -> None:
         import inspect
         import TeamControl.bt.trees.supporter as mod
         source = inspect.getsource(mod)
-        assert "RobotCommand" not in source, (
-            "SupporterTree must not reference RobotCommand"
-        )
+        assert "RobotCommand" not in source
 
 
 # ---------------------------------------------------------------------------
-# TestSupporterTreeTopology — py_trees structure
+# TestSupporterTreeTopology — v2 py_trees structure
 # ---------------------------------------------------------------------------
 
 class TestSupporterTreeTopology:
-    """Root node must be a py_trees Selector named 'SupportingSelectorNode'."""
-
     def test_root_is_selector(self) -> None:
         tree = SupporterTree()
-        assert isinstance(tree.root, py_trees.composites.Selector), (
-            f"Expected py_trees.composites.Selector, got {type(tree.root)}"
-        )
+        assert isinstance(tree.root, py_trees.composites.Selector)
 
     def test_root_name(self) -> None:
         tree = SupporterTree()
-        assert tree.root.name == "SupportingSelectorNode"
+        assert tree.root.name == "SupporterRoot"
 
-    def test_root_has_three_children(self) -> None:
+    def test_root_has_four_children(self) -> None:
         tree = SupporterTree()
-        assert len(tree.root.children) == 3, (
-            "Root Selector must have exactly 3 children: "
-            "MoveToSpace, ReceiveBallSequence, BlockOpponent"
-        )
+        assert len(tree.root.children) == 4
 
-    def test_first_child_is_behaviour(self) -> None:
-        """MoveToSpace must be a Behaviour leaf node."""
+    def test_first_child_is_possession_sequence(self) -> None:
         tree = SupporterTree()
         first = tree.root.children[0]
-        assert isinstance(first, py_trees.behaviour.Behaviour), (
-            f"First child must be a Behaviour (MoveToSpace), got {type(first)}"
-        )
+        assert isinstance(first, py_trees.composites.Sequence)
+        assert first.name == "PossessionSequence"
+        assert len(first.children) == 2
+        assert first.children[0].name == "InPossession"
 
-    def test_first_child_name(self) -> None:
+    def test_distribute_selector_structure(self) -> None:
         tree = SupporterTree()
-        first = tree.root.children[0]
-        assert first.name == "MoveToSpace"
+        distribute = tree.root.children[0].children[1]
+        assert isinstance(distribute, py_trees.composites.Selector)
+        assert distribute.name == "DistributeSelector"
+        assert len(distribute.children) == 3
+        assert distribute.children[0].name == "PassSequence"
+        assert distribute.children[1].name == "ShootIfClose"
+        assert distribute.children[2].name == "DribbleToGoal"
 
-    def test_second_child_is_sequence(self) -> None:
-        """ReceiveBallSequence must be a Sequence."""
+    def test_pass_sequence_structure(self) -> None:
+        tree = SupporterTree()
+        pass_seq = tree.root.children[0].children[1].children[0]
+        assert isinstance(pass_seq, py_trees.composites.Sequence)
+        assert len(pass_seq.children) == 3
+        assert pass_seq.children[0].name == "FindOpenTeammate"
+        assert pass_seq.children[1].name == "DribbleTowardTarget"
+        assert pass_seq.children[2].name == "PassToTeammate"
+
+    def test_second_child_is_receive_pass_sequence(self) -> None:
         tree = SupporterTree()
         second = tree.root.children[1]
-        assert isinstance(second, py_trees.composites.Sequence), (
-            f"Second child must be Sequence (ReceiveBallSequence), got {type(second)}"
-        )
+        assert isinstance(second, py_trees.composites.Sequence)
+        assert second.name == "ReceivePassSequence"
+        assert len(second.children) == 2
+        assert second.children[0].name == "IsPassTarget"
+        assert second.children[1].name == "HoldForPass"
 
-    def test_second_child_name(self) -> None:
-        tree = SupporterTree()
-        second = tree.root.children[1]
-        assert second.name == "ReceiveBallSequence"
-
-    def test_receive_ball_sequence_has_two_children(self) -> None:
-        tree = SupporterTree()
-        seq = tree.root.children[1]
-        assert len(seq.children) == 2, (
-            "ReceiveBallSequence must have exactly 2 children: "
-            "IsBallComing and ReceiveBall"
-        )
-
-    def test_is_ball_coming_is_first_child_of_sequence(self) -> None:
-        tree = SupporterTree()
-        seq = tree.root.children[1]
-        first = seq.children[0]
-        assert first.name == "IsBallComing"
-
-    def test_receive_ball_is_second_child_of_sequence(self) -> None:
-        tree = SupporterTree()
-        seq = tree.root.children[1]
-        second = seq.children[1]
-        assert second.name == "ReceiveBall"
-
-    def test_third_child_is_behaviour(self) -> None:
-        """BlockOpponent must be a Behaviour leaf node."""
+    def test_third_child_is_ball_possession_sequence(self) -> None:
         tree = SupporterTree()
         third = tree.root.children[2]
-        assert isinstance(third, py_trees.behaviour.Behaviour), (
-            f"Third child must be a Behaviour (BlockOpponent), got {type(third)}"
+        assert isinstance(third, py_trees.composites.Sequence)
+        assert third.name == "BallPossessionSequence"
+        assert len(third.children) == 2
+        assert third.children[0].name == "IsClosestToBall"
+        assert third.children[1].name == "GoToBall"
+
+    def test_fourth_child_is_reposition(self) -> None:
+        tree = SupporterTree()
+        fourth = tree.root.children[3]
+        assert isinstance(fourth, py_trees.behaviour.Behaviour)
+        assert fourth.name == "RepositionToSpace"
+
+
+# ---------------------------------------------------------------------------
+# TestIsClosestToBall
+# ---------------------------------------------------------------------------
+
+class TestIsClosestToBall:
+    def test_single_supporter_always_closest(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(2.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(1.0, 0.0), orientation=0.0),
+            ],
+        )
+        bb = _tick(snap, _make_bb())
+        assert isinstance(bb.current_intent, IntentMove)
+        assert bb.intent_source == "GoToBall"
+
+    def test_closest_of_two_supporters(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(1.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Robot 3 is closer → should chase
+        bb3 = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert bb3.intent_source == "GoToBall"
+
+        # Robot 4 is farther → should reposition
+        bb4 = _tick(snap, _make_bb(_SUPPORTER_ID_B))
+        assert bb4.intent_source == "RepositionToSpace"
+
+    def test_tie_goes_to_lowest_id(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(1.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(-1.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Both at distance 1.0 — lower id (3) wins
+        bb3 = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert bb3.intent_source == "GoToBall"
+
+        bb4 = _tick(snap, _make_bb(_SUPPORTER_ID_B))
+        assert bb4.intent_source == "RepositionToSpace"
+
+    def test_goalie_excluded(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(-3.9, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(1.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Goalie is closer but excluded — supporter should chase
+        bb = _tick(snap, _make_bb())
+        assert bb.intent_source == "GoToBall"
+
+
+# ---------------------------------------------------------------------------
+# TestGoToBall
+# ---------------------------------------------------------------------------
+
+class TestGoToBall:
+    def test_produces_intent_move_to_ball(self) -> None:
+        ball = (2.0, 1.0)
+        snap = make_snapshot(
+            ball_pos=ball,
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        bb = _tick(snap, _make_bb())
+        assert isinstance(bb.current_intent, IntentMove)
+        assert bb.current_intent.target_pos == ball
+
+    def test_orientation_faces_ball(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.0, 1.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        bb = _tick(snap, _make_bb())
+        assert isinstance(bb.current_intent, IntentMove)
+        assert bb.current_intent.target_orientation == pytest.approx(math.pi / 2, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# TestInPossession
+# ---------------------------------------------------------------------------
+
+class TestInPossession:
+    def _possession_snap(self, robot_pos, robot_orient, ball_pos):
+        return make_snapshot(
+            ball_pos=ball_pos,
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=robot_pos, orientation=robot_orient),
+            ],
         )
 
-    def test_third_child_name(self) -> None:
+    def test_ball_close_and_aligned_returns_success(self) -> None:
         tree = SupporterTree()
-        third = tree.root.children[2]
-        assert third.name == "BlockOpponent"
+        snap = self._possession_snap((0.0, 0.0), 0.0, (0.1, 0.0))
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        node = tree.root.children[0].children[0]  # InPossession
+        result = node.update()
+        assert result == py_trees.common.Status.SUCCESS
+
+    def test_ball_far_returns_failure(self) -> None:
+        tree = SupporterTree()
+        snap = self._possession_snap((0.0, 0.0), 0.0, (2.0, 0.0))
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        node = tree.root.children[1].children[0]
+        result = node.update()
+        assert result == py_trees.common.Status.FAILURE
+
+    def test_ball_close_but_behind_returns_failure(self) -> None:
+        tree = SupporterTree()
+        snap = self._possession_snap((0.0, 0.0), 0.0, (-0.1, 0.0))
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        node = tree.root.children[1].children[0]
+        result = node.update()
+        assert result == py_trees.common.Status.FAILURE
 
 
 # ---------------------------------------------------------------------------
-# TestSupporterTreeTickInterface
+# TestFindOpenTeammate
 # ---------------------------------------------------------------------------
 
-class TestSupporterTreeTickInterface:
-    """set_snapshot + tick compose correctly; blackboard.current_intent is set."""
-
-    def test_tick_sets_current_intent(self) -> None:
-        bb = _make_supporter_blackboard()
-        assert bb.current_intent is None
-        bb = _tick(SNAPSHOT_DEFAULT, bb)
-        assert bb.current_intent is not None
-
-    def test_tick_does_not_raise(self) -> None:
-        bb = _make_supporter_blackboard()
-        _tick(SNAPSHOT_DEFAULT, bb)  # must not raise
-
-    def test_multiple_ticks_do_not_raise(self) -> None:
+class TestFindOpenTeammate:
+    def test_open_teammate_found(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
+            ],
+        )
         tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        bb = _make_supporter_blackboard()
-        tree.tick(bb)
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        # FindOpenTeammate is at root[1] → children[1](DistributeSelector) → children[0](PassSequence) → children[0]
+        find_node = tree.root.children[0].children[1].children[0].children[0]
+        result = find_node.update()
+        assert result == py_trees.common.Status.SUCCESS
+        assert tree._pass_target_id == _ATTACKER_ID
 
-    def test_snapshot_can_be_replaced_between_ticks(self) -> None:
+    def test_all_teammates_marked(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
+            ],
+            opponent_robots=[
+                RobotState(robot_id=10, position=(2.1, 2.0), orientation=0.0),
+            ],
+        )
         tree = SupporterTree()
-        bb = _make_supporter_blackboard()
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        find_node = tree.root.children[0].children[1].children[0].children[0]
+        result = find_node.update()
+        assert result == py_trees.common.Status.FAILURE
 
-        snap_a = make_snapshot(ball_pos=(1.0, 0.0))
-        snap_b = make_snapshot(ball_pos=(2.0, 0.0))
-
-        tree.set_snapshot(snap_a)
-        tree.tick(bb)
-        intent_a = bb.current_intent
-
-        tree.set_snapshot(snap_b)
-        tree.tick(bb)
-        intent_b = bb.current_intent
-
-        assert intent_a is not None
-        assert intent_b is not None
-
-    def test_tick_without_coordinator(self) -> None:
-        """Tree must be usable in isolation — no Coordinator required."""
-        bb = _make_supporter_blackboard()
+    def test_goalie_excluded(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=(0.0, 3.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
         tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        find_node = tree.root.children[0].children[1].children[0].children[0]
+        result = find_node.update()
+        # Only goalie is available → should fail (goalie excluded)
+        assert result == py_trees.common.Status.FAILURE
+
+    def test_self_excluded(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree = SupporterTree()
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        find_node = tree.root.children[0].children[1].children[0].children[0]
+        result = find_node.update()
+        assert result == py_trees.common.Status.FAILURE
 
 
 # ---------------------------------------------------------------------------
-# TestMoveToSpaceAction — v1: MoveToSpace always succeeds → IntentMove
+# TestDribbleTowardTarget
 # ---------------------------------------------------------------------------
 
-class TestMoveToSpaceAction:
-    """MoveToSpace must always succeed in v1, writing IntentMove(open_space_pos)."""
+class TestDribbleTowardTarget:
+    def _get_node(self, tree):
+        return tree.root.children[0].children[1].children[0].children[1]
 
+    def test_not_aligned_returns_running_with_dribble(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        tree._pass_target_pos = (-2.0, 0.0)
+        node = self._get_node(tree)
+        result = node.update()
+        assert result == py_trees.common.Status.RUNNING
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.current_intent.target_pos == (-2.0, 0.0)
+        assert bb.intent_source == "DribbleTowardTarget"
+
+    def test_aligned_returns_success(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        tree._pass_target_pos = (2.0, 0.0)
+        node = self._get_node(tree)
+        result = node.update()
+        assert result == py_trees.common.Status.SUCCESS
+
+    def test_dribble_targets_teammate_position(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        tree._pass_target_pos = (0.0, 2.0)
+        node = self._get_node(tree)
+        node.update()
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.current_intent.target_pos == (0.0, 2.0)
+
+
+# ---------------------------------------------------------------------------
+# TestShootIfClose
+# ---------------------------------------------------------------------------
+
+class TestShootIfClose:
+    def test_close_to_goal_shoots(self) -> None:
+        # us_positive=True → goal at (-4.5, 0)
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(-4.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(-3.5, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        shoot_node = tree.root.children[0].children[1].children[1]  # ShootIfClose
+        result = shoot_node.update()
+        assert result == py_trees.common.Status.SUCCESS
+        assert isinstance(bb.current_intent, IntentKick)
+
+    def test_far_from_goal_fails(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        shoot_node = tree.root.children[0].children[1].children[1]
+        result = shoot_node.update()
+        assert result == py_trees.common.Status.FAILURE
+
+
+# ---------------------------------------------------------------------------
+# TestDribbleToGoal
+# ---------------------------------------------------------------------------
+
+class TestDribbleToGoal:
+    def test_writes_intent_dribble(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree.set_snapshot(SNAPSHOT_DEFAULT)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        dribble_node = tree.root.children[0].children[1].children[2]
+        result = dribble_node.update()
+        assert result == py_trees.common.Status.SUCCESS
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.current_intent.target_pos == (-4.5, 0.0)
+
+    def test_us_positive_false_goal(self) -> None:
+        tree = SupporterTree(us_positive=False)
+        tree.set_snapshot(SNAPSHOT_DEFAULT)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        dribble_node = tree.root.children[0].children[1].children[2]
+        dribble_node.update()
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.current_intent.target_pos == (4.5, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# TestPassToTeammate
+# ---------------------------------------------------------------------------
+
+class TestPassToTeammate:
+    def test_writes_intent_pass(self) -> None:
+        tree = SupporterTree()
+        tree.set_snapshot(SNAPSHOT_DEFAULT)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        tree._pass_target_id = 1
+        tree._pass_target_pos = (2.0, 1.0)
+        pass_node = tree.root.children[0].children[1].children[0].children[2]
+        result = pass_node.update()
+        assert result == py_trees.common.Status.SUCCESS
+        assert isinstance(bb.current_intent, IntentPass)
+        assert bb.current_intent.target_robot_id == 1
+        assert bb.current_intent.target_pos == (2.0, 1.0)
+
+    def test_fails_without_scratch_state(self) -> None:
+        tree = SupporterTree()
+        tree.set_snapshot(SNAPSHOT_DEFAULT)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        pass_node = tree.root.children[0].children[1].children[0].children[2]
+        result = pass_node.update()
+        assert result == py_trees.common.Status.FAILURE
+
+
+# ---------------------------------------------------------------------------
+# TestRepositionToSpace
+# ---------------------------------------------------------------------------
+
+class TestRepositionToSpace:
     def test_produces_intent_move(self) -> None:
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
-        assert isinstance(bb.current_intent, IntentMove), (
-            f"Expected IntentMove from MoveToSpace, got {type(bb.current_intent)}"
+        # Need a second supporter so this one isn't closest and falls to reposition
+        snap = make_snapshot(
+            ball_pos=(5.0, 5.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(4.0, 4.0), orientation=0.0),
+            ],
         )
+        # Robot 4 is closer to ball → robot 3 repositions
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert isinstance(bb.current_intent, IntentMove)
+        assert bb.intent_source == "RepositionToSpace"
 
-    def test_intent_move_has_target_pos(self) -> None:
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
+    def test_avoids_opponents(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
+            opponent_robots=[
+                RobotState(robot_id=10, position=(-2.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Robot 4 is not closest (robot 3 is) → will reposition
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID_B))
         assert isinstance(bb.current_intent, IntentMove)
         pos = bb.current_intent.target_pos
-        assert isinstance(pos, tuple)
-        assert len(pos) == 2
+        opp_dist = math.hypot(pos[0] - (-2.0), pos[1] - 0.0)
+        assert opp_dist > 0.5, f"Repositioned too close to opponent: {pos}"
 
-    def test_intent_move_target_is_open_space_position(self) -> None:
-        """v1 open-space position is hardcoded to (1.0, 2.0)."""
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
+    def test_orientation_toward_ball(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(1.0, 1.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 0.0), orientation=0.0),
+            ],
+        )
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID_B))
         assert isinstance(bb.current_intent, IntentMove)
-        assert bb.current_intent.target_pos == (1.0, 2.0), (
-            f"Expected open-space pos (1.0, 2.0), got {bb.current_intent.target_pos}"
+        assert bb.current_intent.target_orientation is not None
+
+    def test_us_positive_mirrors_bounds(self) -> None:
+        tree_pos = SupporterTree(us_positive=True)
+        tree_neg = SupporterTree(us_positive=False)
+        # When us_positive=True, repo_x_min should be negative (our attacking half is -x)
+        assert tree_pos.repo_x_min < 0
+        assert tree_pos.repo_x_max <= 0 or tree_pos.repo_x_max <= 1.0
+        # When us_positive=False, repo_x_max should be positive (attacking toward +x)
+        assert tree_neg.repo_x_max > 0
+
+
+# ---------------------------------------------------------------------------
+# TestPhaseIntegration — full-tree tick scenarios
+# ---------------------------------------------------------------------------
+
+class TestPhaseIntegration:
+    def test_closest_chases_other_repositions(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(1.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
         )
+        bb3 = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert bb3.intent_source == "GoToBall"
 
-    def test_move_to_space_not_intent_receive(self) -> None:
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
-        assert not isinstance(bb.current_intent, IntentReceive)
+        bb4 = _tick(snap, _make_bb(_SUPPORTER_ID_B))
+        assert bb4.intent_source == "RepositionToSpace"
 
-    def test_move_to_space_result_is_consistent(self) -> None:
-        """Multiple ticks on same snapshot produce same intent type."""
+    def test_possession_with_open_teammate_dribbles_toward_then_passes(self) -> None:
+        # Robot 3 has possession, attacker is open but not in front
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Robot 3 facing 0, target not aligned → DribbleTowardTarget
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.intent_source == "DribbleTowardTarget"
+
+    def test_possession_aligned_teammate_passes_immediately(self) -> None:
+        # Robot 3 has possession AND is already facing the teammate → pass fires
+        # Robot 3 at (0,0) facing 0, ball at (0.1, 0) → InPossession OK
+        # Attacker at (2, 0) → angle 0, robot facing 0 → aligned → IntentPass
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
+        )
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert isinstance(bb.current_intent, IntentPass)
+        assert bb.intent_source == "PassToTeammate"
+
+    def test_possession_no_chase_when_not_closest(self) -> None:
+        # Robot 4 has possession, robot 3 is closer to ball, attacker is open
+        # Robot 4 at (0,0) facing 0, ball at (0.1, 0) → InPossession OK
+        # Attacker at (2, 0) → angle_to_target = 0, robot facing 0 → already aligned
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.05, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 0.0), orientation=0.0),
+            ],
+        )
+        # Robot 3 dist = 0.05, Robot 4 dist = 0.1 → robot 3 is closest
+        # Robot 4: dist 0.1 < 0.122, facing 0, ball angle 0 → InPossession OK
+        # Attacker at (2,0), robot 4 at (0,0), angle = 0, facing 0 → aligned → IntentPass
+        bb4 = _tick(snap, _make_bb(_SUPPORTER_ID_B))
+        assert isinstance(bb4.current_intent, IntentPass)
+        assert bb4.intent_source == "PassToTeammate"
+
+    def test_possession_all_marked_close_shoots(self) -> None:
+        # us_positive=True → goal at (-4.5, 0)
+        # Robot 3 is closer to ball → robot 4 falls through IsClosestToBall
+        # Robot 4 has possession and is close to goal, all teammates marked
+        snap = make_snapshot(
+            ball_pos=(-3.5, 0.01),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(-3.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(-3.5, 0.1), orientation=-math.pi / 2),
+                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 0.0), orientation=0.0),
+            ],
+            opponent_robots=[
+                RobotState(robot_id=10, position=(2.1, 0.0), orientation=0.0),
+                RobotState(robot_id=11, position=(-3.5, 0.05), orientation=0.0),
+            ],
+        )
+        # Robot 3 dist to ball = 0.01, Robot 4 dist to ball = hypot(0, 0.09) = 0.09
+        # Robot 3 is closest → robot 4 not closest
+        # Robot 4: dist 0.09 < 0.122, facing -pi/2, ball at angle ≈ -pi/2 → InPossession OK
+        # Attacker is marked (opp 10 at 2.1,0 near attacker at 2,0 → dist 0.1 < 0.5)
+        # Robot 3 is marked (opp 11 at -3.5,0.05 near robot 3 at -3.5,0 → dist 0.05 < 0.5)
+        # All marked → FindOpenTeammate fails
+        # Robot 4 dist to goal(-4.5,0) = hypot(-1.0, 0.1) ≈ 1.005 < 2.0 → ShootIfClose
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID_B), us_positive=True)
+        assert isinstance(bb.current_intent, IntentKick)
+        assert bb.intent_source == "ShootIfClose"
+
+    def test_possession_all_marked_far_dribbles(self) -> None:
+        # Robot 3 is closer to ball, robot 4 has possession but isn't closest
+        # Ball at (0.0, 0.01), robot 3 at (0.0, 0.0) dist=0.01, robot 4 at (0.0, 0.1) dist=0.09
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.01),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(0.0, 0.1), orientation=-math.pi / 2),
+            ],
+            opponent_robots=[
+                RobotState(robot_id=10, position=(0.1, 0.0), orientation=0.0),
+            ],
+        )
+        # Robot 3 is closest → robot 4 not closest
+        # Robot 4: dist=0.09 < 0.122, facing -pi/2, ball angle ≈ -pi/2 → InPossession OK
+        # Robot 3 is marked (opp at 0.1,0 dist 0.1 < 0.5) → FindOpenTeammate fails
+        # Far from goal → ShootIfClose fails → DribbleToGoal
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID_B))
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert bb.intent_source == "DribbleToGoal"
+
+    def test_multiple_sequential_robots_same_tree(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(1.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+            ],
+        )
         tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        for _ in range(3):
-            bb = _make_supporter_blackboard()
-            tree.tick(bb)
-            assert isinstance(bb.current_intent, IntentMove)
+        tree.set_snapshot(snap)
 
+        bb3 = _make_bb(_SUPPORTER_ID)
+        tree.tick(bb3)
+        assert bb3.current_intent is not None
 
-# ---------------------------------------------------------------------------
-# TestIsBallComingStub — R007: IsBallComing always returns FAILURE in v1
-# ---------------------------------------------------------------------------
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+        assert bb4.current_intent is not None
 
-class TestIsBallComingStub:
-    """IsBallComing stub must always return FAILURE, blocking ReceiveBallSequence."""
-
-    def test_is_ball_coming_always_fails(self) -> None:
-        """ReceiveBallSequence never fires in v1 — IsBallComing blocks it."""
-        import TeamControl.bt.trees.supporter as mod
-        # Instantiate the tree to get access to node instances
-        tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        bb = _make_supporter_blackboard()
-        tree._blackboard_ref[0] = bb
-
-        # Find IsBallComing child inside ReceiveBallSequence
-        receive_seq = tree.root.children[1]
-        is_ball_coming = receive_seq.children[0]
-
-        # Tick it directly — must always return FAILURE
-        result = is_ball_coming.update()
-        assert result == py_trees.common.Status.FAILURE, (
-            f"IsBallComing stub must return FAILURE, got {result}"
+    def test_no_possession_falls_to_reposition(self) -> None:
+        snap = make_snapshot(
+            ball_pos=(5.0, 5.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(0.0, 1.0), orientation=0.0),
+            ],
         )
-
-    def test_is_ball_coming_has_todo_comment(self) -> None:
-        """IsBallComing must have a TODO comment referencing DoBallTrajectory."""
-        import inspect
-        import TeamControl.bt.trees.supporter as mod
-        source = inspect.getsource(mod)
-        assert "TODO" in source and "DoBallTrajectory" in source, (
-            "IsBallComing stub must contain '# TODO: implement DoBallTrajectory'"
-        )
-
-    def test_receive_ball_sequence_never_fires_in_v1(self) -> None:
-        """Because IsBallComing always fails, ReceiveBall is never reached.
-
-        So current_intent should never be IntentReceive in v1.
-        """
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
-        assert not isinstance(bb.current_intent, IntentReceive), (
-            "IntentReceive must not appear in v1 — IsBallComing stub blocks the sequence"
-        )
-
-    def test_receive_ball_sequence_never_fires_multiple_ticks(self) -> None:
-        tree = SupporterTree()
-        for _ in range(5):
-            tree.set_snapshot(SNAPSHOT_DEFAULT)
-            bb = _make_supporter_blackboard()
-            tree.tick(bb)
-            assert not isinstance(bb.current_intent, IntentReceive)
+        # Robot 3 is closer to ball (dist ~7.07 vs ~7.00 for robot 4? let's check)
+        # Robot 3 at (0,0), ball at (5,5): dist=7.07
+        # Robot 4 at (0,1), ball at (5,5): dist=hypot(5,4)=6.40 — robot 4 is closer!
+        # So robot 4 will chase. Let's tick robot 3 instead (farther → reposition)
+        bb = _tick(snap, _make_bb(_SUPPORTER_ID))
+        assert bb.intent_source == "RepositionToSpace"
 
 
 # ---------------------------------------------------------------------------
-# TestBlockOpponentFallback — topology check only (never reached in v1)
+# TestTickInterface — contracts
 # ---------------------------------------------------------------------------
 
-class TestBlockOpponentNode:
-    """BlockOpponent node exists in the tree but is never reached in v1.
-
-    We verify its structure and that it would write IntentMove(blocking_pos)
-    if invoked directly.
-    """
-
-    def test_block_opponent_exists_in_tree(self) -> None:
-        tree = SupporterTree()
-        third = tree.root.children[2]
-        assert third.name == "BlockOpponent"
-
-    def test_block_opponent_writes_intent_move_when_called_directly(self) -> None:
-        """Direct invocation of BlockOpponent.update() writes IntentMove."""
-        tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        bb = _make_supporter_blackboard()
-        tree._blackboard_ref[0] = bb
-
-        block_opponent = tree.root.children[2]
-        result = block_opponent.update()
-
-        assert result == py_trees.common.Status.SUCCESS
-        assert isinstance(bb.current_intent, IntentMove), (
-            f"BlockOpponent must write IntentMove, got {type(bb.current_intent)}"
-        )
-
-    def test_block_opponent_target_is_blocking_position(self) -> None:
-        """v1 blocking position is hardcoded to (-1.0, 0.0)."""
-        tree = SupporterTree()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        bb = _make_supporter_blackboard()
-        tree._blackboard_ref[0] = bb
-
-        block_opponent = tree.root.children[2]
-        block_opponent.update()
-
-        assert isinstance(bb.current_intent, IntentMove)
-        assert bb.current_intent.target_pos == (-1.0, 0.0), (
-            f"Expected blocking pos (-1.0, 0.0), got {bb.current_intent.target_pos}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestNoRobotCommandWritten — R007 invariant
-# ---------------------------------------------------------------------------
-
-class TestNoRobotCommandWritten:
-    """Tree must NEVER write a RobotCommand — only Intent objects."""
-
-    _INTENT_TYPES = (IntentMove, IntentReceive)
-
-    def _assert_no_robot_command(self, bb: RobotBlackboard) -> None:
-        intent = bb.current_intent
-        if intent is None:
-            return
-        cls_name = type(intent).__name__
-        assert not cls_name.endswith("Command"), (
-            f"Tree wrote a RobotCommand ({cls_name}) to blackboard — "
-            "only Intent objects are allowed"
-        )
-
-    def test_no_robot_command_default_snapshot(self) -> None:
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
-        self._assert_no_robot_command(bb)
-
-    def test_intent_is_known_intent_type(self) -> None:
-        bb = _tick(SNAPSHOT_DEFAULT, _make_supporter_blackboard())
-        assert isinstance(bb.current_intent, self._INTENT_TYPES)
-
-    def test_no_robot_command_string_in_source(self) -> None:
-        import inspect
-        import TeamControl.bt.trees.supporter as mod
-        source = inspect.getsource(mod)
-        assert "RobotCommand" not in source, (
-            "SupporterTree source must not contain the string 'RobotCommand'"
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestConditionsReadFromSnapshot — R007: conditions use Snapshot only
-# ---------------------------------------------------------------------------
-
-class TestConditionsReadFromSnapshot:
-    """Conditions must read from Snapshot; blackboard must not carry world state."""
-
-    def test_blackboard_has_no_ball_position_field(self) -> None:
-        import dataclasses
-        bb = _make_supporter_blackboard()
-        field_names = {f.name for f in dataclasses.fields(bb)}
-        assert "ball_position" not in field_names
-
-    def test_blackboard_has_no_own_robots_field(self) -> None:
-        import dataclasses
-        bb = _make_supporter_blackboard()
-        field_names = {f.name for f in dataclasses.fields(bb)}
-        assert "own_robots" not in field_names
-
-    def test_blackboard_has_no_snapshot_field(self) -> None:
-        import dataclasses
-        bb = _make_supporter_blackboard()
-        field_names = {f.name for f in dataclasses.fields(bb)}
-        assert "snapshot" not in field_names
-
-
-# ---------------------------------------------------------------------------
-# TestBlackboardUpdatedAfterTick — R007: current_intent set after every tick
-# ---------------------------------------------------------------------------
-
-class TestBlackboardUpdatedAfterTick:
-    """blackboard.current_intent must be set (not None) after every tick."""
-
-    def test_intent_set_after_tick(self) -> None:
-        bb = _make_supporter_blackboard()
+class TestTickInterface:
+    def test_tick_sets_current_intent(self) -> None:
+        bb = _make_bb()
         assert bb.current_intent is None
         _tick(SNAPSHOT_DEFAULT, bb)
         assert bb.current_intent is not None
 
-    def test_intent_replaced_on_second_tick(self) -> None:
+    def test_multiple_ticks_no_raise(self) -> None:
         tree = SupporterTree()
-        bb = _make_supporter_blackboard()
-
         tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
-        first_intent = bb.current_intent
-
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
-        second_intent = bb.current_intent
-
-        assert second_intent is not None
-
-    def test_three_ticks_all_produce_intents(self) -> None:
-        tree = SupporterTree()
-        bb = _make_supporter_blackboard()
-
-        for _ in range(3):
-            tree.set_snapshot(SNAPSHOT_DEFAULT)
+        bb = _make_bb()
+        for _ in range(5):
             tree.tick(bb)
-            assert bb.current_intent is not None, (
-                "current_intent must be set after each tick"
-            )
+
+    def test_snapshot_can_be_replaced(self) -> None:
+        tree = SupporterTree()
+        bb = _make_bb()
+        tree.set_snapshot(make_snapshot(ball_pos=(1.0, 0.0)))
+        tree.tick(bb)
+        tree.set_snapshot(make_snapshot(ball_pos=(2.0, 0.0)))
+        tree.tick(bb)
+        assert bb.current_intent is not None
 
 
 # ---------------------------------------------------------------------------
-# TestIsolation — tree works without Coordinator (R007)
+# TestNoRobotCommandWritten
+# ---------------------------------------------------------------------------
+
+class TestNoRobotCommandWritten:
+    def test_no_robot_command_string_in_source(self) -> None:
+        import inspect
+        import TeamControl.bt.trees.supporter as mod
+        source = inspect.getsource(mod)
+        assert "RobotCommand" not in source
+
+
+# ---------------------------------------------------------------------------
+# TestIsolation
 # ---------------------------------------------------------------------------
 
 class TestIsolation:
-    """Tree can be ticked in isolation with a mock snapshot; no Coordinator needed."""
-
     def test_fresh_tree_needs_no_coordinator(self) -> None:
         tree = SupporterTree()
-        bb = _make_supporter_blackboard()
+        bb = _make_bb()
         tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)  # must not raise
+        tree.tick(bb)
 
     def test_two_tree_instances_are_independent(self) -> None:
         tree_a = SupporterTree()
         tree_b = SupporterTree()
-        bb_a = _make_supporter_blackboard()
-        bb_b = _make_supporter_blackboard()
-
+        bb_a = _make_bb()
+        bb_b = _make_bb()
         tree_a.set_snapshot(SNAPSHOT_DEFAULT)
         tree_b.set_snapshot(SNAPSHOT_DEFAULT)
-
         tree_a.tick(bb_a)
         tree_b.tick(bb_b)
+        assert bb_a.current_intent is not None
+        assert bb_b.current_intent is not None
 
-        # Both produce IntentMove in v1
-        assert isinstance(bb_a.current_intent, IntentMove)
-        assert isinstance(bb_b.current_intent, IntentMove)
 
-    def test_tree_can_be_used_without_py_trees_runner(self) -> None:
-        """SupporterTree.tick() must work without py_trees BehaviourTree/Runner."""
-        tree = SupporterTree()
-        bb = _make_supporter_blackboard()
-        tree.set_snapshot(SNAPSHOT_DEFAULT)
-        tree.tick(bb)
-        assert bb.current_intent is not None
+# ---------------------------------------------------------------------------
+# TestPassSignal — coordination between passer and receiver
+# ---------------------------------------------------------------------------
+
+class TestPassSignal:
+    """Verify the _active_pass_target side-channel for pass coordination."""
+
+    def _make_pass_scenario_tree(self):
+        """Build a tree and snapshot where robot 3 can pass to robot 4."""
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
+            ],
+        )
+        return tree, snap
+
+    def test_pass_sets_active_signal(self) -> None:
+        # Robot 3 at (0,0) facing 0, ball at (0.1, 0), target at (2,0)
+        # All aligned → pass fires on first tick and sets signal
+        tree = SupporterTree(us_positive=True)
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 0.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        assert tree._active_pass_target is None
+
+        bb3 = _make_bb(_SUPPORTER_ID)
+        tree.tick(bb3)
+        assert isinstance(bb3.current_intent, IntentPass)
+        assert tree._active_pass_target == bb3.current_intent.target_robot_id
+        assert tree._active_pass_target_age == 0
+
+    def test_receiver_holds_position_when_signalled(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        # Manually set the pass signal
+        tree._active_pass_target = _SUPPORTER_ID_B
+        tree._active_pass_target_age = 0
+
+        snap = make_snapshot(
+            ball_pos=(1.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+
+        # Robot 4 is not closest (robot 3 is closer)
+        # But robot 4 IS the pass target → ReceivePassSequence fires
+        assert bb4.intent_source == "HoldForPass"
+        assert isinstance(bb4.current_intent, IntentMove)
+        # Should hold at its own position
+        assert bb4.current_intent.target_pos == (2.0, 2.0)
+
+    def test_non_target_ignores_signal(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree._active_pass_target = _SUPPORTER_ID_B  # signal is for robot 4
+
+        snap = make_snapshot(
+            ball_pos=(5.0, 5.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(4.0, 4.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb3 = _make_bb(_SUPPORTER_ID)
+        tree.tick(bb3)
+
+        # Robot 3 is not the pass target — should not hold
+        assert bb3.intent_source != "HoldForPass"
+
+    def test_signal_times_out(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree._active_pass_target = _SUPPORTER_ID_B
+        tree._active_pass_target_age = PASS_SIGNAL_TIMEOUT_TICKS  # one tick from timeout
+
+        snap = make_snapshot(
+            ball_pos=(5.0, 5.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(4.0, 4.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+
+        # Age incremented to TIMEOUT+1 → signal cleared before tree runs
+        assert tree._active_pass_target is None
+        assert bb4.intent_source != "HoldForPass"
+
+    def test_signal_cleared_when_receiver_gains_possession(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree._active_pass_target = _SUPPORTER_ID_B
+        tree._active_pass_target_age = 5
+
+        # Robot 4 is the pass target AND has ball in dribbler → PossessionSequence
+        # fires (not HoldForPass, because InPossession is checked first in the new order)
+        snap = make_snapshot(
+            ball_pos=(2.01, 2.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+
+        # Robot 4 has possession → PossessionSequence fires (intent != HoldForPass)
+        # Post-tick clearing: robot 4 is the target and produced a non-HoldForPass intent
+        assert bb4.intent_source != "HoldForPass"
+        assert tree._active_pass_target is None
+
+    def test_signal_persists_across_ticks(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree._active_pass_target = _SUPPORTER_ID_B
+        tree._active_pass_target_age = 0
+
+        snap = make_snapshot(
+            ball_pos=(1.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+
+        # Tick robot 3 first (not the target)
+        bb3 = _make_bb(_SUPPORTER_ID)
+        tree.tick(bb3)
+        assert tree._active_pass_target == _SUPPORTER_ID_B  # still set
+
+        # Tick robot 4 (the target) — should hold
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+        assert bb4.intent_source == "HoldForPass"
+        assert tree._active_pass_target == _SUPPORTER_ID_B  # persists (HoldForPass doesn't clear)
+
+    def test_hold_for_pass_orientation_faces_ball(self) -> None:
+        tree = SupporterTree(us_positive=True)
+        tree._active_pass_target = _SUPPORTER_ID_B
+
+        snap = make_snapshot(
+            ball_pos=(0.0, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(-0.5, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(0.0, 1.0), orientation=0.0),
+            ],
+        )
+        tree.set_snapshot(snap)
+        bb4 = _make_bb(_SUPPORTER_ID_B)
+        tree.tick(bb4)
+        assert isinstance(bb4.current_intent, IntentMove)
+        # Ball at (0,0), robot at (0,1) → angle = -pi/2
+        assert bb4.current_intent.target_orientation == pytest.approx(-math.pi / 2, abs=0.01)

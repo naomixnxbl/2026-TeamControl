@@ -34,7 +34,7 @@ from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
 # index 0 → GOALIE, 1-5 → ATTACKER
 ROLE_ASSIGNMENT: dict[int, RoleType] = {
     0: RoleType.GOALIE,
-    1: RoleType.ATTACKER,
+    1: RoleType.ATTACKER, # this should be the attacking tree
     2: RoleType.SUPPORTER,
     3: RoleType.SUPPORTER,
     4: RoleType.SUPPORTER,

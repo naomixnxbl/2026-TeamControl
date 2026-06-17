@@ -89,6 +89,9 @@ POSSESSION_HEADING_TOL: float = 0.3   # radians (~17 degrees)
 # of the line counts as a block.
 SHOT_CORRIDOR_RADIUS: float = 0.20
 
+GOALIE_ID: int = 0
+CHASE_SLOW_SPEED: float = 0.2
+
 
 # -----------------------------------------------------------------------
 # Condition / action nodes
@@ -187,12 +190,28 @@ class ChaseBall(py_trees.behaviour.Behaviour):
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
         )
+        speed = None
+        if not self._is_closest_to_ball(snap, robot, bb.robot_id):
+            speed = CHASE_SLOW_SPEED
         bb.current_intent = IntentMove(
             target_pos=snap.ball_position,
             target_orientation=angle_to_ball,
+            max_speed=speed,
         )
         bb.intent_source = "ChaseBall"
         return py_trees.common.Status.SUCCESS
+
+    @staticmethod
+    def _is_closest_to_ball(snap: Snapshot, robot, my_id: int) -> bool:
+        bx, by = snap.ball_position
+        my_dist = math.hypot(robot.position[0] - bx, robot.position[1] - by)
+        for r in snap.own_robots:
+            if r.robot_id == GOALIE_ID or r.robot_id == my_id:
+                continue
+            d = math.hypot(r.position[0] - bx, r.position[1] - by)
+            if d < my_dist or (d == my_dist and r.robot_id < my_id):
+                return False
+        return True
 
 
 class IsBallInRangeOrMove(py_trees.behaviour.Behaviour):
