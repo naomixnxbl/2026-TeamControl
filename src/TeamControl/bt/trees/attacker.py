@@ -61,7 +61,7 @@ GOAL_POSITION: tuple[float, float] = (4.5, 0.0)   # opponent goal centre
 # touching. 0.15 m gives a small margin so the predicate doesn't flicker.
 
 ##   note: This is really a threshold value for the robot turn bug   ##
-POSSESSION_DIST: float = 0.11
+POSSESSION_DIST: float = 0.11 # 0.11 is the sweet spot!!!!
 
 # Maximum angular error between the robot's heading and the direction to the
 # ball before we say we "have" the ball. The kicker plate is on the front of
