@@ -60,7 +60,7 @@ from TeamControl.bt.contracts.snapshot import Snapshot
 GOALIE_ID: int = 0
 GOAL_POSITION: tuple[float, float] = (4.5, 0.0)
 
-POSSESSION_DIST: float = 0.122
+POSSESSION_DIST: float = 0.11
 POSSESSION_HEADING_TOL: float = 0.3
 
 SHOOT_DIST_THRESHOLD: float = 2.0

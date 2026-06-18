@@ -1,45 +1,32 @@
 """Attacker behaviour tree — R005.
 
-Topology (current):
+Topology:
 
     AttackingSelector (Selector, memory=False)
-    ├── ShootSequence   (HasBallControl → HasClearShot → ShootAtGoal)
-    ├── DribbleSequence (HasBallControl → HoldPossession[IntentDribble])
-    └── ChaseBall       (IntentMove(ball_position))
+    ├── PossessionSequence (Sequence)
+    │   ├── HasBallControl
+    │   └── PossessionAction (Selector)
+    │       ├── ShootSequence (HasClearShot → ShootAtGoal)
+    │       └── HoldPossession (dribble toward goal — the default)
+    ├── WaitSequence (Sequence)
+    │   ├── IsBallInOwnHalf
+    │   └── WaitNearGoal (camp in front of enemy goal, face ball)
+    └── ChaseBall (ball in enemy half; slow speed if not closest)
 
-The tree asks two predicates each tick:
-    Q1: HasBallControl — is the ball within POSSESSION_DIST AND in front
-                         of the kicker (heading aligned within
-                         POSSESSION_HEADING_TOL)?
-    Q2: HasClearShot   — is the ball→goal line free of opponents?
-And acts on the answers:
-    no possession             → ChaseBall
-    possession + clear shot   → ShootAtGoal (IntentKick to goal)
-    possession + blocked shot → HoldPossession (dribble toward goal)
-
-The original pass branch (PassOrPlaySequence) and the (now-unused)
-IsBallInRangeOrMove node are kept in the source as commented references
-for future re-enablement once a real "passing" play is added.
+Priority:
+    possession → dribble toward goal (default), shoot only if clear AND close
+    no possession + ball in own half → wait near enemy goal
+    no possession + ball in enemy half → chase ball
 
 Known bugs / areas for improvement
 -----------------------------------
-1. **POSSESSION_DIST oscillation** — ``POSSESSION_DIST`` (0.13 m) is too
+1. **POSSESSION_DIST oscillation** — ``POSSESSION_DIST`` (0.122 m) is too
    tight. The robot flickers between possession and no-possession on
-   consecutive ticks, causing it to alternate between orienting toward goal
-   and re-chasing the ball. Fix: add hysteresis (separate acquire/lose
-   thresholds) and tune ``POSSESSION_DIST`` empirically on the physical
-   robot. See ``docs/future.md §0.1``.
+   consecutive ticks. Fix: add hysteresis (separate acquire/lose thresholds).
+   See ``docs/future.md §0.1``.
 
-2. **Over-eager kicking** — ``HasClearShot`` fires ``IntentKick`` whenever
-   the shot corridor is geometrically clear, ignoring distance and angle to
-   goal. The robot should prefer dribbling into a better position and only
-   shoot when shot quality (distance + cone width) exceeds a threshold.
-   See ``docs/future.md §0.2``.
-
-3. **No field boundary enforcement** — target positions in ``ChaseBall``
+2. **No field boundary enforcement** — target positions in ``ChaseBall``
    and ``HoldPossession`` are not clamped to the legal field rectangle.
-   The robot can be directed outside the sidelines when the ball rolls out
-   of play. Add a shared ``clamp_to_field(pos, margin=0.1)`` utility.
    See ``docs/future.md §0.3``.
 
 Design notes
@@ -74,7 +61,7 @@ GOAL_POSITION: tuple[float, float] = (4.5, 0.0)   # opponent goal centre
 # touching. 0.15 m gives a small margin so the predicate doesn't flicker.
 
 ##   note: This is really a threshold value for the robot turn bug   ##
-POSSESSION_DIST: float = 0.122
+POSSESSION_DIST: float = 0.11
 
 # Maximum angular error between the robot's heading and the direction to the
 # ball before we say we "have" the ball. The kicker plate is on the front of
@@ -88,9 +75,16 @@ POSSESSION_HEADING_TOL: float = 0.3   # radians (~17 degrees)
 # Robot radius is ~0.09 m, so 0.20 m means an opponent within ~one body length
 # of the line counts as a block.
 SHOT_CORRIDOR_RADIUS: float = 0.20
+SHOT_HEADING_TOL: float = 0.4
 
 GOALIE_ID: int = 0
 CHASE_SLOW_SPEED: float = 0.2
+SHOOT_DIST_THRESHOLD: float = 2.0
+
+PENALTY_BOX_DEPTH: float = 1.0
+FIELD_HALF_X: float = 4.5
+FIELD_HALF_Y: float = 3.0
+WAIT_X: float = FIELD_HALF_X - PENALTY_BOX_DEPTH
 
 
 # -----------------------------------------------------------------------
@@ -138,12 +132,12 @@ class HasBallControl(py_trees.behaviour.Behaviour):
 
 
 class HasClearShot(py_trees.behaviour.Behaviour):
-    """Succeed when no opponent obstructs the line from the ball to the goal.
+    """Succeed when shooting is safe: clear corridor, close enough, and facing goal.
 
-    For each opponent, compute the perpendicular distance from their position
-    to the ball→goal line segment. If every opponent is farther than
-    ``SHOT_CORRIDOR_RADIUS`` from the segment, the shot is considered clear.
-    Empty opponent list → trivially clear.
+    Three checks:
+      1. No opponent within ``SHOT_CORRIDOR_RADIUS`` of the ball→goal line.
+      2. Robot is within ``SHOOT_DIST_THRESHOLD`` of the goal.
+      3. Robot is facing the goal within ``SHOT_HEADING_TOL``.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -152,14 +146,34 @@ class HasClearShot(py_trees.behaviour.Behaviour):
 
     def update(self) -> py_trees.common.Status:
         snap = self._tree._snapshot
-        if snap is None:
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        goal = self._tree.goal_position
+
+        dist_to_goal = math.hypot(
+            robot.position[0] - goal[0], robot.position[1] - goal[1]
+        )
+        if dist_to_goal > SHOOT_DIST_THRESHOLD:
+            return py_trees.common.Status.FAILURE
+
+        angle_to_goal = math.atan2(
+            goal[1] - robot.position[1], goal[0] - robot.position[0]
+        )
+        heading_err = (angle_to_goal - robot.orientation + math.pi) % (2 * math.pi) - math.pi
+        if abs(heading_err) > SHOT_HEADING_TOL:
             return py_trees.common.Status.FAILURE
 
         ball = snap.ball_position
-        goal = self._tree.goal_position
         for opp in snap.opponent_robots:
             if _point_to_segment_dist(opp.position, ball, goal) <= SHOT_CORRIDOR_RADIUS:
                 return py_trees.common.Status.FAILURE
+
         return py_trees.common.Status.SUCCESS
 
 
@@ -309,8 +323,82 @@ class HoldPossession(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.SUCCESS
 
 
+class IsCloseToGoal(py_trees.behaviour.Behaviour):
+    """Succeed only if the robot is within SHOOT_DIST_THRESHOLD of the goal."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("IsCloseToGoal")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        goal = self._tree.goal_position
+        dist = math.hypot(robot.position[0] - goal[0], robot.position[1] - goal[1])
+        if dist > SHOOT_DIST_THRESHOLD:
+            return py_trees.common.Status.FAILURE
+        return py_trees.common.Status.SUCCESS
+
+
+class IsBallInOwnHalf(py_trees.behaviour.Behaviour):
+    """Succeed when the ball is in our own half of the field."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("IsBallInOwnHalf")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        if snap is None:
+            return py_trees.common.Status.FAILURE
+        bx = snap.ball_position[0]
+        if self._tree.us_positive:
+            return py_trees.common.Status.SUCCESS if bx > 0 else py_trees.common.Status.FAILURE
+        else:
+            return py_trees.common.Status.SUCCESS if bx < 0 else py_trees.common.Status.FAILURE
+
+
+class WaitNearGoal(py_trees.behaviour.Behaviour):
+    """Hold position in front of the opponent penalty box, facing the ball.
+
+    The wait position sits at the penalty box edge (WAIT_X from centre),
+    tracking the ball's y position so the attacker shifts laterally.
+    Clamped to the opponent's half (between half line and penalty box).
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("WaitNearGoal")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        wait_x = -WAIT_X if self._tree.us_positive else WAIT_X
+        wait_y = max(-FIELD_HALF_Y, min(FIELD_HALF_Y, snap.ball_position[1]))
+        angle_to_ball = math.atan2(
+            snap.ball_position[1] - robot.position[1],
+            snap.ball_position[0] - robot.position[0],
+        )
+        bb.current_intent = IntentMove(
+            target_pos=(wait_x, wait_y),
+            target_orientation=angle_to_ball,
+        )
+        bb.intent_source = "WaitNearGoal"
+        return py_trees.common.Status.SUCCESS
+
+
 class ShootAtGoal(py_trees.behaviour.Behaviour):
-    """Write IntentKick toward goal as the last-resort fallback."""
+    """Write IntentKick toward goal."""
 
     def __init__(self, tree_ref: AttackerTree) -> None:
         super().__init__("ShootAtGoal")
@@ -373,57 +461,55 @@ class AttackerTree:
     # ------------------------------------------------------------------
 
     def _build_tree(self) -> py_trees.composites.Selector:
-        # New topology — asks two questions and acts on the answers:
-        #   Q1: do I have ball control?
-        #   Q2: if yes, is the shot clear?
-        #
         # AttackingSelector (Selector)
-        # ├── ShootSequence  : HasBallControl → HasClearShot → ShootAtGoal
-        # ├── DribbleSequence: HasBallControl → HoldPossession
-        # └── ChaseBall      : IntentMove(ball) — no possession yet
-        #
-        # Selector with memory=False re-evaluates every tick. As soon as we
-        # have possession AND a clean shot, ShootSequence wins. If we lose
-        # the ball, we fall straight to ChaseBall the next tick.
+        # ├── PossessionSequence (Sequence)
+        # │   ├── HasBallControl
+        # │   └── PossessionAction (Selector)
+        # │       ├── ShootSequence (HasClearShot → IsCloseToGoal → ShootAtGoal)
+        # │       └── HoldPossession (dribble toward goal — the default)
+        # ├── WaitSequence (Sequence)
+        # │   ├── IsBallInOwnHalf
+        # │   └── WaitNearGoal
+        # └── ChaseBall (ball in enemy half; closest-check speed logic)
 
-        # ShootSequence — fires only with possession and clear line to goal.
         shoot_seq = py_trees.composites.Sequence(
             name="ShootSequence", memory=False
         )
         shoot_seq.add_children([
-            HasBallControl(self),
             HasClearShot(self),
             ShootAtGoal(self),
         ])
 
-        # DribbleSequence — possession but no clear shot: carry toward goal.
-        dribble_seq = py_trees.composites.Sequence(
-            name="DribbleSequence", memory=False
+        possession_action = py_trees.composites.Selector(
+            name="PossessionAction", memory=False
         )
-        dribble_seq.add_children([
-            HasBallControl(self),
+        possession_action.add_children([
+            shoot_seq,
             HoldPossession(self),
         ])
 
-        # PassOrPlaySequence — TEMPORARILY DISABLED (was causing an
-        # oscillation around BALL_IN_RANGE_THRESHOLD). Re-enable when ready
-        # to use real pass logic gated by HasBallControl.
-        # pass_or_play = py_trees.composites.Sequence(
-        #      name="PassOrPlaySequence", memory=False
-        # )
-        # pass_or_play.add_children([
-        #     IsSupporterAvailable(self),
-        #     PassToSupporter(self),
-        # ])
+        possession_seq = py_trees.composites.Sequence(
+            name="PossessionSequence", memory=False
+        )
+        possession_seq.add_children([
+            HasBallControl(self),
+            possession_action,
+        ])
 
-        # Root: AttackingSelector
+        wait_seq = py_trees.composites.Sequence(
+            name="WaitSequence", memory=False
+        )
+        wait_seq.add_children([
+            IsBallInOwnHalf(self),
+            WaitNearGoal(self),
+        ])
+
         root = py_trees.composites.Selector(
             name="AttackingSelector", memory=False
         )
         root.add_children([
-            shoot_seq,
-            # pass_or_play,
-            dribble_seq,
+            possession_seq,
+            wait_seq,
             ChaseBall(self),
         ])
         return root
