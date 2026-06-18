@@ -65,6 +65,10 @@ POSSESSION_HEADING_TOL: float = 0.3
 
 SHOOT_DIST_THRESHOLD: float = 2.0
 MARKED_THRESHOLD: float = 0.5
+ATTACKER_ID: int = 1
+ATTACKER_PASS_BONUS: float = 1.5
+GOAL_PROXIMITY_WEIGHT: float = 1.2
+MAX_FIELD_DIST: float = 10.82
 
 GRID_STEP: float = 0.5
 REPOSITION_X_MIN: float = -1.0
@@ -206,21 +210,30 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
         best_id = None
         best_pos = None
         best_score = -1.0
+        gx, gy = self._tree.goal_position
 
         for r in snap.own_robots:
             if r.robot_id == GOALIE_ID or r.robot_id == bb.robot_id:
                 continue
-            if snap.opponent_robots:
-                min_opp_dist = min(
-                    math.hypot(r.position[0] - opp.position[0],
-                               r.position[1] - opp.position[1])
-                    for opp in snap.opponent_robots
-                )
-            else:
-                min_opp_dist = float("inf")
 
-            if min_opp_dist > best_score:
-                best_score = min_opp_dist
+            dist_to_goal = math.hypot(r.position[0] - gx, r.position[1] - gy)
+            goal_proximity = 1.0 - (dist_to_goal / MAX_FIELD_DIST)
+
+            if r.robot_id == ATTACKER_ID:
+                score = ATTACKER_PASS_BONUS * (1.0 + goal_proximity * GOAL_PROXIMITY_WEIGHT)
+            else:
+                if snap.opponent_robots:
+                    min_opp_dist = min(
+                        math.hypot(r.position[0] - opp.position[0],
+                                   r.position[1] - opp.position[1])
+                        for opp in snap.opponent_robots
+                    )
+                else:
+                    min_opp_dist = float("inf")
+                score = min_opp_dist * (1.0 + goal_proximity * GOAL_PROXIMITY_WEIGHT)
+
+            if score > best_score:
+                best_score = score
                 best_id = r.robot_id
                 best_pos = r.position
 

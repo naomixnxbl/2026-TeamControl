@@ -351,13 +351,37 @@ class TestFindOpenTeammate:
         assert result == py_trees.common.Status.SUCCESS
         assert tree._pass_target_id == _ATTACKER_ID
 
-    def test_all_teammates_marked(self) -> None:
+    def test_all_supporters_marked_but_attacker_still_valid(self) -> None:
+        """Attacker is scored independently of crowding, so it remains a valid
+        pass target even when surrounded."""
         snap = make_snapshot(
             ball_pos=(0.1, 0.0),
             own_robots=[
                 RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
                 RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
+            ],
+            opponent_robots=[
+                RobotState(robot_id=10, position=(2.1, 2.0), orientation=0.0),
+            ],
+        )
+        tree = SupporterTree()
+        tree.set_snapshot(snap)
+        bb = _make_bb()
+        tree._blackboard_ref[0] = bb
+        find_node = tree.root.children[0].children[1].children[0].children[0]
+        result = find_node.update()
+        assert result == py_trees.common.Status.SUCCESS
+        assert tree._pass_target_id == _ATTACKER_ID
+
+    def test_all_teammates_marked_no_attacker(self) -> None:
+        """When only supporters are available and all are marked, FAILURE."""
+        snap = make_snapshot(
+            ball_pos=(0.1, 0.0),
+            own_robots=[
+                RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
             ],
             opponent_robots=[
                 RobotState(robot_id=10, position=(2.1, 2.0), orientation=0.0),
@@ -648,17 +672,16 @@ class TestPhaseIntegration:
         assert bb4.intent_source == "RepositionToSpace"
 
     def test_possession_with_open_teammate_dribbles_toward_then_passes(self) -> None:
-        # Robot 3 has possession, attacker is open but not in front
+        # Robot 3 has possession, attacker is at an angle → dribble toward it first
         snap = make_snapshot(
             ball_pos=(0.1, 0.0),
             own_robots=[
                 RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
-                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
-                RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
+                RobotState(robot_id=_ATTACKER_ID, position=(0.0, 2.0), orientation=0.0),
             ],
         )
-        # Robot 3 facing 0, target not aligned → DribbleTowardTarget
+        # Robot 3 facing 0, attacker at (0,2) → angle pi/2, not aligned → DribbleTowardTarget
         bb = _tick(snap, _make_bb(_SUPPORTER_ID))
         assert isinstance(bb.current_intent, IntentDribble)
         assert bb.intent_source == "DribbleTowardTarget"
@@ -700,30 +723,21 @@ class TestPhaseIntegration:
         assert isinstance(bb4.current_intent, IntentPass)
         assert bb4.intent_source == "PassToTeammate"
 
-    def test_possession_all_marked_close_shoots(self) -> None:
+    def test_possession_close_to_goal_no_teammates_shoots(self) -> None:
         # us_positive=True → goal at (-4.5, 0)
-        # Robot 3 is closer to ball → robot 4 falls through IsClosestToBall
-        # Robot 4 has possession and is close to goal, all teammates marked
+        # Robot 4 has possession, close to goal, only goalie + robot 3 on field
+        # Robot 3 is marked, no attacker available → FindOpenTeammate fails → ShootIfClose
         snap = make_snapshot(
             ball_pos=(-3.5, 0.01),
             own_robots=[
                 RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID, position=(-3.5, 0.0), orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID_B, position=(-3.5, 0.1), orientation=-math.pi / 2),
-                RobotState(robot_id=_ATTACKER_ID, position=(2.0, 0.0), orientation=0.0),
             ],
             opponent_robots=[
-                RobotState(robot_id=10, position=(2.1, 0.0), orientation=0.0),
                 RobotState(robot_id=11, position=(-3.5, 0.05), orientation=0.0),
             ],
         )
-        # Robot 3 dist to ball = 0.01, Robot 4 dist to ball = hypot(0, 0.09) = 0.09
-        # Robot 3 is closest → robot 4 not closest
-        # Robot 4: dist 0.09 < 0.122, facing -pi/2, ball at angle ≈ -pi/2 → InPossession OK
-        # Attacker is marked (opp 10 at 2.1,0 near attacker at 2,0 → dist 0.1 < 0.5)
-        # Robot 3 is marked (opp 11 at -3.5,0.05 near robot 3 at -3.5,0 → dist 0.05 < 0.5)
-        # All marked → FindOpenTeammate fails
-        # Robot 4 dist to goal(-4.5,0) = hypot(-1.0, 0.1) ≈ 1.005 < 2.0 → ShootIfClose
         bb = _tick(snap, _make_bb(_SUPPORTER_ID_B), us_positive=True)
         assert isinstance(bb.current_intent, IntentKick)
         assert bb.intent_source == "ShootIfClose"
