@@ -14,9 +14,12 @@ Pipeline each tick:
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from multiprocessing import Event, Queue
+from pathlib import Path
 
 from TeamControl.bt.adapter import (
+    VoronoiRouter,
     build_snapshot_from_world_model,
     dispatch_coordinator_output,
 )
@@ -50,8 +53,47 @@ DEFAULT_ROBOT_IDS: list[int] = [0, 1, 2, 3, 4, 5]
 TICK_PERIOD: float = 0.01
 
 
+class _BtLogger:
+    """Per-robot file logger for the BT process.
+
+    Creates log/<YYYY-MM-DD>/bt/coordinator.log and log/.../bt/robot_<id>.log.
+    Files are line-buffered so they flush after each write.
+    """
+
+    def __init__(self, robot_ids: list[int]) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_dir = Path("log") / today / "bt"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._robot_files: dict[int, "TextIO"] = {}
+        for rid in robot_ids:
+            self._robot_files[rid] = open(log_dir / f"robot_{rid}.log", "a", buffering=1)
+        self._proc_file = open(log_dir / "coordinator.log", "a", buffering=1)
+
+    def _ts(self) -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    def proc(self, msg: str) -> None:
+        self._proc_file.write(f"{self._ts()} {msg}\n")
+
+    def robot(self, robot_id: int, msg: str) -> None:
+        f = self._robot_files.get(robot_id)
+        if f:
+            f.write(f"{self._ts()} {msg}\n")
+
+    def close(self) -> None:
+        for f in self._robot_files.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+        try:
+            self._proc_file.close()
+        except Exception:
+            pass
+
+
 def _build_coordinator(us_positive: bool) -> Coordinator:
-    c = Coordinator(
+    return Coordinator(
         trees={
             RoleType.GOALIE: GoalieTree(us_positive=us_positive),
             RoleType.DEFENDER: DefenderTree(us_positive=us_positive),
@@ -60,8 +102,34 @@ def _build_coordinator(us_positive: bool) -> Coordinator:
         },
         us_positive=us_positive,
     )
-    print(f"[BT-{'YELLOW' if not us_positive else 'BLUE'}] coordinator built — us_positive={us_positive} opp_goal={c._opp_goal} attack_sign={c._attack_sign}", flush=True)
-    return c
+
+
+def _pack_bt_state(tag, tick, phase, snapshot, robot_ids, coordinator, is_yellow):
+    """Pack current BT state into a lightweight dict for the UI queue."""
+    bx, by = snapshot.ball_position
+    robot_map = {r.robot_id: r for r in snapshot.own_robots}
+    robots = []
+    for rid in robot_ids:
+        bb = coordinator.blackboards.get(rid)
+        if bb is None:
+            continue
+        r = robot_map.get(rid)
+        intent = bb.current_intent if bb else None
+        robots.append({
+            "id":            rid,
+            "role":          bb.current_role.value if bb else "?",
+            "pos":           tuple(round(v, 3) for v in r.position) if r else None,
+            "ori":           round(r.orientation, 3) if r else None,
+            "intent_type":   type(intent).__name__.replace("Intent", "") if intent else None,
+            "intent_target": tuple(round(v, 3) for v in intent.target_pos)
+                             if intent and hasattr(intent, "target_pos") and intent.target_pos else None,
+        })
+    return {
+        "tag": tag, "tick": tick, "phase": phase.value,
+        "ball": (round(bx, 3), round(by, 3)),
+        "is_yellow": is_yellow,
+        "robots": robots,
+    }
 
 
 def run_bt_v2_process(
@@ -73,6 +141,7 @@ def run_bt_v2_process(
     role_assignment: dict | None = None,
     tick_period: float = TICK_PERIOD,
     config_file: str = "ipconfig.yaml",
+    bt_state_q: "Queue | None" = None,
 ) -> None:
     """Tick the v2 (TurtleRabbitBT) coordinator in a child process.
 
@@ -101,9 +170,15 @@ def run_bt_v2_process(
     cfg_us_yellow   = bool(_cfg.us_yellow)
     _us_positive = cfg_us_positive if (is_yellow == cfg_us_yellow) else not cfg_us_positive
     coordinator = _build_coordinator(us_positive=_us_positive)
-    print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
+    router = VoronoiRouter()
+    logger = _BtLogger(robot_ids)
 
     tag = "[BT-YELLOW]" if is_yellow else "[BT-BLUE]"
+    logger.proc("=" * 60)
+    logger.proc(f"{tag} SESSION START  yellow={is_yellow}  us_positive={_us_positive}  "
+                f"robot_ids={robot_ids}  enemy_goal={coordinator._enemy_goal}  "
+                f"attack_sign={coordinator._attack_sign}")
+
     last_phase = None
     tick_count = 0
 
@@ -116,26 +191,37 @@ def run_bt_v2_process(
 
             phase = snapshot.referee_state.game_phase
 
-            # Print whenever the game phase changes
             if phase != last_phase:
-                print(f"{tag} phase changed: {last_phase} → {phase}", flush=True)
+                if last_phase is None:
+                    logger.proc(f"{tag} initial phase: {phase}")
+                else:
+                    logger.proc(f"{tag} phase changed: {last_phase} → {phase}")
                 last_phase = phase
 
             coordinator.tick(snapshot, robot_ids)
 
             tick_count += 1
 
-            # Print intents every 100 ticks (~1 sec)
+            if bt_state_q is not None and tick_count % 30 == 0:
+                try:
+                    bt_state_q.put_nowait(_pack_bt_state(
+                        tag, tick_count, phase, snapshot, robot_ids, coordinator, is_yellow,
+                    ))
+                except Exception:
+                    pass
+
             if tick_count % 100 == 0:
                 bx, by = snapshot.ball_position
-                print(f"{tag} tick={tick_count} phase={phase.value} ball=({bx:.2f},{by:.2f})", flush=True)
+                logger.proc(f"{tag} tick={tick_count} phase={phase.value} ball=({bx:.2f},{by:.2f})")
                 robot_map = {r.robot_id: r for r in snapshot.own_robots}
                 for rid in robot_ids:
                     bb = coordinator.blackboards.get(rid)
                     if bb and bb.current_intent:
                         r = robot_map.get(rid)
-                        pos_str = f"pos=({r.position[0]:.2f},{r.position[1]:.2f}) facing={r.orientation:.2f}rad" if r else "pos=N/A"
-                        print(f"  robot {rid} ({bb.current_role.value}) {pos_str}: {bb.current_intent}", flush=True)
+                        pos_str = (f"pos=({r.position[0]:.2f},{r.position[1]:.2f}) "
+                                   f"facing={r.orientation:.2f}rad") if r else "pos=N/A"
+                        logger.robot(rid, f"tick={tick_count} role={bb.current_role.value} "
+                                         f"{pos_str} intent={bb.current_intent}")
 
             if phase in _HALT_PHASES:
                 _send_stop_commands(robot_ids, is_yellow, dispatcher_q)
@@ -146,7 +232,12 @@ def run_bt_v2_process(
                     snapshot,
                     is_yellow,
                     dispatcher_q,
+                    wm=wm,
+                    router=router,
                 )
             time.sleep(tick_period)
     except KeyboardInterrupt:
-        print("[BT] KeyboardInterrupt — exiting", flush=True)
+        logger.proc(f"{tag} KeyboardInterrupt — exiting")
+    finally:
+        logger.proc(f"{tag} SESSION END  ticks={tick_count}")
+        logger.close()

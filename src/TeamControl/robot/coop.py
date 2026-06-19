@@ -14,7 +14,7 @@ import math
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
-    clamp, move_toward, wall_brake, rotation_compensate,
+    clamp, move_toward, rotation_compensate, sanitize_field_target,
     ball_velocity, update_ball_history, predict_ball,
 )
 from TeamControl.robot.navigator import _compute_avoidance
@@ -22,12 +22,14 @@ from TeamControl.robot.kick_engine import KickState, kick_tick
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.robot.constants import (
-    HALF_LEN, HALF_WID,
-    GOAL_HW, GOAL_DEPTH,
     KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
     CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED,
     MAX_W, TURN_GAIN,
     KICK_COOLDOWN, LOOP_RATE, FRAME_INTERVAL,
+)
+from TeamControl.world.field_config import (
+    FIELD_LENGTH_MM,
+    FIELD_WIDTH_MM,
 )
 
 
@@ -65,7 +67,8 @@ SUP_START       = HOME_BLUE
 BALL_TRIGGER    = BALL_START
 BALL_TRIGGER_R  = CLAIM_DIST
 SUP_SHOOT_SPOT  = HOME_BLUE
-GOAL_X          = HALF_LEN
+# GOAL_X was a frozen-at-import alias for HALF_LEN and was unused beyond
+# its own definition -- removed (use FIELD_LENGTH_MM / 2.0 from field_config).
 
 
 # =====================================================================
@@ -88,6 +91,7 @@ def _dist(a, b):
 
 
 def _go_to(me, target, speed, stop_r=40, ramp=400):
+    target = sanitize_field_target(target)
     rel = world2robot(me, target)
     return move_toward(rel, speed, ramp_dist=ramp, stop_dist=stop_r)
 
@@ -301,9 +305,9 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                     dribble = 0
                 else:
                     # Clear — lock ball position, pick side, start arc
-                    if ball[1] > HALF_WID - 500:
+                    if ball[1] > FIELD_WIDTH_MM / 2.0 - 500:
                         repo_side = -1
-                    elif ball[1] < -(HALF_WID - 500):
+                    elif ball[1] < -(FIELD_WIDTH_MM / 2.0 - 500):
                         repo_side = 1
                     else:
                         repo_side = 1 if me[1] >= ball[1] else -1
@@ -356,7 +360,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
                 time.sleep(LOOP_RATE)
                 continue
 
-            aim = (HALF_LEN, 0)
+            aim = (FIELD_LENGTH_MM / 2.0, 0)
             rel_aim = world2robot(me, aim)
             ang_to_aim = math.atan2(rel_aim[1], rel_aim[0])
 
@@ -392,7 +396,7 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
             if is_yellow:
                 aim = mate_pos
             else:
-                aim = (HALF_LEN, 0)
+                aim = (FIELD_LENGTH_MM / 2.0, 0)
 
             # Intercept fast incoming ball
             rel_ball = world2robot(me, ball)
@@ -503,9 +507,6 @@ def run_coop(is_running, dispatch_q, wm, robot_id, teammate_id,
         if spd > max_spd:
             vx = vx / spd * max_spd
             vy = vy / spd * max_spd
-
-        # -- Wall braking -----------------------------------------------
-        vx, vy = wall_brake(me[0], me[1], vx, vy)
 
         # -- Rotation compensation --------------------------------------
         vx, vy = rotation_compensate(vx, vy, w)

@@ -175,8 +175,8 @@ class BaseSocket():
         except socket.gaierror as e:
             print(f"[baseUDP] gethostbyname failed: {e}")
 
-        print("[baseUDP] Could not detect LAN IP, falling back to 192.168.1.2")
-        return "192.168.1.2"
+        print("[baseUDP] Could not detect LAN IP, falling back to 127.0.0.1")
+        return "127.0.0.1"
     
     @staticmethod
     def _generate_port() -> int:

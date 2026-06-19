@@ -19,14 +19,14 @@ import math
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
-    clamp, move_toward, wall_brake, rotation_compensate,
+    clamp, move_toward, rotation_compensate, sanitize_field_target,
 )
 from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
-    FIELD_LENGTH, FIELD_WIDTH, HALF_LEN, HALF_WID,
     CRUISE_SPEED, SPRINT_SPEED, MAX_W, TURN_GAIN,
     LOOP_RATE, FRAME_INTERVAL,
 )
+from TeamControl.world.field_config import FIELD_LENGTH_MM, FIELD_WIDTH_MM
 
 # ── Obstacle avoidance tuning ────────────────────────────────────
 AVOID_DIST = 550          # start avoiding at this range (mm)
@@ -45,18 +45,20 @@ CHASE_SPEED = CRUISE_SPEED * 0.85   # smooth, moderate pace
 NEAR_BALL_DIST = 300                # start slowing down here
 STOP_DIST = 80                      # stop this close to ball
 
-# Keep old exports so main.py import doesn't break
+# Demo waypoints derived from static field constants.
+_half_len = FIELD_LENGTH_MM / 2.0
+_half_wid = FIELD_WIDTH_MM / 2.0
 WAYPOINTS_A = [
-    (HALF_LEN - 500, HALF_WID - 200),
-    (HALF_LEN - 500, -HALF_WID + 200),
-    (-HALF_LEN + 500, -HALF_WID + 200),
-    (-HALF_LEN + 500, HALF_WID - 200),
+    (_half_len - 500, _half_wid - 200),
+    (_half_len - 500, -_half_wid + 200),
+    (-_half_len + 500, -_half_wid + 200),
+    (-_half_len + 500, _half_wid - 200),
 ]
 WAYPOINTS_B = [
-    (-HALF_LEN + 500, -HALF_WID + 200),
-    (-HALF_LEN + 500, HALF_WID - 200),
-    (HALF_LEN - 500, HALF_WID - 200),
-    (HALF_LEN - 500, -HALF_WID + 200),
+    (-_half_len + 500, -_half_wid + 200),
+    (-_half_len + 500, _half_wid - 200),
+    (_half_len - 500, _half_wid - 200),
+    (_half_len - 500, -_half_wid + 200),
 ]
 
 
@@ -172,7 +174,8 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         ball = cache.ball.position
 
         # ── Target: the ball ─────────────────────────────────
-        rel_ball = world2robot(rpos, ball)
+        movement_target = sanitize_field_target(ball)
+        rel_ball = world2robot(rpos, movement_target)
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
 
         # ── Obstacle avoidance (predictive) ──────────────────
@@ -206,9 +209,6 @@ def run_navigator(is_running, dispatch_q, wm, robot_id, is_yellow,
         if speed > max_spd:
             raw_vx = raw_vx / speed * max_spd
             raw_vy = raw_vy / speed * max_spd
-
-        # ── Wall braking ────────────────────────────────────
-        raw_vx, raw_vy = wall_brake(rpos[0], rpos[1], raw_vx, raw_vy)
 
         # ── Face the ball ────────────────────────────────────
         ang_ball = math.atan2(rel_ball[1], rel_ball[0])

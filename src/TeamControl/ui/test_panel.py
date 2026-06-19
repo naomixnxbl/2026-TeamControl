@@ -14,22 +14,17 @@ import socket
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QGroupBox, QComboBox, QLineEdit, QSpinBox,
-    QDoubleSpinBox, QSlider, QPlainTextEdit, QCheckBox,
-    QTabWidget, QFrame, QSplitter, QSizePolicy,
-    QScrollArea, QSpacerItem,
+    QPushButton, QComboBox, QLineEdit, QSpinBox,
+    QDoubleSpinBox, QSlider, QPlainTextEdit,
+    QTabWidget, QFrame, QSizePolicy, QCheckBox,
 )
-from PySide6.QtCore import Qt, QTimer, QTime, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, QTimer, QTime
+from PySide6.QtGui import QFont
 
 from TeamControl.ui.theme import (
     ACCENT, TEXT_DIM, SUCCESS, DANGER, WARNING,
-    YELLOW_TEAM, BLUE_TEAM, BG_DARK, BG_MID, BORDER,
+    BG_DARK, BORDER,
 )
-
-import json
-import math
-import os
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.network.sender import Sender
@@ -37,16 +32,11 @@ from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
 from TeamControl.utils.yaml_config import Config
 from TeamControl.robot.constants import (
-    MAX_W,
-    HALF_LEN, HALF_WID, FIELD_MARGIN,
+    MAX_W, MANUAL_MAX_SPEED, MANUAL_MAX_W,
+    FIELD_MARGIN,
 )
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import clamp, move_toward, wall_brake
-
-# Safe boundary — stop if the robot gets this close to the field edge
-_SAFE_X = HALF_LEN - FIELD_MARGIN   # 2200 mm from center
-_SAFE_Y = HALF_WID - FIELD_MARGIN   # 1200 mm from center
-
+from TeamControl.robot.ball_nav import clamp, move_toward, sanitize_field_target
 
 def _ts():
     return QTime.currentTime().toString("HH:mm:ss.zzz")
@@ -110,7 +100,6 @@ class TestPanel(QWidget):
         self._engine = engine
         self._field = field
         self._sender = Sender(device_ip="192.168.1.2")
-        self._grsim: grSimSender | None = None
         self._continuous_timer = QTimer(self)
         self._continuous_timer.setInterval(50)
         self._continuous_timer.timeout.connect(self._send_continuous)
@@ -128,9 +117,16 @@ class TestPanel(QWidget):
         self._square_step_ticks = 0
         self._goto_target = None  # (x_mm, y_mm) for go_to_point
         self._our_id_spin = None  # set by MainWindow — toolbar "Our Bot" spinner
+        self._dashboard_rid = None   # set by dashboard robot selector (overrides toolbar)
+        self._dashboard_yellow = True
 
         self._build_ui()
         self._load_robots()
+
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(1000)
+        self._status_timer.timeout.connect(self._refresh_connection_status)
+        self._status_timer.start()
 
     # ══════════════════════════════════════════════════════════════
     #  UI
@@ -199,30 +195,24 @@ class TestPanel(QWidget):
         ping_btn.clicked.connect(self._test_connection)
         left.addWidget(ping_btn)
 
+        grsim_test_btn = QPushButton("Test grSim Sender")
+        grsim_test_btn.setMinimumHeight(36)
+        grsim_test_btn.setToolTip("Send a direct grSim packet and report dispatcher grSim status")
+        grsim_test_btn.clicked.connect(self._test_grsim_sender)
+        left.addWidget(grsim_test_btn)
+
         left.addWidget(_sep())
-        left.addWidget(_heading("grSim"))
-
-        gsl = QGridLayout()
-        gsl.setSpacing(8)
-        gsl.addWidget(QLabel("IP:"), 0, 0)
-        self._grsim_ip = QLineEdit("127.0.0.1")
-        gsl.addWidget(self._grsim_ip, 0, 1)
-        gsl.addWidget(QLabel("Port:"), 1, 0)
-        self._grsim_port = QSpinBox()
-        self._grsim_port.setRange(1025, 65534)
-        self._grsim_port.setValue(20011)
-        gsl.addWidget(self._grsim_port, 1, 1)
-        left.addLayout(gsl)
-
-        self._grsim_also = QCheckBox("Mirror every command to grSim")
-        self._grsim_also.setStyleSheet("font-weight:bold;")
-        left.addWidget(self._grsim_also)
-
-        grsim_test = QPushButton("Test grSim (spin robot 0)")
-        grsim_test.setMinimumHeight(34)
-        grsim_test.clicked.connect(self._test_grsim)
-        left.addWidget(grsim_test)
-
+        left.addWidget(_heading("Connection Status"))
+        self._hw_status = QLabel("Hardware: —")
+        self._hw_status.setWordWrap(True)
+        self._hw_status.setStyleSheet(
+            f"color:{TEXT_DIM}; font-size:12px; padding:2px 4px;")
+        left.addWidget(self._hw_status)
+        self._grsim_status_check = QCheckBox("Send to Simulation (grSim)")
+        self._grsim_status_check.setEnabled(False)
+        self._grsim_status_check.setToolTip(
+            "Read-only: ON when the engine is configured to also send commands to grSim")
+        left.addWidget(self._grsim_status_check)
         left.addStretch()
 
         left_w = QWidget()
@@ -247,11 +237,11 @@ class TestPanel(QWidget):
         vel_grid.setColumnStretch(1, 1)
 
         self._vx_spin, self._vx_slider = self._make_vel_row(
-            "VX  (tangent)", -5.0, 5.0, 0.0, "m/s", vel_grid, 0)
+            "VX  (tangent)", -MANUAL_MAX_SPEED, MANUAL_MAX_SPEED, 0.0, "m/s", vel_grid, 0)
         self._vy_spin, self._vy_slider = self._make_vel_row(
-            "VY  (normal)", -5.0, 5.0, 0.0, "m/s", vel_grid, 1)
+            "VY  (normal)", -MANUAL_MAX_SPEED, MANUAL_MAX_SPEED, 0.0, "m/s", vel_grid, 1)
         self._w_spin, self._w_slider = self._make_vel_row(
-            "W   (angular)", -2.0, 2.0, 0.0, "rad/s", vel_grid, 2)
+            "W   (angular)", -MANUAL_MAX_W, MANUAL_MAX_W, 0.0, "rad/s", vel_grid, 2)
 
         right.addLayout(vel_grid)
 
@@ -332,12 +322,44 @@ class TestPanel(QWidget):
         right.addWidget(_sep())
         right.addWidget(_heading("Actions"))
 
+        act_btn_grid = QGridLayout()
+        act_btn_grid.setSpacing(6)
+
+        self._goto_ball_btn = QPushButton("Go to Ball")
+        self._goto_ball_btn.setMinimumHeight(36)
+        self._goto_ball_btn.setToolTip(
+            "Navigate robot toward the ball (requires engine running + vision)")
+        self._goto_ball_btn.clicked.connect(lambda: self._start_action("go_to_ball"))
+        act_btn_grid.addWidget(self._goto_ball_btn, 0, 0)
+
+        self._goto_ball_kick_btn = QPushButton("Go & Kick")
+        self._goto_ball_kick_btn.setMinimumHeight(36)
+        self._goto_ball_kick_btn.setToolTip("Navigate to ball and fire the kicker on contact")
+        self._goto_ball_kick_btn.clicked.connect(
+            lambda: self._start_action("go_to_ball_kick"))
+        act_btn_grid.addWidget(self._goto_ball_kick_btn, 0, 1)
+
+        self._goto_point_btn = QPushButton("Go to Point…")
+        self._goto_point_btn.setMinimumHeight(36)
+        self._goto_point_btn.setToolTip(
+            "Click a point on the field canvas to set the navigation target")
+        self._goto_point_btn.clicked.connect(self._pick_goto_point)
+        act_btn_grid.addWidget(self._goto_point_btn, 1, 0)
+
+        self._draw_square_btn = QPushButton("Draw Square")
+        self._draw_square_btn.setMinimumHeight(36)
+        self._draw_square_btn.setToolTip("Navigate in a 500 mm square pattern")
+        self._draw_square_btn.clicked.connect(lambda: self._start_action("draw_square"))
+        act_btn_grid.addWidget(self._draw_square_btn, 1, 1)
+
+        right.addLayout(act_btn_grid)
+
         act_grid = QGridLayout()
         act_grid.setSpacing(8)
 
         act_grid.addWidget(QLabel("Go-to velocity:"), 0, 0)
         self._goto_vel_spin = QDoubleSpinBox()
-        self._goto_vel_spin.setRange(0.05, 2.0)
+        self._goto_vel_spin.setRange(0.05, MANUAL_MAX_SPEED)
         self._goto_vel_spin.setValue(0.2)
         self._goto_vel_spin.setSingleStep(0.05)
         self._goto_vel_spin.setSuffix("  m/s")
@@ -479,12 +501,6 @@ class TestPanel(QWidget):
 
         self._log.info(f"Loaded {len(self._robots)} robots from ipconfig.yaml")
 
-        try:
-            self._grsim_ip.setText(cfg.grSim_addr[0])
-            self._grsim_port.setValue(cfg.grSim_addr[1])
-        except Exception:
-            pass
-
     def _on_robot_selected(self, idx):
         if 0 <= idx < len(self._robots):
             r = self._robots[idx]
@@ -499,8 +515,27 @@ class TestPanel(QWidget):
         """Give the test panel access to the toolbar's Our Bot spinner."""
         self._our_id_spin = spin
 
+    def select_robot(self, is_yellow: bool, robot_id: int):
+        """Override target robot for action commands (called from dashboard/field click)."""
+        self._dashboard_rid = robot_id
+        self._dashboard_yellow = bool(is_yellow)
+        self._id_spin.setValue(robot_id)
+        self._team_combo.setCurrentText("Yellow" if is_yellow else "Blue")
+
+    def start_action(self, action_name: str):
+        """Trigger a named action (called from dashboard)."""
+        if action_name == "stop":
+            self._stop_action()
+        else:
+            self._start_action(action_name)
+
     def _get_action_rid_yellow(self):
-        """Get robot ID and team for action commands — uses toolbar/engine config."""
+        """Get robot ID and team for action commands.
+
+        Priority: dashboard selection > toolbar spinner > id_spin/team_combo.
+        """
+        if self._dashboard_rid is not None:
+            return self._dashboard_rid, self._dashboard_yellow
         if self._our_id_spin is not None:
             rid = self._our_id_spin.value()
         else:
@@ -520,7 +555,7 @@ class TestPanel(QWidget):
             kick=kick, dribble=dribble, isYellow=is_yellow)
 
     def _send_action(self, cmd: RobotCommand):
-        """Send a command for field actions via raw UDP to the robot."""
+        """Send a field action command through the unified send path."""
         self._do_send(cmd)
 
     def _build_cmd(self, vx=None, vy=None, w=None, kick=None, dribble=None):
@@ -537,15 +572,31 @@ class TestPanel(QWidget):
     # ── Sending ───────────────────────────────────────────────────
 
     def _do_send(self, cmd: RobotCommand):
-        ip = self._ip_edit.text().strip()
-        port = self._port_spin.value()
+        """Send a command. Routes through dispatcher (hw + grSim) when engine is running."""
         raw_text = str(cmd)
 
+        if self._engine and self._engine.is_running:
+            self._engine.send_robot_command(cmd, runtime=0.20)
+            self._raw_label.setText(
+                f"<b>Via:</b> Dispatcher<br>"
+                f"<b>Raw:</b> {raw_text}<br>"
+                f"<b>Bytes:</b> {cmd.encode()!r}")
+            self._log.ok(
+                f"→ dispatcher  |  "
+                f"id={cmd.robot_id} vx={cmd.vx:.2f} vy={cmd.vy:.2f} "
+                f"w={cmd.w:.2f} kick={cmd.kick} drib={cmd.dribble}")
+            self._n_sent += 1
+            self._update_hw_status("Hardware: via dispatcher", SUCCESS)
+            self._update_counts()
+            return
+
+        # Direct UDP — engine is not running, no dispatcher available
+        ip = self._ip_edit.text().strip()
+        port = self._port_spin.value()
         self._raw_label.setText(
             f"<b>To:</b> {ip}:{port}<br>"
             f"<b>Raw:</b> {raw_text}<br>"
             f"<b>Bytes:</b> {cmd.encode()!r}")
-
         try:
             self._sender.send(cmd, ip, port)
             self._log.ok(
@@ -553,32 +604,12 @@ class TestPanel(QWidget):
                 f"id={cmd.robot_id} vx={cmd.vx:.2f} vy={cmd.vy:.2f} "
                 f"w={cmd.w:.2f} kick={cmd.kick} drib={cmd.dribble}")
             self._n_sent += 1
+            self._update_hw_status(f"Hardware: OK → {ip}:{port}", SUCCESS)
         except Exception as e:
             self._log.err(f"SEND FAILED to {ip}:{port} — {e}")
             self._n_err += 1
-
+            self._update_hw_status(f"Hardware: FAILED — {e}", DANGER)
         self._update_counts()
-
-    def _do_grsim_send(self, cmd: RobotCommand):
-        try:
-            gs = self._get_grsim()
-            gs.send_robot_command(cmd)
-            self._n_sent += 1
-        except Exception as e:
-            self._log.err(f"grSim SEND FAILED — {e}")
-            self._n_err += 1
-
-    def _get_grsim(self) -> grSimSender:
-        ip = self._grsim_ip.text().strip()
-        port = self._grsim_port.value()
-        if (self._grsim is None
-                or self._grsim.ip != ip
-                or self._grsim.port != port):
-            self._grsim = grSimSender(ip, port)
-        return self._grsim
-
-    # ── Button handlers ───────────────────────────────────────────
-
     def _send_once(self):
         self._do_send(self._build_cmd())
 
@@ -627,13 +658,18 @@ class TestPanel(QWidget):
                 robot_id=r.shell_id, vx=0, vy=0, w=0,
                 kick=0, dribble=0,
                 isYellow=(r.team == "Yellow"))
-            try:
-                self._sender.send(cmd, r.ip, r.port)
-                self._log.ok(f"STOP → {r.label} ({r.ip}:{r.port})")
+            if self._engine and self._engine.is_running:
+                self._engine.send_robot_command(cmd, runtime=0.05)
+                self._log.ok(f"STOP → {r.label} (via dispatcher)")
                 self._n_sent += 1
-            except Exception as e:
-                self._log.err(f"STOP FAILED → {r.label} — {e}")
-                self._n_err += 1
+            else:
+                try:
+                    self._sender.send(cmd, r.ip, r.port)
+                    self._log.ok(f"STOP → {r.label} ({r.ip}:{r.port})")
+                    self._n_sent += 1
+                except Exception as e:
+                    self._log.err(f"STOP FAILED → {r.label} — {e}")
+                    self._n_err += 1
 
         self._update_counts()
         self._log.info(f"STOP ALL sent to {len(self._robots)} robots")
@@ -659,7 +695,10 @@ class TestPanel(QWidget):
         self._action_status.setText(
             f"Running: {labels.get(mode, mode)} — click STOP to cancel")
         self._log.info(f"Action test started: {labels.get(mode, mode)}")
-        if self._engine and self._engine.current_mode not in ("vision_only",):
+        if self._engine and self._engine.current_mode not in (
+            "vision_only",
+            "voronoi_test",
+        ):
             self._log.info(
                 "(Dispatcher paused for this bot so AI does not override field commands.)")
 
@@ -731,10 +770,11 @@ class TestPanel(QWidget):
 
     def go_to_point(self, x_mm, y_mm):
         """Called when the user clicks on the field after picking go-to-point."""
-        # Clamp target inside safe bounds
-        x_mm = max(-_SAFE_X, min(_SAFE_X, x_mm))
-        y_mm = max(-_SAFE_Y, min(_SAFE_Y, y_mm))
-        self._goto_target = (x_mm, y_mm)
+        self._goto_target = sanitize_field_target(
+            (x_mm, y_mm),
+            margin=FIELD_MARGIN,
+        )
+        x_mm, y_mm = self._goto_target
         self._stop_action()
         self._set_field_manual_override(True)
         self._action_mode = "go_to_point"
@@ -748,16 +788,13 @@ class TestPanel(QWidget):
             f"color:{SUCCESS}; font-size:12px; padding:4px;")
         self._action_status.setText("Running: Go to Point — click STOP to cancel")
         self._log.info(f"Go to point ({x_mm:.0f}, {y_mm:.0f})")
-        if self._engine and self._engine.current_mode not in ("vision_only",):
+        if self._engine and self._engine.current_mode not in (
+            "vision_only",
+            "voronoi_test",
+        ):
             self._log.info(
                 "(Dispatcher paused for this bot so AI does not override.)")
 
-    def _is_near_boundary(self, robot_pose):
-        """True if the robot is close to the field edge."""
-        if robot_pose is None:
-            return False
-        rx, ry = abs(robot_pose[0]), abs(robot_pose[1])
-        return rx > _SAFE_X or ry > _SAFE_Y
 
     def _get_robot_pose(self):
         """Get just the robot pose (no ball needed)."""
@@ -803,15 +840,7 @@ class TestPanel(QWidget):
                 self._send_action(cmd)
             return
 
-        # Safety — stop if near field boundary
-        if self._is_near_boundary(robot_pose):
-            self._stop_action()
-            self._action_status.setStyleSheet(
-                f"color:{WARNING}; font-size:12px; padding:4px;")
-            self._action_status.setText("Stopped — robot near field boundary")
-            return
-
-        rel_ball = world2robot(robot_pose, ball_pos)
+        rel_ball = world2robot(robot_pose, sanitize_field_target(ball_pos))
         dist = math.hypot(rel_ball[0], rel_ball[1])
         angle = math.atan2(rel_ball[1], rel_ball[0])
         self._last_ball_dist = dist
@@ -850,9 +879,6 @@ class TestPanel(QWidget):
             vx, vy = move_toward(rel_ball, 0.45, ramp_dist=500, stop_dist=80)
             w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
-        # Slow near walls instead of hard stop
-        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
-
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w, kick=kick, dribble=dribble)
         self._send_action(cmd)
 
@@ -863,14 +889,6 @@ class TestPanel(QWidget):
 
         robot_pose = self._get_robot_pose()
         if robot_pose is None:
-            return
-
-        # Safety — stop if near field boundary
-        if self._is_near_boundary(robot_pose):
-            self._stop_action()
-            self._goto_status.setStyleSheet(
-                f"color:{WARNING}; font-size:12px; padding:4px;")
-            self._goto_status.setText("Stopped — robot near field boundary")
             return
 
         rel = world2robot(robot_pose, self._goto_target)
@@ -893,9 +911,6 @@ class TestPanel(QWidget):
         vx, vy = move_toward(rel, max_speed, ramp_dist=400, stop_dist=80)
         w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
-        # Slow near walls
-        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
-
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
         self._send_action(cmd)
 
@@ -913,16 +928,6 @@ class TestPanel(QWidget):
         if robot_pose is None:
             return
 
-        # Safety — stop if near field boundary
-        if self._is_near_boundary(robot_pose):
-            cmd = self._build_action_cmd()
-            self._send_action(cmd)
-            self._stop_action()
-            self._action_status.setStyleSheet(
-                f"color:{WARNING}; font-size:12px; padding:4px;")
-            self._action_status.setText("Stopped — robot near field boundary")
-            return
-
         if self._square_step >= len(self._SQUARE_WAYPOINTS):
             cmd = self._build_action_cmd()
             self._send_action(cmd)
@@ -933,7 +938,7 @@ class TestPanel(QWidget):
             return
 
         # Navigate to current waypoint
-        target = self._SQUARE_WAYPOINTS[self._square_step]
+        target = sanitize_field_target(self._SQUARE_WAYPOINTS[self._square_step])
         rel = world2robot(robot_pose, target)
         dist = math.hypot(rel[0], rel[1])
         angle = math.atan2(rel[1], rel[0])
@@ -951,11 +956,25 @@ class TestPanel(QWidget):
         vx, vy = move_toward(rel, 0.4, ramp_dist=400, stop_dist=80)
         w = clamp(angle * 0.5, -MAX_W, MAX_W)
 
-        # Slow near walls
-        vx, vy = wall_brake(robot_pose[0], robot_pose[1], vx, vy)
-
         cmd = self._build_action_cmd(vx=vx, vy=vy, w=w)
         self._send_action(cmd)
+
+    def _update_hw_status(self, msg: str, color=None):
+        if not hasattr(self, "_hw_status") or self._hw_status is None:
+            return
+        c = color if color else TEXT_DIM
+        self._hw_status.setText(msg)
+        self._hw_status.setStyleSheet(f"color:{c}; font-size:12px; padding:2px 4px;")
+
+    def _refresh_connection_status(self):
+        if not hasattr(self, "_grsim_status_check") or self._grsim_status_check is None:
+            return
+        if self._engine and self._engine.is_running:
+            opts = getattr(self._engine, "_channel_options", {})
+            grsim_on = bool(opts.get("send_grsim", False))
+        else:
+            grsim_on = False
+        self._grsim_status_check.setChecked(grsim_on)
 
     def _test_connection(self):
         ip = self._ip_edit.text().strip()
@@ -971,38 +990,79 @@ class TestPanel(QWidget):
                 f"Packet sent to {ip}:{port} — "
                 f"UDP is fire-and-forget so no receipt confirmation")
             self._n_sent += 1
+            self._update_hw_status(f"Hardware: Sent to {ip}:{port}", SUCCESS)
         except socket.error as e:
             self._log.err(f"SOCKET ERROR: {e}")
             self._n_err += 1
+            self._update_hw_status(f"Hardware: Socket error — {e}", DANGER)
         except Exception as e:
             self._log.err(f"ERROR: {type(e).__name__}: {e}")
             self._n_err += 1
+            self._update_hw_status(f"Hardware: Error — {type(e).__name__}", DANGER)
         self._update_counts()
 
-    def _test_grsim(self):
-        self._log.info("Testing grSim…")
+    def _test_grsim_sender(self):
         try:
-            gs = self._get_grsim()
-            cmd = RobotCommand(robot_id=0, vx=0, vy=0, w=1.5,
-                               kick=0, dribble=0, isYellow=True)
-            gs.send_robot_command(cmd)
-            self._log.ok(
-                f"grSim test sent — Yellow robot 0 should spin for 1s")
-            self._n_sent += 1
-            QTimer.singleShot(1000, lambda: self._grsim_stop_test(gs))
+            cfg = Config()
+            ip, port = cfg.grSim_addr
         except Exception as e:
-            self._log.err(f"grSim test FAILED: {e}")
+            self._log.err(f"grSim config load failed: {type(e).__name__}: {e}")
             self._n_err += 1
-        self._update_counts()
+            self._update_counts()
+            return
 
-    def _grsim_stop_test(self, gs):
+        idx = self._robot_combo.currentIndex()
+        grsim_id = self._id_spin.value()
+        if 0 <= idx < len(self._robots):
+            grsim_id = self._robots[idx].grsim_id
+        is_yellow = self._team_combo.currentText() == "Yellow"
+        cmd = RobotCommand(
+            robot_id=self._id_spin.value(),
+            vx=0.0,
+            vy=0.0,
+            w=1.0,
+            kick=0,
+            dribble=0,
+            isYellow=is_yellow,
+        )
+        packet = grSimPacketFactory.robot_command(
+            robot_id=grsim_id,
+            vx=cmd.vx,
+            vy=cmd.vy,
+            w=cmd.w,
+            kick=cmd.kick,
+            dribble=cmd.dribble,
+            isYellow=cmd.isYellow,
+        )
+        data = packet.SerializeToString()
+        self._log.info(
+            f"Testing grSim sender: config={ip}:{port}, shell={cmd.robot_id}, "
+            f"grSimID={grsim_id}, team={'yellow' if is_yellow else 'blue'}, bytes={len(data)}")
+
+        if self._engine and self._engine.is_running:
+            opts = getattr(self._engine, "_channel_options", {})
+            self._log.info(
+                f"Dispatcher grSim option: send_grsim={bool(opts.get('send_grsim', False))}")
+
         try:
-            cmd = RobotCommand(robot_id=0, vx=0, vy=0, w=0,
-                               kick=0, dribble=0, isYellow=True)
-            gs.send_robot_command(cmd)
-            self._log.ok("grSim stop sent")
-        except Exception:
-            pass
+            sender = grSimSender(ip=ip, port=port)
+            for _ in range(10):
+                sender.send_robot_command(cmd, override_id=grsim_id)
+            sender.close()
+            self._log.ok(
+                f"grSim direct send OK: sent 10 UDP packets to {ip}:{port}. "
+                "If the robot does not move, check grSim command port and team color.")
+            self._n_sent += 10
+            self._update_hw_status(f"grSim: sent to {ip}:{port}", SUCCESS)
+        except socket.error as e:
+            self._log.err(f"grSim SOCKET ERROR: {e}")
+            self._n_err += 1
+            self._update_hw_status(f"grSim: socket error - {e}", DANGER)
+        except Exception as e:
+            self._log.err(f"grSim ERROR: {type(e).__name__}: {e}")
+            self._n_err += 1
+            self._update_hw_status(f"grSim: error - {type(e).__name__}", DANGER)
+        self._update_counts()
 
     def _update_counts(self):
         self._send_count.setText(f"{self._n_sent} sent")

@@ -43,7 +43,7 @@ and never reacts to the ball or teammates. The planned v2 topology:
     │       │   ├── FindOpenTeammate   → highest-space own robot (excl. goalie)
     │       │   └── PassToTeammate     → IntentPass(target)
     │       ├── ShootIfClose           → IntentKick if dist ≤ SHOOT_DIST_THRESHOLD
-    │       └── DribbleToGoal          → IntentDribble(opp_goal_pos)
+    │       └── DribbleToGoal          → IntentDribble(enemy_goal_pos)
     └── RepositionToSpace      → IntentMove(least-crowded open field cell)
 
 Key new nodes:
@@ -63,13 +63,27 @@ import py_trees
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentMove, IntentReceive
 from TeamControl.bt.contracts.snapshot import Snapshot
+from TeamControl.world.field_config import FIELD_LENGTH_MM, FIELD_WIDTH_MM
+
+_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
+_HALF_WID_M: float = FIELD_WIDTH_MM / 2.0 / 1000.0
 
 # -----------------------------------------------------------------------
 # Tuneable constants
 # -----------------------------------------------------------------------
 
-OPEN_SPACE_POSITION: tuple[float, float] = (1.0, 2.0)   # hardcoded v1 open space
-BLOCKING_POSITION: tuple[float, float] = (-1.0, 0.0)    # hardcoded v1 blocking pos
+# Four support slots — authored for us_positive=False (opp goal at +x).
+# SupporterTree negates x when us_positive=True.
+# All positions are within field bounds for any standard field size.
+_SUPPORT_SLOTS: dict[int, tuple[float, float]] = {
+    2: ( _HALF_LEN_M * 0.25,  _HALF_WID_M * 0.55),  # right-forward wing
+    3: ( _HALF_LEN_M * 0.25, -_HALF_WID_M * 0.55),  # left-forward wing
+    4: (-_HALF_LEN_M * 0.25,  _HALF_WID_M * 0.55),  # right-back
+    5: (-_HALF_LEN_M * 0.25, -_HALF_WID_M * 0.55),  # left-back
+}
+_DEFAULT_SUPPORT_POS: tuple[float, float] = (0.0, 0.0)
+
+BLOCKING_POSITION: tuple[float, float] = (-_HALF_LEN_M * 0.5, 0.0)
 
 
 # -----------------------------------------------------------------------
@@ -94,8 +108,9 @@ class MoveToSpace(py_trees.behaviour.Behaviour):
         bb = self._tree._blackboard_ref[0]
         if bb is None:
             return py_trees.common.Status.FAILURE
+        pos = self._tree.support_slots.get(bb.robot_id, self._tree.support_slots.get(2, _DEFAULT_SUPPORT_POS))
         bb.current_intent = IntentMove(
-            target_pos=self._tree.open_space_position,
+            target_pos=pos,
             target_orientation=None,
         )
         return py_trees.common.Status.SUCCESS
@@ -180,20 +195,14 @@ class SupporterTree:
 
     def __init__(self, us_positive: bool = True) -> None:
         self._snapshot: Snapshot | None = None
-        # Shared mutable ref — nodes read the current blackboard without
-        # being reconstructed each tick.
         self._blackboard_ref: list = [None]
-        # Mirror side-dependent constants onto the half we're playing on.
-        # The module constants assume us_positive=True; if we attack the
-        # negative half, negate the x of each position.
         self.us_positive = us_positive
-        # Convention: us_positive=True means we are on +x; our forward area
-        # is at -x (toward opp goal). Module constants are authored for the
-        # us_positive=False case, so negate x when us_positive=True.
-        self.open_space_position: tuple[float, float] = (
-            (-OPEN_SPACE_POSITION[0], OPEN_SPACE_POSITION[1]) if us_positive
-            else OPEN_SPACE_POSITION
-        )
+        # Negate x for each slot when us_positive=True (own half is +x,
+        # so forward is -x direction).
+        self.support_slots: dict[int, tuple[float, float]] = {
+            rid: ((-pos[0], pos[1]) if us_positive else pos)
+            for rid, pos in _SUPPORT_SLOTS.items()
+        }
         self.blocking_position: tuple[float, float] = (
             (-BLOCKING_POSITION[0], BLOCKING_POSITION[1]) if us_positive
             else BLOCKING_POSITION

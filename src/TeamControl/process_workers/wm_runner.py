@@ -57,8 +57,12 @@ class WMWorker(BaseWorker):
                 self.logger.info("[wmr] : Updating World Model Geometry")
                 self.wm.update_geometry(item)
 
-        if not self.gc_q.empty():
+        drained_gc = 0
+        while not self.gc_q.empty() and drained_gc < 32:
             new_info = self.gc_q.get_nowait()
+            drained_gc += 1
+            self.logger.info(f"[wmr] : Updating World Model Game Info {new_info[0]}")
+            self.wm.update_gc_data(new_info)
             from TeamControl.SSL.game_controller.common import PacketType
             if new_info[0] == PacketType.NEW_STATE:
                 print(f"[wmr] → new game state: {new_info[1]}", flush=True)

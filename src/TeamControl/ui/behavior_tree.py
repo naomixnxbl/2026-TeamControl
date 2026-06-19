@@ -18,10 +18,26 @@ from PySide6.QtGui import (QPainter, QPen, QBrush, QColor, QFont,
                            QPainterPath, QMouseEvent, QPaintEvent,
                            QWheelEvent, QTransform)
 
+from TeamControl.bt.param_store import LABELS, params
 from TeamControl.ui.theme import (ACCENT, BG_DARK, BG_MID, BG_PANEL,
                                    BORDER, TEXT, TEXT_DIM, SUCCESS,
                                    WARNING, DANGER, ROLE_GOALIE,
                                    ROLE_ATTACKER, ROLE_SUPPORT, ROLE_DEFENDER)
+
+# Map (role_name, PARAM_KEY) → param_store key so spinner changes persist.
+# Keys must match the DEFAULTS dict in param_store.py.
+_PARAM_KEYS: dict[tuple[str, str], str] = {
+    ("Goalie",       "MAX_ADVANCE"):   "goalie.max_advance",
+    ("Goalie",       "SAVE_SPEED"):    "goalie.rush_dist",
+    ("Team Goalie",  "GK_MAX_ADV"):    "goalie.max_advance",
+    ("Team Goalie",  "GK_SHOT_SPEED"): "goalie.kick_dist",
+    ("Striker",      "KICK_RANGE"):    "attacker.possession_dist",
+    ("Striker",      "DRIBBLE_SPEED"): "attacker.possession_heading_tol",
+    ("Team Attacker","KICK_RANGE"):    "attacker.possession_dist",
+    ("Defender",     "DEFEND_LINE"):   "defender.challenge_dist",
+    ("Defender",     "PRESS_DIST"):    "defender.zone_x_ratio",
+    ("Support",      "SPD_POSITION"):  "supporter.spacing_m",
+}
 
 
 # ── Tree data model ──────────────────────────────────────────────────
@@ -87,7 +103,7 @@ def _striker_tree():
     return BTNode("Striker", "selector", [
         BTNode("Wait outside box", "sequence", [
             BTNode("Ball in defense area?", "condition",
-                   description="Ball inside opponent penalty box"),
+                   description="Ball inside enemy penalty box"),
             BTNode("Hold position", "action",
                    description="Wait just outside defense area"),
         ]),
@@ -198,17 +214,17 @@ def _support_tree():
 def _defender_tree():
     return BTNode("Defender", "selector", [
         BTNode("Press (when attacking half)", "sequence", [
-            BTNode("Ball in opp territory?", "condition",
+            BTNode("Ball in enemy territory?", "condition",
                    params={"PRESS_ZONE": 0.3}),
             BTNode("First presser → ball carrier", "action",
                    params={"SPD_PRESS": 2.0}),
             BTNode("Second presser → cut lane", "action",
                    params={"PRESS_DIST": 600}),
         ]),
-        BTNode("Mark opponent", "sequence", [
+        BTNode("Mark enemy", "sequence", [
             BTNode("Find nearest threat", "action",
-                   description="Sort opponents by distance to our goal"),
-            BTNode("Position between opp & goal", "action",
+                   description="Sort enemies by distance to our goal"),
+            BTNode("Position between enemy & goal", "action",
                    params={"DEFEND_MARK_RATIO": 0.48}),
         ]),
         BTNode("Hold shape", "action",
@@ -467,13 +483,20 @@ class _TreeCanvas(QWidget):
 # ── Parameter editor ─────────────────────────────────────────────────
 
 class _ParamEditor(QWidget):
-    """Side panel to view and edit the selected node's parameters and description."""
+    """Side panel to view and edit the selected node's parameters and description.
+
+    When a spinner is changed the new value is pushed into the global
+    ``param_store.params`` singleton so tree nodes pick it up on the next tick
+    without requiring a restart.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(240)
         self.setMaximumWidth(400)
-        self._spinners = {}
+        self._spinners: dict[str, QDoubleSpinBox] = {}
+        self._current_role: str = ""
+        self._current_node_name: str = ""
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -519,9 +542,22 @@ class _ParamEditor(QWidget):
         scroll.setWidget(self._grid_widget)
         card_layout.addWidget(scroll, 1)
 
+        # Reset button
+        self._reset_btn = QPushButton("Reset all to defaults")
+        self._reset_btn.setToolTip("Restore every tunable parameter to its default value")
+        self._reset_btn.clicked.connect(self._on_reset)
+        self._reset_btn.setStyleSheet(
+            f"color:{DANGER}; font-size:11px; padding:4px 8px;")
+        card_layout.addWidget(self._reset_btn)
+
         outer.addWidget(card)
 
-    def show_node(self, node: BTNode):
+    def set_role(self, role_name: str) -> None:
+        """Tell the editor which role the current node belongs to."""
+        self._current_role = role_name
+
+    def show_node(self, node: BTNode) -> None:
+        """Display *node*'s params and wire spinners to param_store."""
         # Clear old widgets
         while self._grid.count():
             item = self._grid.takeAt(0)
@@ -529,32 +565,62 @@ class _ParamEditor(QWidget):
             if w:
                 w.deleteLater()
         self._spinners.clear()
+        self._current_node_name = node.name
 
         kind_label = node.kind.replace("_", " ").capitalize()
         desc = (node.description or "No description.").strip()
         self._header.setText(
-            f"<div style='color:{ACCENT}; font-weight:bold; font-size:13px; margin-bottom:4px;'>{node.name}</div>"
+            f"<div style='color:{ACCENT}; font-weight:bold; font-size:13px; "
+            f"margin-bottom:4px;'>{node.name}</div>"
             f"<div style='color:{TEXT_DIM}; font-size:11px;'>{kind_label}</div>"
-            f"<div style='color:{TEXT_DIM}; font-size:11px; margin-top:6px;'>{desc}</div>")
+            f"<div style='color:{TEXT_DIM}; font-size:11px; margin-top:6px;'>"
+            f"{desc}</div>")
 
         if not node.params:
             return
 
         row = 0
-        for key, val in node.params.items():
-            lbl = QLabel(key)
+        for key, default_val in node.params.items():
+            # Look up a live value from param_store if we have a mapping.
+            store_key = _PARAM_KEYS.get((self._current_role, key))
+            live_val = (
+                params.get(store_key, float(default_val))
+                if store_key
+                else float(default_val)
+            )
+            label_text = LABELS.get(store_key, key) if store_key else key
+            lbl = QLabel(label_text)
             lbl.setStyleSheet(f"color: {TEXT}; font-weight: bold; font-size: 12px;")
-            lbl.setToolTip(key)
+            lbl.setToolTip(store_key or key)
             spin = QDoubleSpinBox()
             spin.setRange(-99999, 99999)
             spin.setDecimals(3)
-            spin.setValue(float(val))
-            spin.setSingleStep(0.1 if abs(val) < 10 else 10)
+            spin.setValue(live_val)
+            spin.setSingleStep(0.1 if abs(live_val) < 10 else 10)
             spin.setMinimumHeight(28)
+            if store_key:
+                spin.setToolTip(f"param_store key: {store_key}")
+                spin.valueChanged.connect(
+                    lambda v, sk=store_key: params.set(sk, v)
+                )
+            else:
+                spin.setToolTip("Not wired to param_store (no mapping for this key)")
+                spin.setStyleSheet(f"color: {TEXT_DIM};")
             self._grid.addWidget(lbl, row, 0)
             self._grid.addWidget(spin, row, 1)
             self._spinners[key] = spin
             row += 1
+
+    def _on_reset(self) -> None:
+        params.reset_to_defaults()
+        # Refresh all visible spinners to show the restored defaults.
+        for key, spin in self._spinners.items():
+            store_key = _PARAM_KEYS.get((self._current_role, key))
+            if store_key:
+                spin.blockSignals(True)
+                from TeamControl.bt.param_store import DEFAULTS
+                spin.setValue(DEFAULTS.get(store_key, spin.value()))
+                spin.blockSignals(False)
 
 
 # ── Composite widget ─────────────────────────────────────────────────
@@ -644,8 +710,9 @@ class BehaviorTreePanel(QWidget):
         # Load default
         self._on_role_changed(self._role_combo.currentText())
 
-    def _on_role_changed(self, role_name):
+    def _on_role_changed(self, role_name: str) -> None:
         factory = ROLE_TREES.get(role_name)
         if factory:
             tree = factory()
             self._canvas.set_tree(tree)
+        self._editor.set_role(role_name)

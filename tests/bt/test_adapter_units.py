@@ -43,6 +43,6 @@ def test_build_snapshot_from_world_model_converts_mm_to_m():
     assert snapshot is not None
     assert snapshot.ball_position == (1.5, -2.5)
     assert snapshot.own_robots[0].position == (1.0, 2.0)
-    assert snapshot.opponent_robots[0].position == (-3.0, 0.5)
+    assert snapshot.enemy_robots[0].position == (-3.0, 0.5)
     assert snapshot.own_robots[0].orientation == 1.25
     assert snapshot.referee_state.game_phase == GameState.RUNNING

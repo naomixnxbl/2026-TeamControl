@@ -26,6 +26,7 @@ keeps running while higher fidelity is added.
 from __future__ import annotations
 
 import math
+import time
 from typing import Iterable
 
 from TeamControl.bt.contracts.intent import (
@@ -48,9 +49,26 @@ from TeamControl.bt.skills.kick_at import kick_at
 from TeamControl.bt.skills.move_to import move_to
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.SSL.game_controller.common import GameState
+from TeamControl.planner import PlannerAPI, PlannerInput
+from TeamControl.robot.constants import CRUISE_SPEED
+from TeamControl.robot.motion import get_motion_controller
+from TeamControl.world.field_config import (
+    FIELD_X_MAX,
+    FIELD_X_MIN,
+    FIELD_Y_MAX,
+    FIELD_Y_MIN,
+    VORONOI_ARRIVAL_DEADZONE_MM,
+    VORONOI_CHASE_SPEED_SCALE,
+    VORONOI_DENSITY_PERCENT,
+    VORONOI_HORIZON_MS,
+    VORONOI_MAX_DENSITY_NODES,
+    VORONOI_WAYPOINT_REACHED_MM,
+)
 
 # Runtime world state comes in as raw SSL/grSim millimetres.
 _MM_TO_M = 0.001
+_M_TO_MM = 1000.0
+_VORONOI_NAV_SPEED = CRUISE_SPEED * VORONOI_CHASE_SPEED_SCALE
 
 
 # Map every GC-produced GameState into the BT's GamePhase.
@@ -60,16 +78,17 @@ _PHASE_MAP = {
     GameState.HALTED:          GamePhase.HALTED,
     GameState.HALF_TIME:       GamePhase.HALF_TIME,
     GameState.STOPPED:         GamePhase.STOPPED,
-    GameState.PREPARE_KICKOFF: GamePhase.PREPARE_KICKOFF,
-    GameState.OPP_KICKOFF:    GamePhase.OPP_KICKOFF,
-    GameState.KICKOFF:         GamePhase.KICKOFF,
-    GameState.FREE_KICK:       GamePhase.FREE_KICK,
-    GameState.OPP_FREE_KICK:   GamePhase.OPP_FREE_KICK,
-    GameState.BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
-    GameState.PREPARE_PENALTY:     GamePhase.PREPARE_PENALTY,
-    GameState.PREPARE_PENALTY_OPP: GamePhase.PREPARE_PENALTY_OPP,
-    GameState.PENALTY_SHOOT:       GamePhase.PENALTY_SHOOT,
-    GameState.PENALTY_DEFEND:      GamePhase.PENALTY_DEFEND,
+    GameState.OUR_PREPARE_KICKOFF: GamePhase.PREPARE_KICKOFF,
+    GameState.ENEMY_KICKOFF:    GamePhase.ENEMY_KICKOFF,
+    GameState.OUR_KICKOFF:         GamePhase.KICKOFF,
+    GameState.OUR_FREE_KICK:       GamePhase.FREE_KICK,
+    GameState.ENEMY_FREE_KICK:   GamePhase.ENEMY_FREE_KICK,
+    GameState.OUR_BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
+    GameState.ENEMY_BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
+    GameState.OUR_PREPARE_PENALTY:     GamePhase.PREPARE_PENALTY,
+    GameState.ENEMY_PREPARE_PENALTY: GamePhase.PREPARE_PENALTY_OPP,
+    GameState.OUR_PENALTY_SHOOTOUT:       GamePhase.PENALTY_SHOOT,
+    GameState.ENEMY_PENALTY_SHOOTOUT:      GamePhase.PENALTY_DEFEND,
     GameState.RUNNING:         GamePhase.RUNNING,
 }
 
@@ -130,7 +149,7 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
     if is_yellow is None:
         is_yellow = bool(wm.us_yellow())
     own_team = frame.robots_yellow if is_yellow else frame.robots_blue
-    opp_team = frame.robots_blue if is_yellow else frame.robots_yellow
+    enemy_team = frame.robots_blue if is_yellow else frame.robots_yellow
 
     raw_placement = wm.get_ball_placement_pos()
     placement_pos = (float(raw_placement[0]), float(raw_placement[1])) if raw_placement else None
@@ -139,7 +158,7 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
         ball_position=ball_pos,
         ball_velocity=ball_vel,
         own_robots=_team_to_states(own_team),
-        opponent_robots=_team_to_states(opp_team),
+        enemy_robots=_team_to_states(enemy_team),
         referee_state=RefereeState(
             game_phase=_phase_from_state(wm.get_game_state()),
             score=(0, 0),  # TODO: read from wm.ref_data once exposed
@@ -263,6 +282,189 @@ def intent_to_robot_command(
     )
 
 
+class VoronoiRouter:
+    """Voronoi/Dijkstra planner state for one BT process.
+
+    One instance covers all robots in the process; the underlying
+    ``VoronoiWaypointManager`` separates state by ``(is_yellow, robot_id)``
+    so sharing is safe.
+    """
+
+    def __init__(self) -> None:
+        self._planner = PlannerAPI(
+            density_percent=VORONOI_DENSITY_PERCENT,
+            max_density_nodes=VORONOI_MAX_DENSITY_NODES,
+        )
+        self._active_targets: dict[int, tuple[float, float, float]] = {}
+
+    def get_waypoint_velocity(
+        self,
+        robot_id: int,
+        is_yellow: bool,
+        current_pos_m: tuple[float, float],
+        orientation: float,
+        target_pos_m: tuple[float, float],
+        wm,
+        now_s: float,
+        stay_in_field: bool = True,
+    ) -> tuple[float, float]:
+        """Return body-frame (vx, vy) in m/s toward the next Voronoi waypoint.
+
+        Converts meter-scale snapshot positions to mm for the planner, then
+        maps the resulting waypoint to a proportional velocity and rotates it
+        into robot body-frame. Returns (0.0, 0.0) on any planning failure.
+
+        When *stay_in_field* is True (default), returns (0, 0) if the target
+        is outside the configured field boundary so robots don't chase the ball
+        out of bounds.
+        """
+        rx = current_pos_m[0] * _M_TO_MM
+        ry = current_pos_m[1] * _M_TO_MM
+        tx = target_pos_m[0] * _M_TO_MM
+        ty = target_pos_m[1] * _M_TO_MM
+
+        # Stop if the target is outside the field (e.g. ball rolled out).
+        if stay_in_field and not (FIELD_X_MIN <= tx <= FIELD_X_MAX and FIELD_Y_MIN <= ty <= FIELD_Y_MAX):
+            return 0.0, 0.0
+
+        # Within arrival deadzone — drive straight to target, skip the planner.
+        robot_to_target_mm = math.hypot(tx - rx, ty - ry)
+        if robot_to_target_mm < VORONOI_ARRIVAL_DEADZONE_MM:
+            if robot_to_target_mm < 1.0:
+                return 0.0, 0.0
+            speed = min(robot_to_target_mm * _MM_TO_M, _VORONOI_NAV_SPEED)
+            vx_w = (tx - rx) / robot_to_target_mm * speed
+            vy_w = (ty - ry) / robot_to_target_mm * speed
+            cos_o, sin_o = math.cos(orientation), math.sin(orientation)
+            return vx_w * cos_o + vy_w * sin_o, -vx_w * sin_o + vy_w * cos_o
+
+        active = self._active_targets.get(robot_id)
+        reached = (
+            active is not None
+            and math.hypot(active[0] - rx, active[1] - ry) <= VORONOI_WAYPOINT_REACHED_MM
+        )
+        try:
+            obstacles = wm.get_planning_obstacles(
+                now_s=now_s,
+                horizon_ms=VORONOI_HORIZON_MS,
+                ignore_robots=((bool(is_yellow), int(robot_id)),),
+            )
+            plan_out = self._planner.plan(PlannerInput(
+                robot_id=robot_id,
+                is_yellow=is_yellow,
+                current_pose=(rx, ry, orientation),
+                target_pose=(tx, ty, 0.0),
+                obstacles=obstacles,
+                clearance_mm=0.0,
+                robot_reached_current_waypoint=reached,
+                now_s=now_s,
+            ))
+        except Exception:
+            return 0.0, 0.0
+
+        self._active_targets[robot_id] = plan_out.active_target_pose
+        wx, wy = plan_out.active_target_pose[0], plan_out.active_target_pose[1]
+        dx, dy = wx - rx, wy - ry
+        dist_mm = math.hypot(dx, dy)
+        if dist_mm < 1.0:
+            return 0.0, 0.0
+        speed = min(dist_mm * _MM_TO_M, _VORONOI_NAV_SPEED)
+        vx_w = dx / dist_mm * speed
+        vy_w = dy / dist_mm * speed
+        cos_o, sin_o = math.cos(orientation), math.sin(orientation)
+        return vx_w * cos_o + vy_w * sin_o, -vx_w * sin_o + vy_w * cos_o
+
+
+class PDRouter:
+    """Voronoi/Dijkstra planner + RobotMotionController for one BT process.
+
+    Identical interface to :class:`VoronoiRouter`.  The only difference is the
+    velocity calculation: instead of a simple proportional vector,
+    ``get_motion_controller(...).translational_motion()`` runs the full PD
+    control loop (accel limiting, hardware gains, field clamping).
+    ``translational_motion`` already returns body-frame velocities, so no
+    world-to-body rotation is needed here.
+    """
+
+    def __init__(self) -> None:
+        self._planner = PlannerAPI(
+            density_percent=VORONOI_DENSITY_PERCENT,
+            max_density_nodes=VORONOI_MAX_DENSITY_NODES,
+        )
+        self._active_targets: dict[int, tuple[float, float, float]] = {}
+
+    def get_waypoint_velocity(
+        self,
+        robot_id: int,
+        is_yellow: bool,
+        current_pos_m: tuple[float, float],
+        orientation: float,
+        target_pos_m: tuple[float, float],
+        wm,
+        now_s: float,
+        stay_in_field: bool = True,
+    ) -> tuple[float, float]:
+        """Return body-frame (vx, vy) in m/s toward the next Voronoi waypoint.
+
+        Uses RobotMotionController.translational_motion for full PD control
+        (accel limiting, hardware gains, field clamping). Pose units are metres
+        from the snapshot; the planner works in mm internally.
+
+        When *stay_in_field* is True (default), returns (0, 0) if the target
+        is outside the configured field boundary so robots don't chase the ball
+        out of bounds.
+        """
+        rx = current_pos_m[0] * _M_TO_MM
+        ry = current_pos_m[1] * _M_TO_MM
+        tx = target_pos_m[0] * _M_TO_MM
+        ty = target_pos_m[1] * _M_TO_MM
+
+        # Stop if the target is outside the field (e.g. ball rolled out).
+        if stay_in_field and not (FIELD_X_MIN <= tx <= FIELD_X_MAX and FIELD_Y_MIN <= ty <= FIELD_Y_MAX):
+            return 0.0, 0.0
+
+        # Within arrival deadzone — hand off directly to PD controller, skip the planner.
+        robot_to_target_mm = math.hypot(tx - rx, ty - ry)
+        if robot_to_target_mm < VORONOI_ARRIVAL_DEADZONE_MM:
+            motion_ctrl = get_motion_controller(robot_id, is_yellow)
+            deadline = time.monotonic() + 0.5
+            return motion_ctrl.translational_motion(
+                (rx, ry, orientation), (tx, ty), deadline, stay_in_field=True
+            )
+
+        active = self._active_targets.get(robot_id)
+        reached = (
+            active is not None
+            and math.hypot(active[0] - rx, active[1] - ry) <= VORONOI_WAYPOINT_REACHED_MM
+        )
+        try:
+            obstacles = wm.get_planning_obstacles(
+                now_s=now_s,
+                horizon_ms=VORONOI_HORIZON_MS,
+                ignore_robots=((bool(is_yellow), int(robot_id)),),
+            )
+            plan_out = self._planner.plan(PlannerInput(
+                robot_id=robot_id,
+                is_yellow=is_yellow,
+                current_pose=(rx, ry, orientation),
+                target_pose=(tx, ty, 0.0),
+                obstacles=obstacles,
+                clearance_mm=0.0,
+                robot_reached_current_waypoint=reached,
+                now_s=now_s,
+            ))
+        except Exception:
+            return 0.0, 0.0
+
+        self._active_targets[robot_id] = plan_out.active_target_pose
+        wx, wy = plan_out.active_target_pose[0], plan_out.active_target_pose[1]
+        motion_ctrl = get_motion_controller(robot_id, is_yellow)
+        deadline = time.monotonic() + 0.5
+        return motion_ctrl.translational_motion(
+            (rx, ry, orientation), (wx, wy), deadline, stay_in_field=True
+        )
+
+
 def dispatch_coordinator_output(
     coordinator,
     robot_ids: Iterable[int],
@@ -270,21 +472,66 @@ def dispatch_coordinator_output(
     is_yellow: bool,
     dispatcher_q,
     run_time: float = 1.0,
+    wm=None,
+    router: "VoronoiRouter | PDRouter | None" = None,
 ) -> int:
     """Walk each robot's blackboard after a ``Coordinator.tick`` and emit a
     ``RobotCommand`` per non-empty intent.
+
+    When *router* and *wm* are both supplied, ``IntentMove`` and
+    ``IntentDribble`` are routed through the Voronoi/Dijkstra planner for
+    obstacle-aware navigation. All other intents (kick, pass, orient, receive)
+    keep the original snapshot-based skill implementations.
 
     Reading the intent off the per-robot blackboard is more robust than
     aligning the ``Coordinator.tick`` list with ``robot_ids``: skipped robots
     (absent from snapshot, or which produced no intent) leave gaps in the
     returned list that are easy to misalign.
     """
+    use_voronoi = router is not None and wm is not None
+    now_s = time.time() if use_voronoi else 0.0
     sent = 0
     for rid in robot_ids:
         bb = coordinator.blackboards.get(rid)
         if bb is None or bb.current_intent is None:
             continue
-        cmd = intent_to_robot_command(bb.current_intent, rid, snapshot, is_yellow)
+        intent = bb.current_intent
+
+        if use_voronoi and isinstance(intent, (IntentMove, IntentDribble)):
+            robot = next((r for r in snapshot.own_robots if r.robot_id == rid), None)
+            if robot is None:
+                continue
+            vx_b, vy_b = router.get_waypoint_velocity(
+                rid, is_yellow,
+                robot.position, robot.orientation,
+                intent.target_pos, wm, now_s,
+            )
+            if isinstance(intent, IntentDribble):
+                target_o = math.atan2(
+                    intent.target_pos[1] - robot.position[1],
+                    intent.target_pos[0] - robot.position[0],
+                )
+                dribble = 1
+            else:
+                target_o = (
+                    intent.target_orientation
+                    if intent.target_orientation is not None
+                    else robot.orientation
+                )
+                dribble = 0
+            w = _angular_velocity_to_target(robot.orientation, target_o)
+            cmd = RobotCommand(
+                robot_id=rid,
+                vx=float(vx_b),
+                vy=float(vy_b),
+                w=float(w),
+                kick=0,
+                dribble=dribble,
+                isYellow=bool(is_yellow),
+            )
+        else:
+            cmd = intent_to_robot_command(intent, rid, snapshot, is_yellow)
+
         if cmd is None:
             continue
         if not dispatcher_q.full():

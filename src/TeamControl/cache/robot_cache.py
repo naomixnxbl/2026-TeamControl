@@ -2,7 +2,7 @@
 
 `frame.get_yellow_robots(...)` is called once per (team, id) per frame
 and the (x, y, theta) tuple is memoized. Iterating both teams or
-computing closest-opponent then hits the cache instead of re-walking
+computing closest-enemy then hits the cache instead of re-walking
 the frame's robot list.
 """
 
@@ -90,9 +90,9 @@ class RobotCache:
         self._rel_to_ball[key] = result
         return result
 
-    def closest_opponent(self, is_yellow_us, ball):
-        """Return (robot_id, (x, y, theta), distance) of nearest opponent
-        to the ball, or None if no opponents visible."""
+    def closest_enemy(self, is_yellow_us, ball):
+        """Return (robot_id, (x, y, theta), distance) of nearest enemy
+        to the ball, or None if no enemies visible."""
         if ball is None:
             return None
         best = None

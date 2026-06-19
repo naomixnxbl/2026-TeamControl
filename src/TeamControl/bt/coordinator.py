@@ -27,6 +27,22 @@ from typing import Any
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
 from TeamControl.bt.contracts.intent import Intent, IntentMove
 from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
+from TeamControl.world.field_config import (
+    DEFENCE_X_MM,
+    FIELD_LENGTH_MM,
+    FIELD_WIDTH_MM,
+    GOAL_HALF_WIDTH_MM,
+)
+
+# ---------------------------------------------------------------------------
+# Field dimensions — derived from field_config so they stay consistent with
+# the planner, canvas, and SSL-Vision geometry defaults.
+# ---------------------------------------------------------------------------
+_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0   # x of goal line (m)
+_HALF_WID_M: float = FIELD_WIDTH_MM / 2.0 / 1000.0    # y of sideline (m)
+_GOAL_HW_M: float  = GOAL_HALF_WIDTH_MM / 1000.0       # y of goal post (m)
+_SX: float = _HALF_LEN_M / 4.5                         # x scale vs 9 m Div-A default
+_SY: float = _HALF_WID_M / 3.0                         # y scale vs 6 m Div-A default
 
 # ---------------------------------------------------------------------------
 # Role assignment — fixed by robot ID
@@ -49,82 +65,77 @@ ROLE_ASSIGNMENT: dict[int, RoleType] = {
 STOP_BALL_CLEARANCE: float = 0.55
 LEGAL_BALL_CLEARANCE: float = 0.50   # actual SSL rule threshold
 
-OWN_GOAL: tuple[float, float] = (-4.5, 0.0)
-OPP_GOAL: tuple[float, float] = (4.5, 0.0)
-OWN_GOAL_LINE_X: float = -4.5
+OWN_GOAL: tuple[float, float] = (-_HALF_LEN_M, 0.0)
+enemy_GOAL: tuple[float, float] = (_HALF_LEN_M, 0.0)
+OWN_GOAL_LINE_X: float = -_HALF_LEN_M
 
-# Div B field (9m × 6m): goal line at x=±4.5m.
-# §2.1.3: penalty mark is 6m from opponent goal center → 4.5 - 6 = -1.5m from center.
-# For us_positive=False (opp goal at +4.5): penalty mark at (-1.5, 0).
-# Mirrored to (+1.5, 0) for us_positive=True.
-PENALTY_SPOT: tuple[float, float] = (-1.5, 0.0)
+# Penalty spot: DEFENCE_X_MM (penalty area depth) from our own goal line toward centre.
+# For us_positive=False (own goal at -x): penalty spot at (-_HALF_LEN_M + DEFENCE_X_MM/1000, 0).
+# Mirrored to (+_HALF_LEN_M - DEFENCE_X_MM/1000, 0) for us_positive=True.
+PENALTY_SPOT: tuple[float, float] = (-_HALF_LEN_M + DEFENCE_X_MM / 1000.0, 0.0)
 
 # Home positions robots return to during STOPPED — spread across own half (negative-x for us_positive=False).
 # Mirrored in Coordinator.__init__ when us_positive=True.
+# Values authored for a 9 m × 6 m default and scaled by _SX/_SY to the configured field.
 STOPPED_HOME_POSITIONS: dict[int, tuple[float, float]] = {
-    0: (-4.2,  0.0),   # goalie near own goal
-    1: (-2.5, -1.0),
-    2: (-2.5,  1.0),
-    3: (-1.5,  0.0),
-    4: (-1.5, -1.5),
-    5: (-1.5,  1.5),
+    0: (-4.2 * _SX,  0.0),
+    1: (-2.5 * _SX, -1.0 * _SY),
+    2: (-2.5 * _SX,  1.0 * _SY),
+    3: (-1.5 * _SX,  0.0),
+    4: (-1.5 * _SX, -1.5 * _SY),
+    5: (-1.5 * _SX,  1.5 * _SY),
 }
 
-# Defensive positions for when the OPPONENT has the kickoff.
+# Defensive positions for when the enemy has the kickoff.
 # All in own half (-x for us_positive=False), all outside center circle (r=0.5m).
-# Shape: goalie on line, two defenders wide, two midfielders covering channels, one at centre-half.
-OPP_KICKOFF_POSITIONS: dict[int, tuple[float, float]] = {
-    0: (-4.2,  0.0),   # goalie on goal line
-    1: (-3.0, -1.5),   # defender left
-    2: (-3.0,  1.5),   # defender right
-    3: (-2.0,  0.0),   # centre back
-    4: (-1.5, -1.2),   # mid left
-    5: (-1.5,  1.2),   # mid right
+ENEMY_KICKOFF_POSITIONS: dict[int, tuple[float, float]] = {
+    0: (-4.2 * _SX,  0.0),
+    1: (-3.0 * _SX, -1.5 * _SY),
+    2: (-3.0 * _SX,  1.5 * _SY),
+    3: (-2.0 * _SX,  0.0),
+    4: (-1.5 * _SX, -1.2 * _SY),
+    5: (-1.5 * _SX,  1.2 * _SY),
 }
 
 # FREE_KICK support offsets — relative to ball position, at legal distance (>0.5m from ball).
 # Kicker is assigned dynamically; these are fallback slots for non-kicker, non-goalie robots.
 FREE_KICK_SUPPORT_OFFSETS: list[tuple[float, float]] = [
-    (0.0, -1.2),   # slot 0 — left wing
-    (0.0,  1.2),   # slot 1 — right wing
-    (-0.8,  0.0),  # slot 2 — back centre
-    (-0.8, -0.8),  # slot 3 — back left
-    (-0.8,  0.8),  # slot 4 — back right
+    (0.0,        -1.2 * _SY),
+    (0.0,         1.2 * _SY),
+    (-0.8 * _SX,  0.0),
+    (-0.8 * _SX, -0.8 * _SY),
+    (-0.8 * _SX,  0.8 * _SY),
 ]
 
 # PREPARE_KICKOFF positions — all robots in own half (negative-x when us_positive=True).
-# Rule §5.3.2: one attacker is allowed ANYWHERE inside the centre circle (radius=0.5m).
-# We place attacker at (0, 0) — centre of the circle — to be as close to ball as allowed.
-# Ball is at centre, placed by human referee before kickoff command. Robots must NOT touch it.
+# Rule §5.3.2: one attacker inside the centre circle; others in own half.
 KICKOFF_POSITIONS: dict[int, tuple[float, float]] = {
-    0: (-4.0, 0.0),    # goalie — in front of own goal
-    1: (-2.0, -1.5),   # defender left
-    2: (-2.0,  1.5),   # defender right
-    3: (-0.3,  0.0),   # kicker — inside center circle, 30 cm behind ball on attack axis
-    4: (-1.0,  1.0),   # supporter right
-    5: (-1.0, -1.0),   # supporter left
+    0: (-4.0 * _SX,  0.0),
+    1: (-2.0 * _SX, -1.5 * _SY),
+    2: (-2.0 * _SX,  1.5 * _SY),
+    3: (-0.3 * _SX,  0.0),
+    4: (-1.0 * _SX,  1.0 * _SY),
+    5: (-1.0 * _SX, -1.0 * _SY),
 }
 
-# PENALTY_SHOOT: attacker at penalty spot, ALL others ≥ 1m behind ball (x ≤ 2.5).
-# Our goalie is NOT the defending keeper — opponent's keeper defends their goal.
-# All our non-attacker robots just need to be 1m behind the ball.
+# PENALTY_SHOOT: attacker at penalty spot, ALL others ≥ 1m behind ball.
 PENALTY_SHOOT_POSITIONS: dict[int, tuple[float, float]] = {
-    0: (2.0,  0.5),    # our goalie — behind ball
-    1: (2.0, -1.5),
-    2: (2.0,  1.5),
-    3: (2.0, -0.5),
-    4: (2.0,  0.5),
-    5: PENALTY_SPOT,   # attacker shoots
+    0: ( 2.0 * _SX,  0.5 * _SY),
+    1: ( 2.0 * _SX, -1.5 * _SY),
+    2: ( 2.0 * _SX,  1.5 * _SY),
+    3: ( 2.0 * _SX, -0.5 * _SY),
+    4: ( 2.0 * _SX,  0.5 * _SY),
+    5: PENALTY_SPOT,
 }
 
-# Positions for penalty defend: goalie on goal line, others in own half
+# Positions for penalty defend: goalie on goal line, others in own half.
 PENALTY_DEFEND_POSITIONS: dict[int, tuple[float, float]] = {
-    0: (-4.5, 0.0),    # goalie on goal line (tracks ball y dynamically)
-    1: (-2.0, -1.0),
-    2: (-2.0,  1.0),
-    3: (-1.5, -0.5),
-    4: (-1.5,  0.5),
-    5: (-1.0,  0.0),
+    0: (-_HALF_LEN_M,  0.0),
+    1: (-2.0 * _SX,   -1.0 * _SY),
+    2: (-2.0 * _SX,    1.0 * _SY),
+    3: (-1.5 * _SX,   -0.5 * _SY),
+    4: (-1.5 * _SX,    0.5 * _SY),
+    5: (-1.0 * _SX,    0.0),
 }
 
 
@@ -240,7 +251,7 @@ class Coordinator:
         self._kickoff_kicker_id: int | None = None
         self._kickoff_kicker_ready: bool = False
         self._kickoff_needs_slot: set[int] = set()  # robots that must reach their slot
-        self._opp_kickoff_carry: bool = False
+        self._enemy_kickoff_carry: bool = False
         self._penalty_shoot_carry: bool = False
         self._penalty_shoot_done: bool = False
         self._penalty_shoot_ball_ref: tuple[float, float] | None = None
@@ -249,24 +260,24 @@ class Coordinator:
         self._last_phase: GamePhase | None = None
         self._pre_halt_phase: GamePhase | None = None  # phase before HALTED
         if us_positive:
-            # We are on +x half → own goal at +x, opponent goal at -x, attack toward -x.
+            # We are on +x half → own goal at +x, enemy goal at -x, attack toward -x.
             self._kickoff_pos = _mirror_positions(KICKOFF_POSITIONS)
-            self._opp_kickoff_pos = _mirror_positions(OPP_KICKOFF_POSITIONS)
+            self._enemy_kickoff_pos = _mirror_positions(ENEMY_KICKOFF_POSITIONS)
             self._penalty_shoot_pos = _mirror_positions(PENALTY_SHOOT_POSITIONS)
             self._penalty_defend_pos = _mirror_positions(PENALTY_DEFEND_POSITIONS)
             self._stopped_home = _mirror_positions(STOPPED_HOME_POSITIONS)
-            self._opp_goal: tuple[float, float] = OWN_GOAL   # (-4.5, 0)
+            self._enemy_goal: tuple[float, float] = OWN_GOAL   # (-4.5, 0)
             self._own_goal_line_x: float = -OWN_GOAL_LINE_X  # +4.5
             self._attack_sign: float = -1.0
         else:
-            # We are on -x half → own goal at -x, opponent goal at +x, attack toward +x.
+            # We are on -x half → own goal at -x, enemy goal at +x, attack toward +x.
             self._kickoff_pos = dict(KICKOFF_POSITIONS)
             self._penalty_shoot_pos = PENALTY_SHOOT_POSITIONS
             self._penalty_defend_pos = PENALTY_DEFEND_POSITIONS
-            self._opp_goal = OPP_GOAL                         # (4.5, 0)
+            self._enemy_goal = enemy_GOAL                         # (4.5, 0)
             self._own_goal_line_x = OWN_GOAL_LINE_X           # -4.5
             self._attack_sign: float = 1.0
-            self._opp_kickoff_pos = dict(OPP_KICKOFF_POSITIONS)
+            self._enemy_kickoff_pos = dict(ENEMY_KICKOFF_POSITIONS)
             self._stopped_home = dict(STOPPED_HOME_POSITIONS)
 
     # ------------------------------------------------------------------
@@ -302,10 +313,10 @@ class Coordinator:
             # Track pre-HALTED phase so carries can look through HALTED.
             if self._last_phase not in (GamePhase.HALTED, GamePhase.HALF_TIME):
                 self._pre_halt_phase = self._last_phase
-            # Carry opp kickoff positioning into RUNNING — works through HALTED.
+            # Carry enemy kickoff positioning into RUNNING — works through HALTED.
             prior = self._pre_halt_phase
-            self._opp_kickoff_carry = (
-                prior == GamePhase.OPP_KICKOFF
+            self._enemy_kickoff_carry = (
+                prior == GamePhase.ENEMY_KICKOFF
                 and phase == GamePhase.RUNNING
             )
             # Carry penalty shoot into RUNNING until kicker fires.
@@ -345,8 +356,8 @@ class Coordinator:
             self._lock_kickoff_kicker(snapshot, robot_ids)
             return self._handle_prepare_kickoff(snapshot, robot_ids)
 
-        if phase == GamePhase.OPP_KICKOFF:
-            return self._handle_opp_kickoff(snapshot, robot_ids)
+        if phase == GamePhase.ENEMY_KICKOFF:
+            return self._handle_enemy_kickoff(snapshot, robot_ids)
 
         if phase == GamePhase.KICKOFF:
             return self._handle_kickoff(snapshot, robot_ids)
@@ -354,8 +365,8 @@ class Coordinator:
         if phase == GamePhase.FREE_KICK:
             return self._handle_free_kick(snapshot, robot_ids)
 
-        if phase == GamePhase.OPP_FREE_KICK:
-            return self._handle_opp_free_kick(snapshot, robot_ids)
+        if phase == GamePhase.ENEMY_FREE_KICK:
+            return self._handle_enemy_free_kick(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_PENALTY:
             return self._handle_prepare_penalty(snapshot, robot_ids)
@@ -369,21 +380,21 @@ class Coordinator:
         if phase == GamePhase.PENALTY_DEFEND:
             return self._handle_penalty_defend(snapshot, robot_ids)
 
-        # RUNNING — finish opp kickoff positioning if carry is active.
-        if self._opp_kickoff_carry:
-            result = self._handle_opp_kickoff(snapshot, robot_ids)
+        # RUNNING — finish enemy kickoff positioning if carry is active.
+        if self._enemy_kickoff_carry:
+            result = self._handle_ENEMY_kickoff(snapshot, robot_ids)
             # Clear carry once all robots are within 0.2m of their slots.
             all_at_slot = True
             for rid in robot_ids:
                 robot = _find_robot(snapshot, rid)
                 if robot is None:
                     continue
-                slot = self._opp_kickoff_pos.get(rid, robot.position)
+                slot = self._enemy_kickoff_pos.get(rid, robot.position)
                 if math.hypot(robot.position[0] - slot[0], robot.position[1] - slot[1]) > 0.2:
                     all_at_slot = False
                     break
             if all_at_slot:
-                self._opp_kickoff_carry = False
+                self._enemy_kickoff_carry = False
             return result
 
         # RUNNING — if a kickoff kick hasn't fired yet, finish it first.
@@ -478,8 +489,8 @@ class Coordinator:
             intents.append(bb.current_intent)
         return intents
 
-    def _handle_opp_kickoff(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
-        """OPP_KICKOFF: opponent has the kickoff — all our robots must be in own half,
+    def _handle_enemy_kickoff(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """enemy_KICKOFF: enemy has the kickoff — all our robots must be in own half,
         outside the center circle. No kicker exception for us."""
         CENTER_CIRCLE_R = 0.5
         intents: list[Intent] = []
@@ -491,7 +502,7 @@ class Coordinator:
             rx, ry = robot.position
             in_own_half = rx * self._attack_sign < 0
             outside_circle = math.hypot(rx, ry) > CENTER_CIRCLE_R
-            slot = self._opp_kickoff_pos.get(robot_id, robot.position)
+            slot = self._enemy_kickoff_pos.get(robot_id, robot.position)
             dist_to_slot = math.hypot(rx - slot[0], ry - slot[1])
             if in_own_half and outside_circle and dist_to_slot < 0.15:
                 target = robot.position  # already at slot — hold
@@ -530,7 +541,7 @@ class Coordinator:
                 dist_center = math.hypot(rx, ry)
                 outside_circle = dist_center > CENTER_CIRCLE_R
                 slot = self._kickoff_pos.get(robot_id)
-                # Mark robot as needing to reach its slot if it starts in opponent half.
+                # Mark robot as needing to reach its slot if it starts in enemy half.
                 if not (in_own_half and outside_circle):
                     self._kickoff_needs_slot.add(robot_id)
                 # Clear the flag once the robot arrives at its slot (within 0.15m).
@@ -577,7 +588,7 @@ class Coordinator:
                 if dist_to_ball < 0.15 and on_correct_side:
                     self._kickoff_kicker_ready = True
                 if self._kickoff_kicker_ready:
-                    bb.current_intent = IntentKick(target_pos=self._opp_goal)
+                    bb.current_intent = IntentKick(target_pos=self._enemy_goal)
                 elif dist_to_approach < 0.10:
                     bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                 else:
@@ -586,7 +597,7 @@ class Coordinator:
                     )
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 by = snapshot.ball_position[1]
-                target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
+                target = (self._own_goal_line_x, max(-_GOAL_HW_M, min(_GOAL_HW_M, by)))
                 bb.current_intent = IntentMove(
                     target_pos=target, target_orientation=None
                 )
@@ -609,9 +620,9 @@ class Coordinator:
     def _handle_ball_placement(
         self, snapshot: Snapshot, robot_ids: list[int]
     ) -> list[Intent]:
-        """BALL_PLACEMENT: attacker moves ball to designated target.
+        """BALL_PLACEMENT: designated robot dribbles ball to target.
 
-        Placer (attacker, robot 5):
+        Placer (robot KICKOFF_KICKER_ID = 3):
           - If far from ball     → IntentMove to ball
           - If at ball           → IntentDribble to placement target
           - If ball at target    → IntentMove away (§5.2: placer must clear
@@ -724,7 +735,7 @@ class Coordinator:
                 if dist_to_ball < 0.15 and on_correct_side:
                     self._free_kick_kicker_ready = True
                 if self._free_kick_kicker_ready:
-                    bb.current_intent = IntentKick(target_pos=self._opp_goal)
+                    bb.current_intent = IntentKick(target_pos=self._enemy_goal)
                 elif dist_to_approach < 0.10:
                     # Reached approach position — now drive straight into the ball
                     bb.current_intent = IntentMove(
@@ -737,7 +748,7 @@ class Coordinator:
                 intents.append(bb.current_intent)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 by = snapshot.ball_position[1]
-                target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
+                target = (self._own_goal_line_x, max(-_GOAL_HW_M, min(_GOAL_HW_M, by)))
                 bb.current_intent = IntentMove(
                     target_pos=target, target_orientation=None
                 )
@@ -759,8 +770,8 @@ class Coordinator:
                 intents.append(bb.current_intent)
         return intents
 
-    def _handle_opp_free_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
-        """OPP_FREE_KICK: opponent has the free kick — all our robots stay ≥0.5m from ball.
+    def _handle_enemy_free_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """enemy_FREE_KICK: enemy has the free kick — all our robots stay ≥0.5m from ball.
 
         Goalie tracks ball on own goal line (y only). Non-goalie robots move to
         defensive spread positions offset from the ball, all at legal clearance distance.
@@ -786,7 +797,7 @@ class Coordinator:
 
             if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 # Goalie holds on own goal line, tracks ball y
-                target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
+                target = (self._own_goal_line_x, max(-_GOAL_HW_M, min(_GOAL_HW_M, by)))
             else:
                 sy = spread_y[slot_idx % len(spread_y)]
                 slot_idx += 1
@@ -822,7 +833,7 @@ class Coordinator:
                 approach_x = bx - 0.25 * self._attack_sign
                 bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
-                by_clamped = max(-1.0, min(1.0, by))
+                by_clamped = max(-_GOAL_HW_M, min(_GOAL_HW_M, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
                 )
@@ -833,7 +844,7 @@ class Coordinator:
                 needs_cross = (robot.position[0] - bx) * self._attack_sign > 0
                 clear_of_ball_y = abs(robot.position[1] - by) > 0.6
                 if needs_cross and not clear_of_ball_y:
-                    detour_y = by + (1.5 if slot % 2 == 0 else -1.5)
+                    detour_y = by + (_HALF_WID_M if slot % 2 == 0 else -_HALF_WID_M)
                     bb.current_intent = IntentMove(
                         target_pos=(robot.position[0], detour_y), target_orientation=None
                     )
@@ -843,7 +854,7 @@ class Coordinator:
         return intents
 
     def _handle_prepare_penalty_opp(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
-        """PREPARE_PENALTY_OPP: position our robots before opponent shoots.
+        """PREPARE_PENALTY_OPP: position our robots before enemy shoots.
 
         Goalie to own goal line. All others 1m behind ball (own-goal side).
         Robots that need to cross the ball's x position are rerouted in y first
@@ -860,7 +871,7 @@ class Coordinator:
                 continue
             bb = self.blackboards[robot_id]
             if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
-                by_clamped = max(-1.0, min(1.0, by))
+                by_clamped = max(-_GOAL_HW_M, min(_GOAL_HW_M, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
                 )
@@ -872,7 +883,7 @@ class Coordinator:
                 needs_cross = (robot.position[0] - bx) * self._attack_sign > 0
                 clear_of_ball_y = abs(robot.position[1] - by) > 0.6
                 if needs_cross and not clear_of_ball_y:
-                    detour_y = by + (1.5 if slot % 2 == 0 else -1.5)
+                    detour_y = by + (_HALF_WID_M if slot % 2 == 0 else -_HALF_WID_M)
                     bb.current_intent = IntentMove(
                         target_pos=(robot.position[0], detour_y), target_orientation=None
                     )
@@ -921,13 +932,13 @@ class Coordinator:
                     dist_to_approach = math.hypot(robot.position[0] - approach_x, robot.position[1] - by)
                     on_correct_side = (robot.position[0] - bx) * self._attack_sign < -0.05
                     if dist_to_ball < 0.15 and on_correct_side:
-                        bb.current_intent = IntentKick(target_pos=self._opp_goal)
+                        bb.current_intent = IntentKick(target_pos=self._enemy_goal)
                     elif dist_to_approach < 0.10:
                         bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                     else:
                         bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
-                by_clamped = max(-1.0, min(1.0, by))
+                by_clamped = max(-_GOAL_HW_M, min(_GOAL_HW_M, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
                 )
@@ -955,7 +966,7 @@ class Coordinator:
             bb = self.blackboards[robot_id]
             if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 # Stay on goal line, track ball's y — clamped to goal mouth.
-                by = max(-1.0, min(1.0, snapshot.ball_position[1]))
+                by = max(-_GOAL_HW_M, min(_GOAL_HW_M, snapshot.ball_position[1]))
                 target = (self._own_goal_line_x, by)
             else:
                 # Non-goalie defenders: stay ≥1m behind the ball (own-goal side).

@@ -98,16 +98,16 @@ class Team ():
     Attributes:
         isYellow (bool): Indicates if this team is yellow.
     """
-    def __init__(self,team_robots:list, team_is_yellow:bool):
+    def __init__(self,team_robots:list, isYellow:bool):
         """
         Initializes a Team instance using a list of raw protobuf robot data.
 
         Args:
             team_robots (list): List of protobuf robot objects (e.g., SSL_DetectionRobot).
-            team_is_yellow (bool): True if the team is yellow.
+            isYellow (bool): True if the team is yellow.
         """
         self._robots : list = [0] * 16
-        self.isYellow : bool= team_is_yellow
+        self.isYellow : bool= isYellow
         self._num_robots : int = 0
         self._active_cache : list | None = None
         self.robots = team_robots #sets and updates the value

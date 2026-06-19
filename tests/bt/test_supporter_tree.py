@@ -65,7 +65,7 @@ def make_snapshot(
         ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 

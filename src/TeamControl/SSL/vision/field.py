@@ -2,6 +2,18 @@ from typing import Optional
 from enum import Enum
 
 
+def _optional_proto_value(message, name):
+    """Return None when an optional protobuf field was not provided."""
+    has_field = getattr(message, "HasField", None)
+    if has_field is not None:
+        try:
+            if not has_field(name):
+                return None
+        except ValueError:
+            pass
+    return getattr(message, name, None)
+
+
 class FieldShapeType(Enum):
     Undefined = 0
     CenterCircle = 1
@@ -33,7 +45,7 @@ class Vector2f ():
 
 class FieldLines():
     def __init__(self,name : str, p1 : Vector2f, p2 : Vector2f, 
-                 thickness : float, type : FieldShapeType=None):
+                 thickness : float, type : FieldShapeType=FieldShapeType.Undefined):
         ## Name of this field marking.
         self.name : str = name
         ## Start point of the line segment.
@@ -57,7 +69,7 @@ class FieldLines():
             p1=Vector2f.from_proto(fl.p1) ,
             p2=Vector2f.from_proto(fl.p2),
             thickness=float(fl.thickness),
-            type=getattr(fl,"type",None)
+            type=getattr(fl,"type",FieldShapeType.Undefined)
             )
         else :
             return None
@@ -66,7 +78,7 @@ class FieldLines():
 
 class FieldArcs():
     def __init__(self,name : str, center : Vector2f, radius : float,
-                 a1 : float ,a2 : float, thickness : float, type : FieldShapeType=None ):
+                 a1 : float ,a2 : float, thickness : float, type : FieldShapeType=FieldShapeType.CenterCircle ):
         ## Name of this field marking.
         self.name : str = name 
         ## Center point of the circular arc.
@@ -94,13 +106,13 @@ class FieldArcs():
             a1 = float(fa.a1) ,
             a2 = float(fa.a2),
             thickness = float(fa.thickness),
-            type=getattr(fa,"type",None)
+            type=getattr(fa,"type",FieldShapeType.CenterCircle)
             )
         else : 
             return None
 class FieldSize():
     def __init__(self, field_length:int, field_width:int, goal_width:int, goal_depth:int, boundary_width:int,
-                 field_lines:FieldLines, field_arcs:FieldArcs,
+                 field_lines:list[FieldLines], field_arcs:list[FieldArcs],
                  penalty_area_depth:int=None ,penalty_area_width:int=None):
         self.field_length : int= field_length
         self.field_width : int= field_width
@@ -127,8 +139,8 @@ class FieldSize():
                 boundary_width=int(fs.boundary_width),
                 field_lines=[FieldLines.from_proto(line) for line in fs.field_lines],
                 field_arcs=[FieldArcs.from_proto(arc) for arc in fs.field_arcs],
-                penalty_area_depth=getattr(fs, "penalty_area_depth", None),
-                penalty_area_width=getattr(fs, "penalty_area_width", None)
+                penalty_area_depth=_optional_proto_value(fs, "penalty_area_depth"),
+                penalty_area_width=_optional_proto_value(fs, "penalty_area_width")
             )
         else: 
             return None

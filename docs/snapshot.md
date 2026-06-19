@@ -40,7 +40,7 @@ construction.
 | `ball_position` | `tuple[float, float]` | metres, field frame | `(x, y)`. Origin at field centre. |
 | `ball_velocity` | `tuple[float, float]` | m/s, field frame | Currently hard-coded `(0, 0)` in `adapter.py` — see TODO at the bottom of this file. |
 | `own_robots` | `tuple[RobotState, ...]` | — | Our team's robots **that vision can currently see**. Robots off-field or undetected do not appear. |
-| `opponent_robots` | `tuple[RobotState, ...]` | — | Same shape, the other team. |
+| `enemy_robots` | `tuple[RobotState, ...]` | — | Same shape, the other team. |
 | `referee_state` | `RefereeState` | — | Game phase, score, ball-placement target. See below. |
 
 ### `RobotState`
@@ -56,7 +56,7 @@ construction.
 | Field | Type | Notes |
 |---|---|---|
 | `game_phase` | `GamePhase` | One of `HALTED`, `HALF_TIME`, `STOPPED`, `PREPARE_KICKOFF`, `KICKOFF`, `FREE_KICK`, `BALL_PLACEMENT`, `PENALTY_SHOOT`, `PENALTY_DEFEND`, `RUNNING`. The GC FSM has already resolved ours-vs-theirs before populating this — there's no separate "is it our kickoff?" flag. |
-| `score` | `tuple[int, int]` | `(own, opponent)`. Currently hard-coded `(0, 0)` in `adapter.py`. |
+| `score` | `tuple[int, int]` | `(own, enemy)`. Currently hard-coded `(0, 0)` in `adapter.py`. |
 | `ball_placement_pos` | `tuple[float, float] \| None` | Target during `BALL_PLACEMENT`; `None` otherwise. |
 
 ### `GamePhase`
@@ -113,7 +113,7 @@ Conventions worth knowing:
 - The `us_positive` flag (from `ipconfig.yaml`) tells the BT which side is
   ours:
 
-| `us_positive` | Our goal | Opponent goal |
+| `us_positive` | Our goal | enemy goal |
 |---|---|---|
 | `True` | x ≈ +4.5 m | x ≈ −4.5 m |
 | `False` | x ≈ −4.5 m | x ≈ +4.5 m |
@@ -148,7 +148,7 @@ snap = Snapshot(
         RobotState(robot_id=0, position=(-4.0,  0.0), orientation=0.0),
         RobotState(robot_id=5, position=( 0.5, -1.1), orientation=1.57),
     ),
-    opponent_robots=(),
+    enemy_robots=(),
     referee_state=RefereeState(
         game_phase=GamePhase.RUNNING,
         score=(0, 0),

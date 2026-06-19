@@ -48,7 +48,7 @@ What it actually did
          (preserves single-team behaviour).
        - When you spawn one BT per colour, pass True for the yellow process
          and False for the blue process. Each ends up with its own per-tick
-         Snapshot whose own_robots / opponent_robots are oriented to that
+         Snapshot whose own_robots / enemy_robots are oriented to that
          colour's perspective.
 
 2. mm -> m at the snapshot boundary

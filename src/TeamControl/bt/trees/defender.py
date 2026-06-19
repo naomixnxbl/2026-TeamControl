@@ -29,15 +29,18 @@ import py_trees
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentKick, IntentMove
 from TeamControl.bt.contracts.snapshot import Snapshot
+from TeamControl.world.field_config import FIELD_LENGTH_MM
+
+_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
 
 # -----------------------------------------------------------------------
 # Tuneable constants
 # -----------------------------------------------------------------------
 
-DEFEND_ZONE_POSITION: tuple[float, float] = (-3.0, 0.0)   # own half centre
-CLOSE_ENOUGH_THRESHOLD: float = 0.6                         # metres to ball to challenge
-CLEAR_DIRECTION: tuple[float, float] = (4.5, 0.0)           # kick toward opponent's half
-DEFENDER_ROLE_ID: int = 1                                    # defender robot ID
+DEFEND_ZONE_POSITION: tuple[float, float] = (-_HALF_LEN_M * (2.0 / 3.0), 0.0)  # 2/3 into own half
+CLOSE_ENOUGH_THRESHOLD: float = 0.6                                               # metres to ball to challenge
+CLEAR_DIRECTION: tuple[float, float] = (_HALF_LEN_M, 0.0)                        # kick toward enemy's half
+DEFENDER_ROLE_ID: int = 1                                                          # defender robot ID
 
 
 # -----------------------------------------------------------------------
@@ -207,10 +210,10 @@ class DefenderTree:
         # Mirror side-dependent constants onto the half we're actually
         # defending. Module constants assume us_positive=True (own goal at
         # negative x). When we attack the negative half instead, negate x so
-        # the defender parks in OUR half and clears toward the OPPONENT goal.
+        # the defender parks in OUR half and clears toward the enemy goal.
         self.us_positive = us_positive
         # Convention: us_positive=True means we are on +x; own half is +x,
-        # opp goal is at -x. The module constants are authored for the
+        # enemy goal is at -x. The module constants are authored for the
         # us_positive=False case, so negate x when us_positive=True.
         self.defend_zone_position: tuple[float, float] = (
             (-DEFEND_ZONE_POSITION[0], DEFEND_ZONE_POSITION[1]) if us_positive

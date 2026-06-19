@@ -11,7 +11,7 @@ The tree asks two predicates each tick:
     Q1: HasBallControl — is the ball within POSSESSION_DIST AND in front
                          of the kicker (heading aligned within
                          POSSESSION_HEADING_TOL)?
-    Q2: HasClearShot   — is the ball→goal line free of opponents?
+    Q2: HasClearShot   — is the ball→goal line free of enemies?
 And acts on the answers:
     no possession             → ChaseBall
     possession + clear shot   → ShootAtGoal (IntentKick to goal)
@@ -60,14 +60,20 @@ import py_trees
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentDribble, IntentKick, IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import Snapshot
+from TeamControl.bt.param_store import params
+from TeamControl.world.field_config import FIELD_LENGTH_MM
+
+_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
 
 # -----------------------------------------------------------------------
-# Tuneable constants
+# Tuneable constants — these are module-level DEFAULTS only.
+# At runtime, nodes call params.get("attacker.*", <default>) so that the
+# dashboard param editor can change values without a restart.
 # -----------------------------------------------------------------------
 
 BALL_IN_RANGE_THRESHOLD: float = 0.8   # metres — legacy chase threshold (unused by new tree)
 SUPPORTER_ROLE_IDS: tuple[int, ...] = (3, 4)  # robot IDs with SUPPORTER role
-GOAL_POSITION: tuple[float, float] = (4.5, 0.0)   # opponent goal centre
+GOAL_POSITION: tuple[float, float] = (_HALF_LEN_M, 0.0)   # enemy goal centre
 
 # Distance at which we consider the ball to be in the dribbler (we "have" it).
 # SSL robot diameter ~0.18 m, ball ~0.043 m → centre-to-centre ~0.11 m when
@@ -83,9 +89,9 @@ POSSESSION_DIST: float = 0.122
 # roughly in front but not perfectly centred.
 POSSESSION_HEADING_TOL: float = 0.3   # radians (~17 degrees)
 
-# Half-width of the shooting corridor: an opponent within this perpendicular
+# Half-width of the shooting corridor: an enemy within this perpendicular
 # distance of the ball→goal line segment is considered to be blocking the shot.
-# Robot radius is ~0.09 m, so 0.20 m means an opponent within ~one body length
+# Robot radius is ~0.09 m, so 0.20 m means an enemy within ~one body length
 # of the line counts as a block.
 SHOT_CORRIDOR_RADIUS: float = 0.20
 
@@ -122,25 +128,25 @@ class HasBallControl(py_trees.behaviour.Behaviour):
         dx = snap.ball_position[0] - robot.position[0]
         dy = snap.ball_position[1] - robot.position[1]
         dist = math.hypot(dx, dy)
-        if dist > POSSESSION_DIST:
+        if dist > params.get("attacker.possession_dist", POSSESSION_DIST):
             return py_trees.common.Status.FAILURE
 
         # Heading: ball must be in front of the kicker.
         angle_to_ball = math.atan2(dy, dx)
         err = (angle_to_ball - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(err) > POSSESSION_HEADING_TOL:
+        if abs(err) > params.get("attacker.possession_heading_tol", POSSESSION_HEADING_TOL):
             return py_trees.common.Status.FAILURE
 
         return py_trees.common.Status.SUCCESS
 
 
 class HasClearShot(py_trees.behaviour.Behaviour):
-    """Succeed when no opponent obstructs the line from the ball to the goal.
+    """Succeed when no enemy obstructs the line from the ball to the goal.
 
-    For each opponent, compute the perpendicular distance from their position
-    to the ball→goal line segment. If every opponent is farther than
+    For each enemy, compute the perpendicular distance from their position
+    to the ball→goal line segment. If every enemy is farther than
     ``SHOT_CORRIDOR_RADIUS`` from the segment, the shot is considered clear.
-    Empty opponent list → trivially clear.
+    Empty enemy list → trivially clear.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -154,8 +160,9 @@ class HasClearShot(py_trees.behaviour.Behaviour):
 
         ball = snap.ball_position
         goal = self._tree.goal_position
-        for opp in snap.opponent_robots:
-            if _point_to_segment_dist(opp.position, ball, goal) <= SHOT_CORRIDOR_RADIUS:
+        corridor = params.get("attacker.shot_corridor_radius", SHOT_CORRIDOR_RADIUS)
+        for enemy in snap.enemy_robots:
+            if _point_to_segment_dist(enemy.position, ball, goal) <= corridor:
                 return py_trees.common.Status.FAILURE
         return py_trees.common.Status.SUCCESS
 
@@ -326,8 +333,8 @@ class AttackerTree:
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
-        # Convention: us_positive=True means we are on +x, so the opponent
-        # goal is at -x. GOAL_POSITION = (4.5, 0) is the un-mirrored "opp
+        # Convention: us_positive=True means we are on +x, so the enemy
+        # goal is at -x. GOAL_POSITION = (4.5, 0) is the un-mirrored "enemy
         # goal" used when us_positive=False; negate x when us_positive=True.
         self.us_positive = us_positive
         self.goal_position: tuple[float, float] = (

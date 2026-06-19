@@ -38,14 +38,13 @@ class VisionProcess(BaseWorker):
         self.logger.info(f"[VP] : now listening on {vision_port}, using grSim ? {use_grSim} cameras : {self.cameras}")
 
 
-    def step(self) -> bool:
+    def step(self) -> None:
         # listen for data
         new_vision_data = self.recv.listen()
         # if after timeout it is none
         if new_vision_data is None:
             self.logger.warning("[VP] : No vision data received")
-            # we don't have data, so return false 
-            return
+            return # skip this loop
                 
         # if we received the vision data and it has type Detection: 
         if new_vision_data.HasField("detection"):
@@ -98,9 +97,9 @@ class VisionProcess(BaseWorker):
 
 
 if __name__ == "__main__" :
-    from multiprocessing import Queue, Process, Event
+    from multiprocessing import Queue, Process, Event,freeze_support
     import sys
-
+    freeze_support()
     is_running = Event()
     is_running.set()
 

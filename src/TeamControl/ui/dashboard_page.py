@@ -1,25 +1,17 @@
 """
-Dashboard page — the main operational view.
+Dashboard page — field canvas on the left, tabbed sidebar on the right.
 
-Layout:
-  ┌────────────────────────────────────┬──────────────────┐
-  │                                    │  Robots table    │
-  │           Field Canvas             │  Game state      │
-  │           (fills space)            │  Network info    │
-  │                                    │                  │
-  └────────────────────────────────────┴──────────────────┘
+Right panel:
+  Monitor   — runtime channels, robot table, game state
 """
 
-import json
 import math
-import os
 import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QGridLayout, QProgressBar, QFrame, QScrollArea,
-    QDoubleSpinBox, QPushButton,
+    QGridLayout, QFrame, QScrollArea, QCheckBox, QTabWidget,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
@@ -27,15 +19,145 @@ from PySide6.QtGui import QColor, QFont
 from TeamControl.ui.theme import (
     ACCENT, TEXT_DIM, SUCCESS, WARNING, DANGER,
     YELLOW_TEAM, BLUE_TEAM, BALL_COLOR, BORDER, BG_CARD, BG_DARK,
+    ACCENT, TEXT_DIM, SUCCESS, WARNING, DANGER, TEXT,
+    YELLOW_TEAM, BLUE_TEAM, BALL_COLOR,
 )
 
-_CAL_PATH = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
-    "calibration.json"))
+
+_ROLE_COLOR = {
+    "GOALIE":    YELLOW_TEAM,
+    "ATTACKER":  DANGER,
+    "DEFENDER":  BLUE_TEAM,
+    "SUPPORTER": TEXT_DIM,
+}
+
+_PHASE_COLOR = {
+    "RUNNING":   SUCCESS,
+    "STOPPED":   WARNING,
+    "HALTED":    DANGER,
+    "HALF_TIME": TEXT_DIM,
+}
+
+
+def _fmt_intent(intent_type, target):
+    if not intent_type:
+        return "—"
+    if target:
+        return f"{intent_type}({target[0]:.2f},{target[1]:.2f})"
+    return intent_type
+
+
+class _BTInspectorPanel(QWidget):
+    """Fixed-grid BT state display — updates labels in place, no scroll."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 4)
+        lay.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        self._tick_lbl  = QLabel("tick —")
+        self._phase_lbl = QLabel("—")
+        self._ball_lbl  = QLabel("ball (—, —)")
+        for lbl in (self._tick_lbl, self._phase_lbl, self._ball_lbl):
+            lbl.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        pipe = QLabel(" | ")
+        pipe.setStyleSheet(f"color:{TEXT_DIM};")
+        pipe2 = QLabel(" | ")
+        pipe2.setStyleSheet(f"color:{TEXT_DIM};")
+        hdr.addWidget(self._tick_lbl)
+        hdr.addWidget(pipe)
+        hdr.addWidget(self._phase_lbl)
+        hdr.addWidget(pipe2)
+        hdr.addWidget(self._ball_lbl)
+        hdr.addStretch()
+        lay.addLayout(hdr)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"color:{BORDER};")
+        lay.addWidget(sep)
+
+        grid = QGridLayout()
+        grid.setSpacing(3)
+        grid.setContentsMargins(0, 0, 0, 0)
+        for col, txt in enumerate(["ID", "Role", "Pos (m)", "θ", "Intent"]):
+            lbl = QLabel(txt)
+            lbl.setStyleSheet(f"color:{ACCENT}; font-weight:bold; font-size:10px;")
+            grid.addWidget(lbl, 0, col)
+        grid.setColumnStretch(4, 1)
+
+        self._robot_rows: dict[int, dict[str, QLabel]] = {}
+        mono = QFont("Consolas", 10)
+        for i in range(6):
+            labels = {
+                "id":     QLabel(str(i)),
+                "role":   QLabel("—"),
+                "pos":    QLabel("(—,—)"),
+                "ori":    QLabel("—"),
+                "intent": QLabel("—"),
+            }
+            for lbl in labels.values():
+                lbl.setFont(mono)
+            grid.addWidget(labels["id"],     i + 1, 0)
+            grid.addWidget(labels["role"],   i + 1, 1)
+            grid.addWidget(labels["pos"],    i + 1, 2)
+            grid.addWidget(labels["ori"],    i + 1, 3)
+            grid.addWidget(labels["intent"], i + 1, 4)
+            self._robot_rows[i] = labels
+
+        lay.addLayout(grid)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet(f"color:{BORDER};")
+        lay.addWidget(sep2)
+
+        self._status_lbl = QLabel("Waiting for BT data…")
+        self._status_lbl.setStyleSheet(f"color:{TEXT_DIM}; font-size:10px;")
+        lay.addWidget(self._status_lbl)
+        lay.addStretch()
+
+    def update_state(self, state: dict) -> None:
+        tick  = state.get("tick", 0)
+        phase = state.get("phase", "?")
+        bpos  = state.get("ball", (0.0, 0.0))
+        is_y  = state.get("is_yellow", True)
+
+        self._tick_lbl.setText(f"tick {tick}")
+
+        pc = _PHASE_COLOR.get(phase, TEXT)
+        self._phase_lbl.setText(phase)
+        self._phase_lbl.setStyleSheet(f"color:{pc}; font-weight:bold;")
+
+        tc = YELLOW_TEAM if is_y else BLUE_TEAM
+        self._ball_lbl.setText(f"ball ({bpos[0]:.2f},{bpos[1]:.2f})")
+        self._ball_lbl.setStyleSheet(f"color:{tc};")
+
+        for rb in state.get("robots", []):
+            rid = rb.get("id", -1)
+            row = self._robot_rows.get(rid)
+            if row is None:
+                continue
+            role = rb.get("role", "?")
+            pos  = rb.get("pos")
+            ori  = rb.get("ori")
+            it   = rb.get("intent_type")
+            tgt  = rb.get("intent_target")
+
+            rc = _ROLE_COLOR.get(role, TEXT)
+            row["role"].setText(role)
+            row["role"].setStyleSheet(f"color:{rc}; font-weight:bold;")
+            row["pos"].setText(f"({pos[0]:.2f},{pos[1]:.2f})" if pos else "N/A")
+            row["ori"].setText(f"{ori:.2f}" if ori is not None else "—")
+            row["intent"].setText(_fmt_intent(it, tgt))
+
+        self._status_lbl.setText(f"Live  ·  tick {tick}")
+        self._status_lbl.setStyleSheet(f"color:{SUCCESS}; font-size:10px;")
 
 
 def _card(title_text):
-    """Create a styled card frame with a title."""
     card = QFrame()
     card.setObjectName("card")
     lay = QVBoxLayout(card)
@@ -54,110 +176,155 @@ def _val_label(text="—", size=12, bold=True):
     return lbl
 
 
-class _StatusDot(QLabel):
-    def __init__(self):
-        super().__init__("●")
-        self.setFixedWidth(18)
-        self.setAlignment(Qt.AlignCenter)
-        self.set_ok(False)
-
-    def set_ok(self, ok):
-        c = SUCCESS if ok else DANGER
-        self.setStyleSheet(f"color:{c}; font-size:14px;")
-
-
 class DashboardPage(QWidget):
-    """Field + sidebar with robots, game state, and network."""
+    """Field canvas + tabbed right sidebar."""
 
     coordinate_hover = Signal(float, float)
+    _DASHBOARD_HIDDEN_MAP_LAYERS = {"Robots", "Ball"}
 
-    def __init__(self, field_canvas, parent=None, engine=None, test_panel=None):
+    def __init__(self, field_canvas, parent=None, engine=None,
+                 test_panel=None):
         super().__init__(parent)
         self._field = field_canvas
         self._engine = engine
+        self._map_layer_checks: dict[str, QCheckBox] = {}
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._field)
 
-        # ── Left: Field canvas + options bar ─────────────────────
-        left_container = QWidget()
-        left_lay = QVBoxLayout(left_container)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(0)
-        left_lay.addWidget(self._field)
-
-        options_bar = QHBoxLayout()
-        options_bar.setContentsMargins(8, 3, 8, 3)
-        self._vel_btn = QPushButton("Velocity Vectors")
-        self._vel_btn.setCheckable(True)
-        self._vel_btn.setChecked(False)
-        self._vel_btn.setFixedHeight(22)
-        self._vel_btn.setStyleSheet(
-            f"QPushButton {{ background:{BG_CARD}; color:{TEXT_DIM}; "
-            f"border:1px solid {BORDER}; border-radius:3px; "
-            f"padding:0 8px; font-size:11px; }}"
-            f"QPushButton:checked {{ background:{ACCENT}; color:white; "
-            f"border-color:{ACCENT}; }}"
-        )
-        self._vel_btn.toggled.connect(self._field.set_show_velocity)
-        options_bar.addWidget(self._vel_btn)
-        options_bar.addStretch()
-        left_lay.addLayout(options_bar)
-
-        splitter.addWidget(left_container)
-
-        # ── Right: scrollable sidebar ─────────────────────────────
-        sidebar = QWidget()
-        sidebar.setMinimumWidth(320)
+        # ── Right sidebar: tabbed monitor + BT inspector ──────────
+        self._bt_panel = _BTInspectorPanel()
+        sidebar = QTabWidget()
+        sidebar.setDocumentMode(True)
+        sidebar.addTab(self._build_monitor_panel(), "Monitor")
+        sidebar.addTab(self._bt_panel, "BT")
+        sidebar.setMinimumWidth(260)
         sidebar.setMaximumWidth(480)
-        sidebar.setStyleSheet(f"background: {BG_DARK};")
-        sb_outer = QVBoxLayout(sidebar)
-        sb_outer.setContentsMargins(0, 0, 0, 0)
-        sb_outer.setSpacing(0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {BG_DARK}; }}")
-        scroll_inner = QWidget()
-        scroll_inner.setStyleSheet(f"background: {BG_DARK};")
-        sb_lay = QVBoxLayout(scroll_inner)
-        sb_lay.setContentsMargins(8, 8, 8, 8)
-        sb_lay.setSpacing(8)
-
-        # --- Robot table card ---
-        self._build_robot_card(sb_lay)
-
-        # --- Game state card ---
-        self._build_game_card(sb_lay)
-
-        # --- Network card ---
-        self._build_network_card(sb_lay)
-
-        # --- Calibration card (hidden until a non-vision mode starts) ---
-        self._build_cal_card(sb_lay)
-
-        sb_lay.addStretch()
-        scroll.setWidget(scroll_inner)
-        sb_outer.addWidget(scroll)
         splitter.addWidget(sidebar)
-
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1100, 360])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([900, 340])
 
         root.addWidget(splitter)
 
         self._field.coordinate_hover.connect(self.coordinate_hover.emit)
+        if hasattr(self._field, "layers_changed"):
+            self._field.layers_changed.connect(self._sync_map_layer_controls)
 
-        # FPS tracking
         self._frame_times: list[float] = []
-        self._last_frame_time = 0.0
         self._current_mode = "vision_only"
 
-    # ── Robot table ───────────────────────────────────────────────
+    # ── Monitor tab ───────────────────────────────────────────────
+
+    def _build_monitor_panel(self):
+        panel = QWidget()
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        inner = QWidget()
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(8, 8, 8, 8)
+        inner_lay.setSpacing(8)
+
+        self._build_channels_card(inner_lay)
+        self._build_map_layers_card(inner_lay)
+        self._build_robot_card(inner_lay)
+        self._build_game_card(inner_lay)
+        inner_lay.addStretch()
+
+        scroll.setWidget(inner)
+        lay.addWidget(scroll)
+        return panel
+
+    # ── Runtime channels card ─────────────────────────────────────
+
+    _CHANNEL_NAMES = {
+        "vision":     "Vision",
+        "gc":         "Game Controller",
+        "robot_recv": "Robot Recv",
+        "use_grsim":  "Use grSim",
+        "send_grsim": "Send → grSim",
+        "record_wm":  "Record WM",
+    }
+
+    def _build_channels_card(self, parent_lay):
+        card, lay = _card("Runtime Channels")
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        grid.setColumnStretch(1, 1)
+
+        self._channel_dots = {}
+        self._channel_name_lbls = {}
+        self._channel_latency = {}
+
+        for row, (key, name) in enumerate(self._CHANNEL_NAMES.items()):
+            dot = QLabel("●")
+            dot.setFixedWidth(18)
+            dot.setAlignment(Qt.AlignCenter)
+            dot.setStyleSheet(f"color:{TEXT_DIM}; font-size:14px;")
+            self._channel_dots[key] = dot
+
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet(f"color:{TEXT_DIM};")
+            self._channel_name_lbls[key] = name_lbl
+
+            lat = QLabel("—")
+            lat.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            lat.setMinimumWidth(52)
+            lat.setStyleSheet(f"color:{TEXT_DIM};")
+            self._channel_latency[key] = lat
+
+            grid.addWidget(dot,      row, 0)
+            grid.addWidget(name_lbl, row, 1)
+            grid.addWidget(lat,      row, 2)
+            if key == "vision":
+                self._fps_lbl = QLabel("0 fps")
+                self._fps_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._fps_lbl.setFont(QFont("Segoe UI", 11, QFont.Bold))
+                self._fps_lbl.setStyleSheet(f"color:{TEXT_DIM};")
+                grid.addWidget(self._fps_lbl, row, 3)
+
+        lay.addLayout(grid)
+        parent_lay.addWidget(card)
+
+    def update_channel_status(self, status):
+        for key in self._CHANNEL_NAMES:
+            item = status.get(key, {})
+            enabled    = bool(item.get("enabled", False))
+            latency_ms = item.get("latency_ms")
+            stale      = bool(item.get("stale", True))
+
+            dot      = self._channel_dots[key]
+            name_lbl = self._channel_name_lbls[key]
+            lat      = self._channel_latency[key]
+
+            if not enabled:
+                dot.setStyleSheet(f"color:{TEXT_DIM}; font-size:14px;")
+                name_lbl.setStyleSheet(f"color:{TEXT_DIM};")
+                lat.setText("OFF")
+                lat.setStyleSheet(f"color:{TEXT_DIM};")
+            elif stale or latency_ms is None:
+                dot.setStyleSheet(f"color:{DANGER}; font-size:14px;")
+                name_lbl.setStyleSheet(f"color:{TEXT_DIM};")
+                lat.setText(">99ms")
+                lat.setStyleSheet(f"color:{DANGER}; font-weight:bold;")
+            else:
+                dot.setStyleSheet(f"color:{SUCCESS}; font-size:14px;")
+                name_lbl.setStyleSheet(f"color:{TEXT};")
+                lat.setText(f"{latency_ms}ms")
+                lat.setStyleSheet(f"color:{SUCCESS}; font-weight:bold;")
+
+    # ── Robot table card ──────────────────────────────────────────
 
     def _build_robot_card(self, parent_lay):
         card, lay = _card("Robots")
@@ -173,18 +340,23 @@ class DashboardPage(QWidget):
         self._robot_table.setAlternatingRowColors(True)
         self._robot_table.verticalHeader().setVisible(False)
         self._robot_table.setShowGrid(False)
-        self._robot_table.setMaximumHeight(260)
+        self._robot_table.setMinimumHeight(150)
+        self._robot_table.setMaximumHeight(300)
         hh = self._robot_table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.Stretch)
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
         hh.setMinimumSectionSize(40)
+        self._robot_table.verticalHeader().setDefaultSectionSize(32)
         lay.addWidget(self._robot_table)
         parent_lay.addWidget(card)
+        self._robot_table_items: dict[tuple[int, int], QTableWidgetItem] = {}
+        self._robot_table_n_rows: int = -1
 
-    # ── Game state ────────────────────────────────────────────────
+    # ── Game state card ───────────────────────────────────────────
 
     def _build_game_card(self, parent_lay):
         card, lay = _card("Game State")
-
         grid = QGridLayout()
         grid.setSpacing(6)
 
@@ -196,7 +368,6 @@ class DashboardPage(QWidget):
         self._gs_mode = _val_label("—")
         grid.addWidget(self._gs_mode, 1, 1)
 
-        # Score
         grid.addWidget(QLabel("Score:"), 2, 0)
         score_row = QHBoxLayout()
         self._score_y = QLabel("0")
@@ -213,152 +384,38 @@ class DashboardPage(QWidget):
         score_row.addStretch()
         grid.addLayout(score_row, 2, 1)
 
+        grid.addWidget(QLabel("Command:"), 3, 0)
+        self._gs_command = _val_label("NO DATA")
+        grid.addWidget(self._gs_command, 3, 1)
+
+        grid.addWidget(QLabel("Stage:"), 4, 0)
+        self._gs_stage = _val_label("NO DATA")
+        grid.addWidget(self._gs_stage, 4, 1)
+
+        grid.addWidget(QLabel("Us Yellow:"), 5, 0)
+        self._gs_us_yellow = _val_label("NO DATA")
+        grid.addWidget(self._gs_us_yellow, 5, 1)
+
+        grid.addWidget(QLabel("Cards:"), 6, 0)
+        self._gs_cards = _val_label("NO DATA")
+        grid.addWidget(self._gs_cards, 6, 1)
+
+        grid.addWidget(QLabel("Fouls:"), 7, 0)
+        self._gs_fouls = _val_label("NO DATA")
+        grid.addWidget(self._gs_fouls, 7, 1)
+
+        grid.addWidget(QLabel("YC Timers:"), 8, 0)
+        self._gs_yellow_card_times = _val_label("NO DATA", size=10)
+        self._gs_yellow_card_times.setWordWrap(True)
+        grid.addWidget(self._gs_yellow_card_times, 8, 1)
+
         lay.addLayout(grid)
         parent_lay.addWidget(card)
 
-    # ── Network ───────────────────────────────────────────────────
+    # ── Public update methods ─────────────────────────────────────
 
-    def _build_network_card(self, parent_lay):
-        card, lay = _card("Network")
-
-        grid = QGridLayout()
-        grid.setSpacing(5)
-
-        self._vis_dot = _StatusDot()
-        self._gc_dot = _StatusDot()
-        self._grsim_dot = _StatusDot()
-
-        for i, (name, dot) in enumerate([
-            ("Vision", self._vis_dot),
-            ("Game Controller", self._gc_dot),
-            ("grSim", self._grsim_dot),
-        ]):
-            grid.addWidget(dot, i, 0)
-            grid.addWidget(QLabel(name), i, 1)
-
-        lay.addLayout(grid)
-
-        fps_row = QHBoxLayout()
-        fps_row.setSpacing(8)
-        self._fps_lbl = QLabel("0 fps")
-        self._fps_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self._fps_bar = QProgressBar()
-        self._fps_bar.setRange(0, 60)
-        self._fps_bar.setValue(0)
-        self._fps_bar.setTextVisible(False)
-        self._fps_bar.setFixedHeight(8)
-        fps_row.addWidget(self._fps_lbl)
-        fps_row.addWidget(self._fps_bar, 1)
-        lay.addLayout(fps_row)
-
-        parent_lay.addWidget(card)
-
-    # ── Calibration card ─────────────────────────────────────────
-
-    def _build_cal_card(self, parent_lay):
-        self._cal_card, lay = _card("Calibration")
-        self._cal_card.setVisible(False)
-
-        grid = QGridLayout()
-        grid.setSpacing(6)
-
-        grid.addWidget(QLabel("Speed scale:"), 0, 0)
-        self._cal_speed = QDoubleSpinBox()
-        self._cal_speed.setRange(0.01, 5.0)
-        self._cal_speed.setDecimals(4)
-        self._cal_speed.setSingleStep(0.01)
-        self._cal_speed.setFixedWidth(100)
-        grid.addWidget(self._cal_speed, 0, 1)
-        grid.addWidget(QLabel("actual / cmd"), 0, 2)
-
-        grid.addWidget(QLabel("Lateral drift/m:"), 1, 0)
-        self._cal_drift = QDoubleSpinBox()
-        self._cal_drift.setRange(-50.0, 50.0)
-        self._cal_drift.setDecimals(2)
-        self._cal_drift.setSingleStep(0.5)
-        self._cal_drift.setSuffix(" mm/m")
-        self._cal_drift.setFixedWidth(120)
-        grid.addWidget(self._cal_drift, 1, 1)
-
-        grid.addWidget(QLabel("Stop overshoot:"), 2, 0)
-        self._cal_stop = QDoubleSpinBox()
-        self._cal_stop.setRange(-200.0, 200.0)
-        self._cal_stop.setDecimals(1)
-        self._cal_stop.setSingleStep(5.0)
-        self._cal_stop.setSuffix(" mm")
-        self._cal_stop.setFixedWidth(120)
-        grid.addWidget(self._cal_stop, 2, 1)
-
-        lay.addLayout(grid)
-
-        btn_row = QHBoxLayout()
-        apply_btn = QPushButton("Apply && Save")
-        apply_btn.setStyleSheet(
-            f"background:{SUCCESS}; color:white; padding:5px 12px; "
-            f"border-radius:4px; font-weight:bold;")
-        apply_btn.clicked.connect(self._apply_cal)
-        btn_row.addWidget(apply_btn)
-
-        reset_btn = QPushButton("Reset")
-        reset_btn.setStyleSheet(
-            f"background:{BG_CARD}; color:{WARNING}; padding:5px 12px; "
-            f"border:1px solid {BORDER}; border-radius:4px;")
-        reset_btn.clicked.connect(self._reset_cal)
-        btn_row.addWidget(reset_btn)
-        lay.addLayout(btn_row)
-
-        self._cal_status = QLabel("")
-        self._cal_status.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
-        lay.addWidget(self._cal_status)
-
-        parent_lay.addWidget(self._cal_card)
-        self._load_cal_values()
-
-    def _load_cal_values(self):
-        try:
-            with open(_CAL_PATH, "r") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, ValueError):
-            data = {}
-        self._cal_speed.setValue(float(data.get("speed_scale", 1.0)))
-        self._cal_drift.setValue(float(data.get("lateral_drift_per_m", 0.0)))
-        self._cal_stop.setValue(float(data.get("stop_overshoot_mm", 0.0)))
-
-    def _apply_cal(self):
-        try:
-            with open(_CAL_PATH, "r") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, ValueError):
-            data = {}
-        data["speed_scale"] = round(self._cal_speed.value(), 4)
-        data["lateral_drift_per_m"] = round(self._cal_drift.value(), 2)
-        data["stop_overshoot_mm"] = round(self._cal_stop.value(), 1)
-        try:
-            with open(_CAL_PATH, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            self._cal_status.setStyleSheet(f"color:{DANGER}; font-size:11px;")
-            self._cal_status.setText(f"Save failed: {e}")
-            return
-        try:
-            from TeamControl.robot import ball_nav
-            ball_nav._reload_calibration()
-        except Exception:
-            pass
-        self._cal_status.setStyleSheet(f"color:{SUCCESS}; font-size:11px;")
-        self._cal_status.setText(
-            f"Saved — scale={data['speed_scale']:.4f}  "
-            f"drift={data['lateral_drift_per_m']:.2f}")
-
-    def _reset_cal(self):
-        self._cal_speed.setValue(1.0)
-        self._cal_drift.setValue(0.0)
-        self._cal_stop.setValue(0.0)
-        self._apply_cal()
-        self._cal_status.setStyleSheet(f"color:{WARNING}; font-size:11px;")
-        self._cal_status.setText("Reset to defaults")
-
-    # ── Public update API ─────────────────────────────────────────
+    def update_bt_state(self, state: dict) -> None:
+        self._bt_panel.update_state(state)
 
     def update_frame(self, snap):
         self._field.set_frame(snap)
@@ -366,50 +423,95 @@ class DashboardPage(QWidget):
         self._update_fps()
 
     def update_game_state(self, state):
-        if state is None:
+        gc_status = state if isinstance(state, dict) else {"state": state}
+        game_state = gc_status.get("state")
+        if game_state is None:
             self._gs_state.setText("NO DATA")
             self._gs_state.setStyleSheet(f"color:{TEXT_DIM};")
+        else:
+            name = game_state.name if hasattr(game_state, "name") else str(game_state)
+            color_map = {"HALTED": DANGER, "STOPPED": WARNING, "RUNNING": SUCCESS}
+            c = color_map.get(name, ACCENT)
+            self._gs_state.setText(name)
+            self._gs_state.setStyleSheet(f"color:{c}; font-weight:bold;")
+
+        self._set_gc_value(self._gs_command, gc_status.get("command"))
+        self._set_gc_value(self._gs_stage, gc_status.get("stage"))
+
+        us_yellow = gc_status.get("us_yellow")
+        if us_yellow is None:
+            self._gs_us_yellow.setText("NO DATA")
+            self._gs_us_yellow.setStyleSheet(f"color:{TEXT_DIM};")
+        else:
+            self._gs_us_yellow.setText("YES" if us_yellow else "NO")
+            color = YELLOW_TEAM if us_yellow else BLUE_TEAM
+            self._gs_us_yellow.setStyleSheet(f"color:{color}; font-weight:bold;")
+
+        self._update_gc_discipline(gc_status)
+
+    def _set_gc_value(self, label, value):
+        if value is None:
+            label.setText("NO DATA")
+            label.setStyleSheet(f"color:{TEXT_DIM};")
             return
-        name = state.name if hasattr(state, "name") else str(state)
-        color_map = {"HALTED": DANGER, "STOPPED": WARNING, "RUNNING": SUCCESS}
-        c = color_map.get(name, ACCENT)
-        self._gs_state.setText(name)
-        self._gs_state.setStyleSheet(f"color:{c}; font-weight:bold;")
+        label.setText(value.name if hasattr(value, "name") else str(value))
+        label.setStyleSheet(f"color:{TEXT}; font-weight:bold;")
+
+    def _update_gc_discipline(self, gc_status):
+        yellow_cards = gc_status.get("yellow_cards")
+        red_cards = gc_status.get("red_cards")
+        fouls = gc_status.get("fouls")
+        timers = gc_status.get("yellow_card_times") or []
+
+        if yellow_cards is None and red_cards is None:
+            self._gs_cards.setText("NO DATA")
+            self._gs_cards.setStyleSheet(f"color:{TEXT_DIM};")
+        else:
+            yellow_text = "?" if yellow_cards is None else str(yellow_cards)
+            red_text = "?" if red_cards is None else str(red_cards)
+            self._gs_cards.setText(f"Y {yellow_text} / R {red_text}")
+            color = DANGER if red_cards else WARNING if yellow_cards else SUCCESS
+            self._gs_cards.setStyleSheet(f"color:{color}; font-weight:bold;")
+
+        if fouls is None:
+            self._gs_fouls.setText("NO DATA")
+            self._gs_fouls.setStyleSheet(f"color:{TEXT_DIM};")
+        else:
+            self._gs_fouls.setText(str(fouls))
+            self._gs_fouls.setStyleSheet(f"color:{WARNING if fouls else SUCCESS}; font-weight:bold;")
+
+        if not timers:
+            self._gs_yellow_card_times.setText("NONE")
+            self._gs_yellow_card_times.setStyleSheet(f"color:{TEXT_DIM};")
+        else:
+            self._gs_yellow_card_times.setText(", ".join(self._format_gc_time(t) for t in timers))
+            self._gs_yellow_card_times.setStyleSheet(f"color:{WARNING}; font-weight:bold;")
+
+    def _format_gc_time(self, value):
+        try:
+            seconds = max(0, int(value) // 1_000_000)
+        except (TypeError, ValueError):
+            return str(value)
+        return f"{seconds // 60}:{seconds % 60:02d}"
 
     def set_mode(self, mode):
         self._current_mode = mode
         self._gs_mode.setText(mode.upper())
-        show_cal = mode != "vision_only"
-        self._cal_card.setVisible(show_cal)
-        if show_cal:
-            self._load_cal_values()
-        # Show / hide coop overlay using existing targets + paths
         if mode == "coop":
-            from TeamControl.robot.coop import (
-                HOME_YELLOW, HOME_BLUE, BALL_START,
-            )
+            from TeamControl.robot.coop import HOME_YELLOW, HOME_BLUE, BALL_START
             self._field.set_targets([
                 (*HOME_YELLOW, YELLOW_TEAM),
                 (*HOME_BLUE, BLUE_TEAM),
                 (*BALL_START, BALL_COLOR),
             ])
-            self._field.set_paths([
-                ([HOME_YELLOW, HOME_BLUE], ACCENT),
-            ])
+            self._field.set_paths([([HOME_YELLOW, HOME_BLUE], ACCENT)])
         else:
             self._field.set_targets([])
             self._field.set_paths([])
 
     def set_engine_running(self, running):
-        self._vis_dot.set_ok(running)
-        self._gc_dot.set_ok(running)
-        self._grsim_dot.set_ok(running)
         if not running:
             self._fps_lbl.setText("0 fps")
-            self._fps_bar.setValue(0)
-            # Keep cal card visible if a non-vision mode is selected
-            show_cal = getattr(self, "_current_mode", "vision_only") != "vision_only"
-            self._cal_card.setVisible(show_cal)
 
     def get_fps(self):
         return len(self._frame_times)
@@ -417,24 +519,43 @@ class DashboardPage(QWidget):
     # ── Internal ──────────────────────────────────────────────────
 
     def _update_robot_table(self, snap):
-        robots = [(YELLOW_TEAM, "Y", r) for r in snap.yellow] + \
-                 [(BLUE_TEAM, "B", r) for r in snap.blue]
+        yellow = [r for r in snap.yellow if r is not None]
+        blue   = [r for r in snap.blue   if r is not None]
+        robots = [(YELLOW_TEAM, "Y", r) for r in yellow] + \
+                 [(BLUE_TEAM,   "B", r) for r in blue]
+        n = len(robots)
 
-        self._robot_table.setRowCount(len(robots))
+        self._robot_table.blockSignals(True)
+        if n != self._robot_table_n_rows:
+            self._robot_table.setRowCount(n)
+            self._robot_table_n_rows = n
+            # Populate any new rows with fresh items; existing rows keep theirs.
+            for row in range(n):
+                for col in range(6):
+                    if (row, col) not in self._robot_table_items:
+                        item = QTableWidgetItem()
+                        item.setTextAlignment(Qt.AlignCenter)
+                        self._robot_table.setItem(row, col, item)
+                        self._robot_table_items[(row, col)] = item
+
         for row, (color_hex, team_short, r) in enumerate(robots):
             vals = [team_short, str(r.id), f"{r.x:.0f}",
                     f"{r.y:.0f}", f"{math.degrees(r.o):.1f}",
                     f"{r.confidence:.2f}"]
             for col, text in enumerate(vals):
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignCenter)
+                item = self._robot_table_items.get((row, col))
+                if item is None:
+                    continue
+                if item.text() != text:
+                    item.setText(text)
                 if col == 0:
                     item.setForeground(QColor(color_hex))
                     item.setFont(QFont("Segoe UI", 10, QFont.Bold))
-                self._robot_table.setItem(row, col, item)
+        self._robot_table.blockSignals(False)
 
-        ny, nb = len(snap.yellow), len(snap.blue)
-        ball = f"Ball ({snap.ball.x:.0f}, {snap.ball.y:.0f})" if snap.ball else "No ball"
+        ny, nb = len(yellow), len(blue)
+        ball = (f"Ball ({snap.ball.x:.0f}, {snap.ball.y:.0f})"
+                if snap.ball else "No ball")
         self._robot_summary.setText(
             f"Y:{ny}  B:{nb}  |  {ball}  |  Frame #{snap.frame_number}")
 
@@ -442,7 +563,51 @@ class DashboardPage(QWidget):
         now = time.time()
         self._frame_times.append(now)
         self._frame_times = [t for t in self._frame_times if t > now - 1.0]
-        fps = len(self._frame_times)
-        self._fps_lbl.setText(f"{fps} fps")
-        self._fps_bar.setValue(min(fps, 60))
-        self._vis_dot.set_ok(fps > 0)
+        self._fps_lbl.setText(f"{len(self._frame_times)} fps")
+
+    # ── Map layer controls ───────────────────────────────────────
+
+    def _build_map_layers_card(self, parent_lay):
+        card, lay = _card("Map Layers")
+        self._map_layer_hint = QLabel("Waiting for map data...")
+        self._map_layer_hint.setStyleSheet(f"color:{TEXT_DIM}; font-size:11px;")
+        lay.addWidget(self._map_layer_hint)
+
+        self._map_layer_lay = QVBoxLayout()
+        self._map_layer_lay.setContentsMargins(0, 0, 0, 0)
+        self._map_layer_lay.setSpacing(2)
+        lay.addLayout(self._map_layer_lay)
+        parent_lay.addWidget(card)
+
+    def set_render_data(self, render_data):
+        if hasattr(self._field, "set_render_data"):
+            self._field.set_render_data(render_data)
+
+    def _sync_map_layer_controls(self, layers):
+        active_names = {layer.name for layer in layers}
+        self._map_layer_hint.setVisible(not bool(active_names))
+
+        for layer in layers:
+            if layer.name in self._map_layer_checks:
+                continue
+
+            visible = self._field.is_layer_visible(layer.name)
+            if layer.name in self._DASHBOARD_HIDDEN_MAP_LAYERS:
+                visible = False
+                self._field.set_layer_visible(layer.name, False)
+
+            check = QCheckBox(layer.name)
+            check.setChecked(visible)
+            check.toggled.connect(
+                lambda checked, name=layer.name: self._field.set_layer_visible(
+                    name, checked
+                )
+            )
+            self._map_layer_lay.addWidget(check)
+            self._map_layer_checks[layer.name] = check
+
+        for name, check in tuple(self._map_layer_checks.items()):
+            if name not in active_names:
+                self._map_layer_lay.removeWidget(check)
+                check.deleteLater()
+                del self._map_layer_checks[name]

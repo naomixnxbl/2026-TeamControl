@@ -3,7 +3,7 @@
 import argparse
 import sys
 import time
-from multiprocessing import Process, Queue, Event
+from multiprocessing import Process, Queue, Event, freeze_support
 
 from TeamControl.process_workers.vision_runner import VisionProcess
 from TeamControl.process_workers.gcfsm_runner import GCfsm
@@ -19,6 +19,7 @@ from TeamControl.onboard_vision import build_ip_map
 from TeamControl.robot.goalie import run_goalie
 from TeamControl.robot.striker import run_striker
 from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
+from TeamControl.robot.voronoi_game_navigator import run_voronoi_game_navigator
 from TeamControl.robot.team import run_team
 from TeamControl.robot.coop import run_coop
 
@@ -47,15 +48,26 @@ def _wait_for_vision(wm, timeout=15.0):
 
 
 def main():
+    freeze_support()
     parser = argparse.ArgumentParser(
         description="RoboCup SSL Team Control — multi-mode launcher",
     )
     parser.add_argument(
         "--mode",
-        choices=["goalie", "1v1", "obstacle", "coop", "6v6"],
-        default="goalie",
+        choices=[
+            "calibration",
+            "voronoi_test",
+            "goalie",
+            "1v1",
+            "obstacle",
+            "coop",
+            "6v6",
+        ],
+        default="calibration",
         help=(
-            "goalie   — yellow goalie vs blue striker (default)\n"
+            "calibration - backend only; calibration runner drives robot (default)\n"
+            "voronoi_test — one yellow + one blue robot use Voronoi planning\n"
+            "goalie   — yellow goalie vs blue striker\n"
             "1v1      — yellow striker vs blue striker\n"
             "obstacle — two robots chasing ball with obstacle avoidance\n"
             "coop     — two robots cooperate to score (pass + shoot)\n"
@@ -101,8 +113,7 @@ def main():
                 args=(is_running, logger, dispatch_q, preset),
                 name="Dispatcher"),
         Process(target=RobotRecv.run_worker,
-                args=(is_running, logger, recv_q),
-                name="RobotRecv"),
+                args=(is_running, logger, preset.robot_ip,recv_q)),
     ]
     if not args.skip_gc:
         background.append(Process(
@@ -117,7 +128,23 @@ def main():
     # ── Mode-specific foreground processes ────────────────────
     foreground = []
 
-    if args.mode == "goalie":
+    if args.mode == "calibration":
+        # Calibration mode intentionally starts no foreground robot behaviours.
+        # The PD calibration GUI/runner sends commands directly through dispatch_q.
+        pass
+
+    elif args.mode == "voronoi_test":
+        # One shell from each team chases the ball through the live Voronoi map.
+        foreground.append(
+            Process(target=run_voronoi_game_navigator,
+                    args=(is_running, dispatch_q, wm,
+                          0, preset.us_yellow)))
+        foreground.append(
+            Process(target=run_voronoi_game_navigator,
+                    args=(is_running, dispatch_q, wm,
+                          0, not preset.us_yellow)))
+
+    elif args.mode == "goalie":
         # Yellow goalie (robot 4) defends against blue striker (robot 0)
         foreground.append(
             Process(target=run_goalie,
@@ -151,20 +178,20 @@ def main():
                           1, preset.us_yellow, WAYPOINTS_B)))
 
     elif args.mode == "coop":
-        # Cross-team coop: our bot (yellow) + opp bot (blue) cooperate
+        # Cross-team coop: our bot (yellow) + enemy bot (blue) cooperate
         # Both go left → right (attack_positive=True = score on +x goal)
         us_yellow = preset.us_yellow
-        opp_yellow = not us_yellow
+        enemy_yellow = not us_yellow
         foreground.append(
             Process(target=run_coop,
                     args=(is_running, dispatch_q, wm,
                           0, 0, us_yellow),
-                    kwargs=dict(mate_is_yellow=opp_yellow,
+                    kwargs=dict(mate_is_yellow=enemy_yellow,
                                 attack_positive=True)))
         foreground.append(
             Process(target=run_coop,
                     args=(is_running, dispatch_q, wm,
-                          0, 0, opp_yellow),
+                          0, 0, enemy_yellow),
                     kwargs=dict(mate_is_yellow=us_yellow,
                                 attack_positive=True)))
 

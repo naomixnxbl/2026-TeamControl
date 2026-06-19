@@ -33,12 +33,12 @@ Each layer communicates with the next through one of these contract types — ne
 **Fields:**
 - `ball_position`, `ball_velocity` — ball coordinates and velocity in world frame
 - `own_robots` — list of our robots with position and orientation
-- `opponent_robots` — list of opponent robots
+- `enemy_robots` — list of enemy robots
 - `referee_state` — current game phase (`RUNNING` / `STOPPED` / `HALTED`) and score
 
 **Key decisions:**
 - **Frozen dataclass.** Mutation after construction raises `FrozenInstanceError`. Tree nodes cannot accidentally modify shared world state.
-- **Lists coerced to tuples.** The `__init__` accepts any `Sequence` for `own_robots` / `opponent_robots` but stores them as `tuple`. This keeps the frozen guarantee even when the caller passes a list.
+- **Lists coerced to tuples.** The `__init__` accepts any `Sequence` for `own_robots` / `enemy_robots` but stores them as `tuple`. This keeps the frozen guarantee even when the caller passes a list.
 - **`GamePhase` is a `str` enum.** Matches the old `GameState` string values (`"RUNNING"` etc.), making migration from the old architecture easier.
 
 **Rule:** No tree node or skill function is allowed to hold a reference to the previous tick's Snapshot. Each tick gets a fresh one.
