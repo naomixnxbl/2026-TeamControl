@@ -22,7 +22,7 @@ roles:
   4: supporter
   5: supporter
 # Dynamic role swapping toggle. False keeps the static roles above.
-heuristic_role_swap: true
+heuristic_role_swap: True
 
 # Tick period in seconds for each BT process (100 Hz = 0.01).
 tick_period: 0.01
