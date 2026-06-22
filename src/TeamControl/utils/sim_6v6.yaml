@@ -16,11 +16,11 @@ blue:
 # (If yellow and blue should ever differ, split into yellow_roles / blue_roles.)
 roles:
   0: goalie
-  1: defender
-  2: defender
+  1: attacker
+  2: supporter
   3: supporter
   4: supporter
-  5: attacker
+  5: supporter
 
 # Tick period in seconds for each BT process (100 Hz = 0.01).
 tick_period: 0.01

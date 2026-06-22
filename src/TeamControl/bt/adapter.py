@@ -80,6 +80,27 @@ def _phase_from_state(state) -> GamePhase:
     return _PHASE_MAP.get(state, GamePhase.RUNNING)
 
 
+_OPPONENT_PHASE_MAP = {
+    GamePhase.KICKOFF: GamePhase.OPP_KICKOFF,
+    GamePhase.OPP_KICKOFF: GamePhase.KICKOFF,
+    GamePhase.FREE_KICK: GamePhase.OPP_FREE_KICK,
+    GamePhase.OPP_FREE_KICK: GamePhase.FREE_KICK,
+    GamePhase.PREPARE_PENALTY: GamePhase.PREPARE_PENALTY_OPP,
+    GamePhase.PREPARE_PENALTY_OPP: GamePhase.PREPARE_PENALTY,
+    GamePhase.PENALTY_SHOOT: GamePhase.PENALTY_DEFEND,
+    GamePhase.PENALTY_DEFEND: GamePhase.PENALTY_SHOOT,
+}
+
+
+def _phase_for_perspective(wm, is_yellow: bool) -> GamePhase:
+    """Return GamePhase from the requested team's perspective."""
+    phase = _phase_from_state(wm.get_game_state())
+    wm_yellow = bool(wm.us_yellow())
+    if is_yellow == wm_yellow:
+        return phase
+    return _OPPONENT_PHASE_MAP.get(phase, phase)
+
+
 def _mm_to_m(value: float) -> float:
     return float(value) * _MM_TO_M
 
@@ -132,7 +153,8 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
     own_team = frame.robots_yellow if is_yellow else frame.robots_blue
     opp_team = frame.robots_blue if is_yellow else frame.robots_yellow
 
-    raw_placement = wm.get_ball_placement_pos()
+    get_placement = getattr(wm, "get_ball_placement_pos", None)
+    raw_placement = get_placement() if get_placement is not None else None
     placement_pos = (float(raw_placement[0]), float(raw_placement[1])) if raw_placement else None
 
     return Snapshot(
@@ -141,7 +163,7 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
         own_robots=_team_to_states(own_team),
         opponent_robots=_team_to_states(opp_team),
         referee_state=RefereeState(
-            game_phase=_phase_from_state(wm.get_game_state()),
+            game_phase=_phase_for_perspective(wm, is_yellow),
             score=(0, 0),  # TODO: read from wm.ref_data once exposed
             ball_placement_pos=placement_pos,
         ),

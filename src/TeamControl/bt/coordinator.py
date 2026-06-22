@@ -231,8 +231,14 @@ class Coordinator:
         False if we are on the negative-x half (our own goal is at -x, we attack toward +x).
     """
 
-    def __init__(self, trees: dict[RoleType, Any], us_positive: bool = True) -> None:
+    def __init__(
+        self,
+        trees: dict[RoleType, Any],
+        us_positive: bool = True,
+        role_assignment: dict[int, RoleType] | None = None,
+    ) -> None:
         self.trees = trees
+        self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
         self.blackboards: dict[int, RobotBlackboard] = {}
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
@@ -584,7 +590,7 @@ class Coordinator:
                     bb.current_intent = IntentMove(
                         target_pos=(approach_x, by), target_orientation=None
                     )
-            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            elif self._is_goalie(robot_id):
                 by = snapshot.ball_position[1]
                 target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
                 bb.current_intent = IntentMove(
@@ -684,7 +690,7 @@ class Coordinator:
         if self._free_kick_kicker_id is None:
             best_dist = float("inf")
             for robot_id in robot_ids:
-                if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+                if self._is_goalie(robot_id):
                     continue
                 robot = _find_robot(snapshot, robot_id)
                 if robot is None:
@@ -735,7 +741,7 @@ class Coordinator:
                         target_pos=(approach_x, by), target_orientation=None
                     )
                 intents.append(bb.current_intent)
-            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            elif self._is_goalie(robot_id):
                 by = snapshot.ball_position[1]
                 target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
                 bb.current_intent = IntentMove(
@@ -784,7 +790,7 @@ class Coordinator:
                 continue
             bb = self.blackboards[robot_id]
 
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            if self._is_goalie(robot_id):
                 # Goalie holds on own goal line, tracks ball y
                 target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
             else:
@@ -821,7 +827,7 @@ class Coordinator:
                 # Approach but do NOT kick yet.
                 approach_x = bx - 0.25 * self._attack_sign
                 bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
-            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            elif self._is_goalie(robot_id):
                 by_clamped = max(-1.0, min(1.0, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
@@ -859,7 +865,7 @@ class Coordinator:
             if robot is None:
                 continue
             bb = self.blackboards[robot_id]
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            if self._is_goalie(robot_id):
                 by_clamped = max(-1.0, min(1.0, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
@@ -901,7 +907,7 @@ class Coordinator:
             (bx - robot.position[0]) * self._attack_sign > 0.9
             for rid in robot_ids
             if rid != PENALTY_KICKER_ID
-            and ROLE_ASSIGNMENT.get(rid) != RoleType.GOALIE
+            and not self._is_goalie(rid)
             and (robot := _find_robot(snapshot, rid)) is not None
         )
 
@@ -926,7 +932,7 @@ class Coordinator:
                         bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                     else:
                         bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
-            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            elif self._is_goalie(robot_id):
                 by_clamped = max(-1.0, min(1.0, by))
                 bb.current_intent = IntentMove(
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
@@ -953,7 +959,7 @@ class Coordinator:
             if _find_robot(snapshot, robot_id) is None:
                 continue
             bb = self.blackboards[robot_id]
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            if self._is_goalie(robot_id):
                 # Stay on goal line, track ball's y — clamped to goal mouth.
                 by = max(-1.0, min(1.0, snapshot.ball_position[1]))
                 target = (self._own_goal_line_x, by)
@@ -1033,7 +1039,7 @@ class Coordinator:
         # Fallback: robot 5 absent — pick closest non-goalie.
         best_dist = float("inf")
         for robot_id in robot_ids:
-            if ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
+            if self._is_goalie(robot_id):
                 continue
             robot = _find_robot(snapshot, robot_id)
             if robot is None:
@@ -1053,12 +1059,16 @@ class Coordinator:
             if robot_id not in snapshot_ids:
                 continue
             if robot_id not in self.blackboards:
-                role = ROLE_ASSIGNMENT.get(robot_id, RoleType.SUPPORTER)
+                role = self._role_of(robot_id)
                 self.blackboards[robot_id] = RobotBlackboard(
                     robot_id=robot_id,
                     current_role=role,
                 )
             else:
-                self.blackboards[robot_id].current_role = ROLE_ASSIGNMENT.get(
-                    robot_id, RoleType.SUPPORTER
-                )
+                self.blackboards[robot_id].current_role = self._role_of(robot_id)
+
+    def _role_of(self, robot_id: int) -> RoleType:
+        return self.role_assignment.get(robot_id, RoleType.SUPPORTER)
+
+    def _is_goalie(self, robot_id: int) -> bool:
+        return self._role_of(robot_id) == RoleType.GOALIE

@@ -50,7 +50,10 @@ DEFAULT_ROBOT_IDS: list[int] = [0, 1, 2, 3, 4, 5]
 TICK_PERIOD: float = 0.01
 
 
-def _build_coordinator(us_positive: bool) -> Coordinator:
+def _build_coordinator(
+    us_positive: bool,
+    role_assignment: dict[int, RoleType] | None = None,
+) -> Coordinator:
     c = Coordinator(
         trees={
             RoleType.GOALIE: GoalieTree(us_positive=us_positive),
@@ -59,8 +62,13 @@ def _build_coordinator(us_positive: bool) -> Coordinator:
             RoleType.ATTACKER: AttackerTree(us_positive=us_positive),
         },
         us_positive=us_positive,
+        role_assignment=role_assignment,
     )
-    print(f"[BT-{'YELLOW' if not us_positive else 'BLUE'}] coordinator built — us_positive={us_positive} opp_goal={c._opp_goal} attack_sign={c._attack_sign}", flush=True)
+    print(
+        f"[BT] coordinator built: us_positive={us_positive} "
+        f"opp_goal={c._opp_goal} attack_sign={c._attack_sign}",
+        flush=True,
+    )
     return c
 
 
@@ -100,7 +108,10 @@ def run_bt_v2_process(
     cfg_us_positive = bool(_cfg.us_positive)
     cfg_us_yellow   = bool(_cfg.us_yellow)
     _us_positive = cfg_us_positive if (is_yellow == cfg_us_yellow) else not cfg_us_positive
-    coordinator = _build_coordinator(us_positive=_us_positive)
+    coordinator = _build_coordinator(
+        us_positive=_us_positive,
+        role_assignment=role_assignment,
+    )
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
 
     tag = "[BT-YELLOW]" if is_yellow else "[BT-BLUE]"
@@ -109,7 +120,7 @@ def run_bt_v2_process(
 
     try:
         while is_running.is_set():
-            snapshot = build_snapshot_from_world_model(wm)
+            snapshot = build_snapshot_from_world_model(wm, is_yellow=is_yellow)
             if snapshot is None:
                 time.sleep(tick_period)
                 continue
