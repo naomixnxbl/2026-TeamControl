@@ -46,6 +46,7 @@ class Sim6v6Config:
         self.yellow_ids: list[int] = [int(x) for x in raw["yellow"]["robot_ids"]]
         self.blue_ids: list[int] = [int(x) for x in raw["blue"]["robot_ids"]]
         self.roles: dict[int, RoleType] = _parse_roles(raw["roles"])
+        self.heuristic_role_swap: bool = bool(raw.get("heuristic_role_swap", False))
         self.tick_period: float = float(raw.get("tick_period", 0.01))
 
     def __repr__(self) -> str:  # pragma: no cover - debugging only
@@ -53,6 +54,7 @@ class Sim6v6Config:
             f"Sim6v6Config(yellow_ids={self.yellow_ids}, "
             f"blue_ids={self.blue_ids}, "
             f"roles={ {k: v.name for k, v in self.roles.items()} }, "
+            f"heuristic_role_swap={self.heuristic_role_swap}, "
             f"tick_period={self.tick_period})"
         )
 

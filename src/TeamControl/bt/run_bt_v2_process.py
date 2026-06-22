@@ -17,6 +17,7 @@ import time
 from multiprocessing import Event, Queue
 
 from TeamControl.bt.adapter import (
+    DribbleLimitTracker,
     build_snapshot_from_world_model,
     dispatch_coordinator_output,
 )
@@ -53,6 +54,7 @@ TICK_PERIOD: float = 0.01
 def _build_coordinator(
     us_positive: bool,
     role_assignment: dict[int, RoleType] | None = None,
+    heuristic_role_swap: bool = False,
 ) -> Coordinator:
     c = Coordinator(
         trees={
@@ -63,10 +65,12 @@ def _build_coordinator(
         },
         us_positive=us_positive,
         role_assignment=role_assignment,
+        heuristic_role_swap=heuristic_role_swap,
     )
     print(
         f"[BT] coordinator built: us_positive={us_positive} "
-        f"opp_goal={c._opp_goal} attack_sign={c._attack_sign}",
+        f"opp_goal={c._opp_goal} attack_sign={c._attack_sign} "
+        f"heuristic_role_swap={heuristic_role_swap}",
         flush=True,
     )
     return c
@@ -79,6 +83,7 @@ def run_bt_v2_process(
     is_yellow: bool | None = None,
     robot_ids: list[int] | None = None,
     role_assignment: dict | None = None,
+    heuristic_role_swap: bool = False,
     tick_period: float = TICK_PERIOD,
     config_file: str = "ipconfig.yaml",
 ) -> None:
@@ -94,6 +99,8 @@ def run_bt_v2_process(
         robot_ids: which robot ids to tick. Defaults to 0..5.
         role_assignment: per-robot RoleType override dict. Defaults to
             the module-level ROLE_ASSIGNMENT in coordinator.py.
+        heuristic_role_swap: if true, dynamically assign non-goalie roles
+            during RUNNING. If false, keep static role_assignment behaviour.
         tick_period: seconds to sleep between ticks.
         config_file: path to yaml config (relative to utils/).
     """
@@ -111,7 +118,9 @@ def run_bt_v2_process(
     coordinator = _build_coordinator(
         us_positive=_us_positive,
         role_assignment=role_assignment,
+        heuristic_role_swap=heuristic_role_swap,
     )
+    dribble_tracker = DribbleLimitTracker()
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
 
     tag = "[BT-YELLOW]" if is_yellow else "[BT-BLUE]"
@@ -157,6 +166,7 @@ def run_bt_v2_process(
                     snapshot,
                     is_yellow,
                     dispatcher_q,
+                    dribble_tracker=dribble_tracker,
                 )
             time.sleep(tick_period)
     except KeyboardInterrupt:

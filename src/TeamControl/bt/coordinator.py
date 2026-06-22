@@ -22,11 +22,13 @@ GamePhase from the Snapshot's RefereeState and may override behaviour:
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
 from TeamControl.bt.contracts.intent import Intent, IntentMove
 from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
+from TeamControl.bt.tactics.heuristic_role_swap import assign_roles_heuristically
 
 # ---------------------------------------------------------------------------
 # Role assignment — fixed by robot ID
@@ -236,10 +238,13 @@ class Coordinator:
         trees: dict[RoleType, Any],
         us_positive: bool = True,
         role_assignment: dict[int, RoleType] | None = None,
+        heuristic_role_swap: bool = False,
     ) -> None:
         self.trees = trees
         self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
+        self.heuristic_role_swap = bool(heuristic_role_swap)
         self.blackboards: dict[int, RobotBlackboard] = {}
+        self._role_swap_last_changed_at: dict[int, float] = {}
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
@@ -435,6 +440,7 @@ class Coordinator:
                 self._penalty_shoot_carry = False
             return result
 
+        self._apply_heuristic_roles(snapshot, robot_ids)
         return self._normal_tick(snapshot, robot_ids)
 
     # ------------------------------------------------------------------
@@ -1065,7 +1071,56 @@ class Coordinator:
                     current_role=role,
                 )
             else:
-                self.blackboards[robot_id].current_role = self._role_of(robot_id)
+                static_role = self._role_of(robot_id)
+                if not self.heuristic_role_swap or static_role == RoleType.GOALIE:
+                    self.blackboards[robot_id].current_role = static_role
+
+    def _apply_heuristic_roles(self, snapshot: Snapshot, robot_ids: list[int]) -> None:
+        """Update non-goalie roles when dynamic role swapping is enabled."""
+        if not self.heuristic_role_swap:
+            return
+
+        present_ids = {
+            robot.robot_id
+            for robot in snapshot.own_robots
+            if robot.robot_id in robot_ids and robot.robot_id in self.blackboards
+        }
+        if not present_ids:
+            return
+
+        now = time.monotonic()
+        current_roles = {
+            robot_id: self.blackboards[robot_id].current_role
+            for robot_id in present_ids
+        }
+        time_since_last_swap = {
+            robot_id: (
+                now - self._role_swap_last_changed_at[robot_id]
+                if robot_id in self._role_swap_last_changed_at
+                else math.inf
+            )
+            for robot_id in present_ids
+        }
+
+        result = assign_roles_heuristically(
+            snapshot,
+            robot_ids,
+            current_roles,
+            base_roles=self.role_assignment,
+            time_since_last_swap=time_since_last_swap,
+            attack_goal=self._opp_goal,
+            own_goal=(self._own_goal_line_x, 0.0),
+        )
+
+        for robot_id, new_role in result.roles.items():
+            bb = self.blackboards.get(robot_id)
+            if bb is None:
+                continue
+
+            old_role = bb.current_role
+            bb.current_role = new_role
+            if old_role != new_role:
+                self._role_swap_last_changed_at[robot_id] = now
 
     def _role_of(self, robot_id: int) -> RoleType:
         return self.role_assignment.get(robot_id, RoleType.SUPPORTER)

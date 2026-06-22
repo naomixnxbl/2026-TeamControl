@@ -26,6 +26,7 @@ keeps running while higher fidelity is added.
 from __future__ import annotations
 
 import math
+import time
 from typing import Iterable
 
 from TeamControl.bt.contracts.intent import (
@@ -51,6 +52,7 @@ from TeamControl.SSL.game_controller.common import GameState
 
 # Runtime world state comes in as raw SSL/grSim millimetres.
 _MM_TO_M = 0.001
+DRIBBLE_TIME_LIMIT_SECONDS = 3.0
 
 
 # Map every GC-produced GameState into the BT's GamePhase.
@@ -177,6 +179,34 @@ def _robot_id_of(intent: Intent, fallback: int) -> int:
     return fallback
 
 
+class DribbleLimitTracker:
+    """Tracks continuous dribble time per robot.
+
+    SSL rules cap continuous ball dribbling. This tracker only controls the
+    dribbler/spinner output; tactical choices such as kicking or passing after
+    the cap still belong in the behaviour trees.
+    """
+
+    def __init__(self, max_dribble_seconds: float = DRIBBLE_TIME_LIMIT_SECONDS) -> None:
+        self.max_dribble_seconds = float(max_dribble_seconds)
+        self._dribble_started_at: dict[int, float] = {}
+
+    def should_enable_dribbler(
+        self,
+        robot_id: int,
+        wants_dribble: bool,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        if not wants_dribble:
+            self._dribble_started_at.pop(robot_id, None)
+            return False
+
+        current_time = time.monotonic() if now is None else float(now)
+        started_at = self._dribble_started_at.setdefault(robot_id, current_time)
+        return current_time - started_at <= self.max_dribble_seconds
+
+
 def intent_to_motion_target(
     intent: Intent, robot_id: int, snapshot: Snapshot
 ) -> MotionTarget | None:
@@ -292,6 +322,8 @@ def dispatch_coordinator_output(
     is_yellow: bool,
     dispatcher_q,
     run_time: float = 1.0,
+    dribble_tracker: DribbleLimitTracker | None = None,
+    now: float | None = None,
 ) -> int:
     """Walk each robot's blackboard after a ``Coordinator.tick`` and emit a
     ``RobotCommand`` per non-empty intent.
@@ -305,10 +337,22 @@ def dispatch_coordinator_output(
     for rid in robot_ids:
         bb = coordinator.blackboards.get(rid)
         if bb is None or bb.current_intent is None:
+            if dribble_tracker is not None:
+                dribble_tracker.should_enable_dribbler(rid, False, now=now)
             continue
+        wants_dribble = isinstance(bb.current_intent, IntentDribble)
+        dribble_allowed = True
+        if dribble_tracker is not None:
+            dribble_allowed = dribble_tracker.should_enable_dribbler(
+                rid,
+                wants_dribble,
+                now=now,
+            )
         cmd = intent_to_robot_command(bb.current_intent, rid, snapshot, is_yellow)
         if cmd is None:
             continue
+        if wants_dribble and not dribble_allowed:
+            cmd.dribble = 0
         if not dispatcher_q.full():
             dispatcher_q.put([cmd, run_time])
             sent += 1
