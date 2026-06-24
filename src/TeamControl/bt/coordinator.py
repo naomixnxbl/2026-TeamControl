@@ -28,7 +28,11 @@ from typing import Any
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
 from TeamControl.bt.contracts.intent import Intent, IntentMove
 from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
-from TeamControl.bt.tactics.heuristic_role_swap import assign_roles_heuristically
+from TeamControl.bt.tactics.heuristic_role_swap import (
+    RoleHeuristicWeights,
+    assign_roles_heuristically,
+    load_role_heuristic_weights,
+)
 
 # ---------------------------------------------------------------------------
 # Role assignment — fixed by robot ID
@@ -239,10 +243,17 @@ class Coordinator:
         us_positive: bool = True,
         role_assignment: dict[int, RoleType] | None = None,
         heuristic_role_swap: bool = False,
+        heuristic_weights: RoleHeuristicWeights | None = None,
+        heuristic_weights_file: str = "heuristic_weight.yaml",
     ) -> None:
         self.trees = trees
         self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
         self.heuristic_role_swap = bool(heuristic_role_swap)
+        self.heuristic_weights = (
+            heuristic_weights
+            if heuristic_weights is not None
+            else load_role_heuristic_weights(heuristic_weights_file)
+        )
         self.blackboards: dict[int, RobotBlackboard] = {}
         self._role_swap_last_changed_at: dict[int, float] = {}
         self._free_kick_kicker_id: int | None = None
@@ -1110,6 +1121,7 @@ class Coordinator:
             time_since_last_swap=time_since_last_swap,
             attack_goal=self._opp_goal,
             own_goal=(self._own_goal_line_x, 0.0),
+            heuristic_weights=self.heuristic_weights,
         )
 
         for robot_id, new_role in result.roles.items():

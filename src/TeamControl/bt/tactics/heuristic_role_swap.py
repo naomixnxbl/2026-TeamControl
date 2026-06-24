@@ -7,8 +7,17 @@ to call this module; when the yaml flag is false, static roles remain untouched.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Literal, Mapping
+from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Literal, Mapping
+
+import yaml
+
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
 
 from TeamControl.bt.contracts.blackboard import RoleType
 from TeamControl.bt.contracts.snapshot import RobotState, Snapshot
@@ -33,6 +42,87 @@ class RoleTargetCounts:
     min_defenders: int = 1
     max_defenders: int = 2
     min_supporters: int = 1
+
+
+@dataclass(frozen=True)
+class AttackerScoreWeights:
+    """Weights for the attacker score."""
+
+    ball_close: float = 0.40
+    approach_quality: float = 0.20
+    angle_score: float = 0.14
+    opponent_goal_close: float = 0.12
+    goal_sight: float = 0.08
+    pressure_escape: float = 0.04
+    own_has_ball: float = 0.02
+    opponent_has_ball_pressure: float = 0.12
+    loose_ball_pressure: float = 0.10
+
+
+@dataclass(frozen=True)
+class DefenderScoreWeights:
+    """Weights for the defender score. Defaults match the original scorer."""
+
+    own_goal_close: float = 0.28
+    ball_close: float = 0.22
+    own_lane: float = 0.24
+    ball_danger: float = 0.16
+    pressure_escape: float = 0.06
+    opponent_has_ball: float = 0.04
+
+
+@dataclass(frozen=True)
+class SupporterScoreWeights:
+    """Weights for the supporter score. Defaults match the original scorer."""
+
+    spacing: float = 0.30
+    opponent_goal_close: float = 0.20
+    pressure_escape: float = 0.16
+    goal_sight: float = 0.14
+    not_crowding_ball: float = 0.10
+    forward_lane: float = 0.08
+    own_has_ball: float = 0.02
+
+
+@dataclass(frozen=True)
+class RoleStabilityWeights:
+    """Role-stability tuning."""
+
+    current_role_bias: float = 0.08
+    cooldown_bias: float = 0.16
+    minimum_swap_interval: float = 1.0
+
+
+@dataclass(frozen=True)
+class ContextScaleWeights:
+    """Field-relative context scales used before scoring."""
+
+    goal_sight_clearance_field_scale: float = 0.02
+    lane_width_field_scale: float = 0.04
+    pressure_radius_field_scale: float = 0.12
+    possession_radius_field_scale: float = 0.06
+
+
+@dataclass(frozen=True)
+class DefenderCountWeights:
+    """Rules for when the team should allocate an extra defender."""
+
+    add_second_when_opponent_has_ball: bool = True
+    add_second_when_ball_in_our_half: bool = True
+    minimum_candidates_after_attackers: int = 3
+
+
+@dataclass(frozen=True)
+class RoleHeuristicWeights:
+    """All externally tunable role-swap values."""
+
+    attacker: AttackerScoreWeights = field(default_factory=AttackerScoreWeights)
+    defender: DefenderScoreWeights = field(default_factory=DefenderScoreWeights)
+    supporter: SupporterScoreWeights = field(default_factory=SupporterScoreWeights)
+    stability: RoleStabilityWeights = field(default_factory=RoleStabilityWeights)
+    context: ContextScaleWeights = field(default_factory=ContextScaleWeights)
+    defender_count: DefenderCountWeights = field(default_factory=DefenderCountWeights)
+    role_targets: RoleTargetCounts = field(default_factory=RoleTargetCounts)
 
 
 @dataclass(frozen=True)
@@ -106,6 +196,56 @@ class RoleAssignmentResult:
     reasons: dict[int, str]
 
 
+def load_role_heuristic_weights(
+    config_filename: str | Path = "heuristic_weight.yaml",
+) -> RoleHeuristicWeights:
+    """Load heuristic role weights from yaml, preserving defaults for omissions."""
+
+    path = Path(config_filename)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[2] / "utils" / path
+
+    if not path.exists():
+        return RoleHeuristicWeights()
+
+    with open(path, "r") as f:
+        raw = yaml.load(f, Loader) or {}
+
+    if not isinstance(raw, MappingABC):
+        return RoleHeuristicWeights()
+
+    return RoleHeuristicWeights(
+        attacker=_dataclass_from_section(
+            AttackerScoreWeights,
+            raw.get("attacker"),
+        ),
+        defender=_dataclass_from_section(
+            DefenderScoreWeights,
+            raw.get("defender"),
+        ),
+        supporter=_dataclass_from_section(
+            SupporterScoreWeights,
+            raw.get("supporter"),
+        ),
+        stability=_dataclass_from_section(
+            RoleStabilityWeights,
+            raw.get("stability"),
+        ),
+        context=_dataclass_from_section(
+            ContextScaleWeights,
+            raw.get("context"),
+        ),
+        defender_count=_dataclass_from_section(
+            DefenderCountWeights,
+            raw.get("defender_count"),
+        ),
+        role_targets=_dataclass_from_section(
+            RoleTargetCounts,
+            raw.get("role_targets"),
+        ),
+    )
+
+
 def assign_roles_heuristically(
     snapshot: Snapshot,
     robot_ids: list[int],
@@ -116,6 +256,7 @@ def assign_roles_heuristically(
     attack_goal: Point = (4.5, 0.0),
     own_goal: Point = (-4.5, 0.0),
     role_targets: RoleTargetCounts | None = None,
+    heuristic_weights: RoleHeuristicWeights | None = None,
 ) -> RoleAssignmentResult:
     """Assign non-goalie roles by relative team ranking.
 
@@ -125,7 +266,8 @@ def assign_roles_heuristically(
     normalized against the current team state rather than absolute thresholds.
     """
 
-    targets = role_targets if role_targets is not None else RoleTargetCounts()
+    weights = heuristic_weights if heuristic_weights is not None else RoleHeuristicWeights()
+    targets = role_targets if role_targets is not None else weights.role_targets
     requested_ids = set(robot_ids)
     present_ids = {
         robot.robot_id
@@ -150,12 +292,18 @@ def assign_roles_heuristically(
 
     field_scale = _field_scale(snapshot, own_goal, attack_goal)
     role_counts = _count_roles(current_roles)
+    ball_holder = _estimate_ball_holder(
+        snapshot,
+        possession_radius=(
+            field_scale * weights.context.possession_radius_field_scale
+        ),
+    )
     contexts = {
         rid: build_role_swap_context(
             snapshot,
             rid,
             current_roles.get(rid, base.get(rid, RoleType.SUPPORTER)),
-            current_ball_holder=_estimate_ball_holder(snapshot),
+            current_ball_holder=ball_holder,
             time_since_last_swap=(
                 time_since_last_swap.get(rid, math.inf)
                 if time_since_last_swap is not None
@@ -166,16 +314,19 @@ def assign_roles_heuristically(
             ],
             attack_goal=attack_goal,
             own_goal=own_goal,
-            goal_sight_clearance=field_scale * 0.02,
+            goal_sight_clearance=(
+                field_scale * weights.context.goal_sight_clearance_field_scale
+            ),
             role_counts=role_counts,
             role_targets=targets,
-            lane_width=field_scale * 0.04,
-            pressure_radius=field_scale * 0.12,
+            lane_width=field_scale * weights.context.lane_width_field_scale,
+            pressure_radius=field_scale * weights.context.pressure_radius_field_scale,
+            minimum_swap_interval=weights.stability.minimum_swap_interval,
         )
         for rid in candidates
     }
 
-    scores = _score_contexts(contexts, own_goal, attack_goal)
+    scores = _score_contexts(contexts, own_goal, attack_goal, weights)
     selected_attackers = _select_role_ids(
         candidates,
         scores,
@@ -191,6 +342,7 @@ def assign_roles_heuristically(
         contexts,
         len(candidates),
         targets,
+        weights.defender_count,
     )
     selected_defenders = _select_role_ids(
         remaining,
@@ -340,6 +492,7 @@ def _score_contexts(
     contexts: Mapping[int, RoleSwapContext],
     own_goal: Point,
     attack_goal: Point,
+    weights: RoleHeuristicWeights,
 ) -> dict[int, RoleScores]:
     ball_close = _normalise_low_better(
         {rid: ctx.distance_to_ball for rid, ctx in contexts.items()}
@@ -369,32 +522,38 @@ def _score_contexts(
         not_crowding_ball = _clamp(1.0 - ball_close[rid])
         opponent_has_ball = 1.0 if ctx.current_ball_holder == "opponent" else 0.0
         own_has_ball = 1.0 if ctx.current_ball_holder == "own" else 0.0
+        loose_ball = 1.0 if ctx.current_ball_holder in ("none", "unknown") else 0.0
+        attacker_weights = weights.attacker
+        defender_weights = weights.defender
+        supporter_weights = weights.supporter
 
         attacker = (
-            0.40 * ball_close[rid]
-            + 0.20 * ctx.approach_quality
-            + 0.14 * angle_score
-            + 0.12 * opponent_goal_close[rid]
-            + 0.08 * goal_sight
-            + 0.04 * pressure_escape
-            + 0.02 * own_has_ball
+            attacker_weights.ball_close * ball_close[rid]
+            + attacker_weights.approach_quality * ctx.approach_quality
+            + attacker_weights.angle_score * angle_score
+            + attacker_weights.opponent_goal_close * opponent_goal_close[rid]
+            + attacker_weights.goal_sight * goal_sight
+            + attacker_weights.pressure_escape * pressure_escape
+            + attacker_weights.own_has_ball * own_has_ball
+            + attacker_weights.opponent_has_ball_pressure * ball_close[rid] * opponent_has_ball
+            + attacker_weights.loose_ball_pressure * ball_close[rid] * loose_ball
         )
         defender = (
-            0.28 * own_goal_close[rid]
-            + 0.22 * ball_close[rid]
-            + 0.24 * own_lane
-            + 0.16 * ball_danger
-            + 0.06 * pressure_escape
-            + 0.04 * opponent_has_ball
+            defender_weights.own_goal_close * own_goal_close[rid]
+            + defender_weights.ball_close * ball_close[rid]
+            + defender_weights.own_lane * own_lane
+            + defender_weights.ball_danger * ball_danger
+            + defender_weights.pressure_escape * pressure_escape
+            + defender_weights.opponent_has_ball * opponent_has_ball
         )
         supporter = (
-            0.30 * spacing[rid]
-            + 0.20 * opponent_goal_close[rid]
-            + 0.16 * pressure_escape
-            + 0.14 * goal_sight
-            + 0.10 * not_crowding_ball
-            + 0.08 * forward_lane
-            + 0.02 * own_has_ball
+            supporter_weights.spacing * spacing[rid]
+            + supporter_weights.opponent_goal_close * opponent_goal_close[rid]
+            + supporter_weights.pressure_escape * pressure_escape
+            + supporter_weights.goal_sight * goal_sight
+            + supporter_weights.not_crowding_ball * not_crowding_ball
+            + supporter_weights.forward_lane * forward_lane
+            + supporter_weights.own_has_ball * own_has_ball
         )
         scores[rid] = _apply_role_stability(
             RoleScores(
@@ -403,18 +562,23 @@ def _score_contexts(
                 supporter=_clamp(supporter),
             ),
             ctx,
+            weights.stability,
         )
 
     return scores
 
 
-def _apply_role_stability(scores: RoleScores, context: RoleSwapContext) -> RoleScores:
+def _apply_role_stability(
+    scores: RoleScores,
+    context: RoleSwapContext,
+    weights: RoleStabilityWeights,
+) -> RoleScores:
     if context.current_role == RoleType.GOALIE:
         return scores
 
-    bias = 0.08
+    bias = weights.current_role_bias
     if context.swap_cooldown_active:
-        bias = 0.16
+        bias = weights.cooldown_bias
 
     return RoleScores(
         attacker=scores.attacker + (bias if context.current_role == RoleType.ATTACKER else 0.0),
@@ -455,13 +619,28 @@ def _target_defender_count(
     contexts: Mapping[int, RoleSwapContext],
     candidate_count: int,
     targets: RoleTargetCounts,
+    weights: DefenderCountWeights,
 ) -> int:
     if candidate_count <= targets.attackers:
         return 0
 
     any_ctx = next(iter(contexts.values()))
     desired = targets.min_defenders
-    if any_ctx.ball_in_our_half and candidate_count - targets.attackers >= 3:
+    opponent_pressure_state = (
+        (
+            weights.add_second_when_opponent_has_ball
+            and any_ctx.current_ball_holder == "opponent"
+        )
+        or (
+            weights.add_second_when_ball_in_our_half
+            and any_ctx.ball_in_our_half
+        )
+    )
+    if (
+        opponent_pressure_state
+        and candidate_count - targets.attackers
+        >= weights.minimum_candidates_after_attackers
+    ):
         desired += 1
 
     return max(targets.min_defenders, min(targets.max_defenders, desired))
@@ -493,6 +672,32 @@ def _role_reason(
         f"supporter score={scores.supporter:.2f}; "
         f"teammate_spacing={context.teammate_spacing:.2f}"
     )
+
+
+def _dataclass_from_section(cls: type, section: object) -> Any:
+    defaults = cls()
+    if not isinstance(section, MappingABC):
+        return defaults
+
+    values: dict[str, object] = {}
+    for item in fields(cls):
+        if item.name not in section:
+            continue
+        default_value = getattr(defaults, item.name)
+        values[item.name] = _coerce_config_value(section[item.name], default_value)
+    return cls(**values)
+
+
+def _coerce_config_value(value: object, default_value: object) -> object:
+    if isinstance(default_value, bool):
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        return int(value)
+    if isinstance(default_value, float):
+        return float(value)
+    return value
 
 
 def _find_robot(snapshot: Snapshot, robot_id: int) -> RobotState | None:
@@ -601,7 +806,11 @@ def _count_roles(roles: Mapping[int, RoleType]) -> dict[RoleType, int]:
     return counts
 
 
-def _estimate_ball_holder(snapshot: Snapshot) -> BallHolder:
+def _estimate_ball_holder(
+    snapshot: Snapshot,
+    *,
+    possession_radius: float = 0.5,
+) -> BallHolder:
     own_distance = _nearest_distance(snapshot.ball_position, tuple(snapshot.own_robots))
     opponent_distance = _nearest_distance(
         snapshot.ball_position,
@@ -609,6 +818,8 @@ def _estimate_ball_holder(snapshot: Snapshot) -> BallHolder:
     )
     if math.isinf(own_distance) and math.isinf(opponent_distance):
         return "unknown"
+    if min(own_distance, opponent_distance) > possession_radius:
+        return "none"
     if abs(own_distance - opponent_distance) < 1e-9:
         return "unknown"
     return "own" if own_distance < opponent_distance else "opponent"
