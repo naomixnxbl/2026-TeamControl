@@ -24,5 +24,36 @@ roles:
 # Dynamic role swapping toggle. False keeps the static roles above.
 heuristic_role_swap: True
 
+# Runtime movement safety toggles.
+# These are final guard rails applied after the behavior trees choose targets.
+# FOR THE REAL MATCH, KEEP THESE ALL TRUE
+movement_safety:
+  # Clamp robot movement/dribble targets inside the playable field.
+  keep_robots_in_bounds: true
+
+  # Clamp the goalie movement target inside our goalie box.
+  # This applies to whichever side the current team is defending.
+  keep_goalie_in_goal_box: true
+
+  # Keep every non-goalie out of our goalie box.
+  # If a target or straight-line route would enter the box, the coordinator
+  # reroutes that robot toward the nearest outside edge/corner first.
+  keep_non_goalies_out_of_goalie_box: true
+
+  # Prevent our robots from touching the ball in the opponent defense area
+  # during RUNNING play. They may still enter the area without touching the
+  # ball, but kick/pass/dribble/chase-ball intents get held outside the box.
+  avoid_ball_touch_in_opponent_defense_area: true
+
+  # Field and goalie-box dimensions in metres. These match the current grSim
+  # 9m x 6m setup and the existing goalie logic.
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+  goalie_box_avoid_margin: 0.15
+
 # Tick period in seconds for each BT process (100 Hz = 0.01).
 tick_period: 0.01

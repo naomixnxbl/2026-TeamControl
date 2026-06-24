@@ -6,9 +6,11 @@ from TeamControl.bt.adapter import (
     DribbleLimitTracker,
     build_snapshot_from_world_model,
     dispatch_coordinator_output,
+    intent_to_motion_target,
+    intent_to_robot_command,
 )
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
-from TeamControl.bt.contracts.intent import IntentDribble, IntentMove
+from TeamControl.bt.contracts.intent import IntentDribble, IntentKick, IntentMove
 from TeamControl.bt.contracts.snapshot import GamePhase, RefereeState, RobotState, Snapshot
 
 
@@ -66,11 +68,21 @@ class _Coordinator:
         }
 
 
-def _bt_snapshot() -> Snapshot:
+def _bt_snapshot(
+    robot_pos: tuple[float, float] = (0.0, 0.0),
+    robot_orientation: float = 0.0,
+    ball_pos: tuple[float, float] = (0.0, 0.0),
+) -> Snapshot:
     return Snapshot(
-        ball_position=(0.0, 0.0),
+        ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
-        own_robots=(RobotState(robot_id=1, position=(0.0, 0.0), orientation=0.0),),
+        own_robots=(
+            RobotState(
+                robot_id=1,
+                position=robot_pos,
+                orientation=robot_orientation,
+            ),
+        ),
         opponent_robots=(),
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
@@ -148,3 +160,63 @@ def test_dispatch_turns_dribbler_off_after_limit_and_resets():
         now=23.03,
     )
     assert queue.items[-1][0].dribble == 1
+
+
+def test_move_to_ball_stops_and_faces_ball_when_misaligned():
+    snapshot = _bt_snapshot(
+        robot_pos=(0.0, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.2),
+    )
+
+    target = intent_to_motion_target(
+        IntentMove(target_pos=snapshot.ball_position, target_orientation=None),
+        1,
+        snapshot,
+    )
+
+    assert target is not None
+    assert target.target_velocity == (0.0, 0.0)
+    assert target.target_orientation > 1.5
+
+
+def test_dribble_faces_and_collects_ball_before_carrying_to_target():
+    snapshot = _bt_snapshot(
+        robot_pos=(0.0, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.2),
+    )
+
+    target = intent_to_motion_target(IntentDribble(target_pos=(2.0, 0.0)), 1, snapshot)
+
+    assert target is not None
+    assert target.target_velocity == (0.0, 0.0)
+    assert target.target_orientation > 1.5
+
+
+def test_kick_does_not_fire_until_robot_is_aligned_with_ball():
+    snapshot = _bt_snapshot(
+        robot_pos=(0.0, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.15),
+    )
+
+    cmd = intent_to_robot_command(IntentKick(target_pos=(4.5, 0.0)), 1, snapshot, True)
+
+    assert cmd is not None
+    assert cmd.kick == 0
+    assert abs(cmd.vx) < 1e-6
+    assert abs(cmd.vy) < 1e-6
+
+
+def test_kick_fires_when_robot_is_close_and_aligned():
+    snapshot = _bt_snapshot(
+        robot_pos=(-0.12, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.0),
+    )
+
+    cmd = intent_to_robot_command(IntentKick(target_pos=(4.5, 0.0)), 1, snapshot, True)
+
+    assert cmd is not None
+    assert cmd.kick == 1

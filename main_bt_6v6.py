@@ -59,6 +59,7 @@ def main() -> None:
                             robot_ids=sim.yellow_ids,
                             role_assignment=sim.roles,
                             heuristic_role_swap=sim.heuristic_role_swap,
+                            movement_safety=sim.movement_safety,
                             tick_period=sim.tick_period),
                 name="bt_yellow"),
         # Blue BT
@@ -68,6 +69,7 @@ def main() -> None:
                             robot_ids=sim.blue_ids,
                             role_assignment=sim.roles,
                             heuristic_role_swap=sim.heuristic_role_swap,
+                            movement_safety=sim.movement_safety,
                             tick_period=sim.tick_period),
                 name="bt_blue"),
     ]
@@ -75,6 +77,7 @@ def main() -> None:
     print(f"[main_bt_6v6] starting — yellow={sim.yellow_ids} blue={sim.blue_ids}")
     print(f"[main_bt_6v6] roles={ {k: v.name for k, v in sim.roles.items()} } "
           f"heuristic_role_swap={sim.heuristic_role_swap} "
+          f"movement_safety={sim.movement_safety} "
           f"tick={sim.tick_period}s")
     for p in procs:
         p.start()

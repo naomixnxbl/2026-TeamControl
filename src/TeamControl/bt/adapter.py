@@ -54,6 +54,24 @@ from TeamControl.SSL.game_controller.common import GameState
 _MM_TO_M = 0.001
 DRIBBLE_TIME_LIMIT_SECONDS = 3.0
 
+BALL_TARGET_EPSILON = 0.08
+BALL_APPROACH_STOP_DISTANCE = 0.35
+BALL_APPROACH_HEADING_TOL = 0.45
+BALL_APPROACH_SLOW_SPEED = 0.45
+
+DRIBBLE_CONTROL_DISTANCE = 0.16
+DRIBBLE_HEADING_TOL = 0.45
+DRIBBLE_APPROACH_SPEED = 0.55
+DRIBBLE_CARRY_SPEED = 1.0
+
+KICK_APPROACH_OFFSET = 0.22
+KICK_APPROACH_TOL = 0.08
+KICK_CONTACT_DISTANCE = 0.18
+KICK_ALIGN_TOL = 0.35
+KICK_BALL_FRONT_TOL = 0.45
+KICK_APPROACH_SPEED = 1.0
+KICK_CONTACT_SPEED = 1.5
+
 
 # Map every GC-produced GameState into the BT's GamePhase.
 # The GC FSM already resolves ours-vs-theirs before storing GameState,
@@ -179,6 +197,202 @@ def _robot_id_of(intent: Intent, fallback: int) -> int:
     return fallback
 
 
+def _get_robot(snapshot: Snapshot, robot_id: int) -> RobotState:
+    for robot in snapshot.own_robots:
+        if robot.robot_id == robot_id:
+            return robot
+    raise ValueError(f"Robot {robot_id} not found in snapshot")
+
+
+def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _face_angle(
+    source: tuple[float, float],
+    target: tuple[float, float],
+) -> float:
+    return math.atan2(target[1] - source[1], target[0] - source[0])
+
+
+def _angle_error(target: float, current: float) -> float:
+    return (target - current + math.pi) % (2 * math.pi) - math.pi
+
+
+def _limit_velocity(
+    velocity: tuple[float, float],
+    max_speed: float,
+) -> tuple[float, float]:
+    vx, vy = velocity
+    speed = math.hypot(vx, vy)
+    if speed < 1e-9 or speed <= max_speed:
+        return velocity
+    scale = max_speed / speed
+    return (vx * scale, vy * scale)
+
+
+def _is_ball_target(
+    target_pos: tuple[float, float],
+    ball_pos: tuple[float, float],
+) -> bool:
+    return _distance(target_pos, ball_pos) <= BALL_TARGET_EPSILON
+
+
+def _ball_is_in_front(robot: RobotState, ball_pos: tuple[float, float]) -> bool:
+    angle_to_ball = _face_angle(robot.position, ball_pos)
+    return abs(_angle_error(angle_to_ball, robot.orientation)) <= DRIBBLE_HEADING_TOL
+
+
+def _kick_angle(ball_pos: tuple[float, float], target_pos: tuple[float, float]) -> float:
+    return _face_angle(ball_pos, target_pos)
+
+
+def _kick_pose_ready(
+    snapshot: Snapshot,
+    robot_id: int,
+    target_pos: tuple[float, float],
+) -> bool:
+    robot = _get_robot(snapshot, robot_id)
+    ball = snapshot.ball_position
+    angle_ball_to_target = _kick_angle(ball, target_pos)
+    angle_robot_to_ball = _face_angle(robot.position, ball)
+    dist_to_ball = _distance(robot.position, ball)
+
+    return (
+        dist_to_ball <= KICK_CONTACT_DISTANCE
+        and abs(_angle_error(angle_robot_to_ball, robot.orientation)) <= KICK_BALL_FRONT_TOL
+        and abs(_angle_error(angle_ball_to_target, robot.orientation)) <= KICK_ALIGN_TOL
+    )
+
+
+def _guard_ball_approach(
+    snapshot: Snapshot,
+    robot_id: int,
+    target: MotionTarget,
+) -> MotionTarget:
+    robot = _get_robot(snapshot, robot_id)
+    angle_to_ball = _face_angle(robot.position, snapshot.ball_position)
+    heading_err = abs(_angle_error(angle_to_ball, robot.orientation))
+    dist_to_ball = _distance(robot.position, snapshot.ball_position)
+
+    if (
+        dist_to_ball <= BALL_APPROACH_STOP_DISTANCE
+        and heading_err > BALL_APPROACH_HEADING_TOL
+    ):
+        return MotionTarget(
+            target_velocity=(0.0, 0.0),
+            target_orientation=angle_to_ball,
+            arrival_mode="precision",
+        )
+
+    velocity = target.target_velocity
+    if heading_err > BALL_APPROACH_HEADING_TOL:
+        velocity = _limit_velocity(velocity, BALL_APPROACH_SLOW_SPEED)
+
+    return MotionTarget(
+        target_velocity=velocity,
+        target_orientation=angle_to_ball,
+        arrival_mode=target.arrival_mode,
+    )
+
+
+def _dribble_motion_target(
+    snapshot: Snapshot,
+    robot_id: int,
+    target_pos: tuple[float, float],
+) -> MotionTarget:
+    robot = _get_robot(snapshot, robot_id)
+    ball = snapshot.ball_position
+    angle_to_ball = _face_angle(robot.position, ball)
+    heading_err = abs(_angle_error(angle_to_ball, robot.orientation))
+    dist_to_ball = _distance(robot.position, ball)
+
+    if dist_to_ball > DRIBBLE_CONTROL_DISTANCE or not _ball_is_in_front(robot, ball):
+        if (
+            dist_to_ball <= BALL_APPROACH_STOP_DISTANCE
+            and heading_err > DRIBBLE_HEADING_TOL
+        ):
+            return MotionTarget(
+                target_velocity=(0.0, 0.0),
+                target_orientation=angle_to_ball,
+                arrival_mode="precision",
+            )
+        return move_to(
+            snapshot,
+            robot_id,
+            ball,
+            angle_to_ball,
+            DRIBBLE_APPROACH_SPEED,
+        )
+
+    target_angle = _face_angle(robot.position, target_pos)
+    return move_to(
+        snapshot,
+        robot_id,
+        target_pos,
+        target_angle,
+        DRIBBLE_CARRY_SPEED,
+    )
+
+
+def _kick_motion_target(
+    snapshot: Snapshot,
+    robot_id: int,
+    target_pos: tuple[float, float],
+) -> MotionTarget:
+    robot = _get_robot(snapshot, robot_id)
+    ball = snapshot.ball_position
+    angle = _kick_angle(ball, target_pos)
+    ux = math.cos(angle)
+    uy = math.sin(angle)
+    approach = (
+        ball[0] - ux * KICK_APPROACH_OFFSET,
+        ball[1] - uy * KICK_APPROACH_OFFSET,
+    )
+
+    if _kick_pose_ready(snapshot, robot_id, target_pos):
+        return kick_at(snapshot, robot_id, target_pos)
+
+    dist_to_ball = _distance(robot.position, ball)
+    heading_err = abs(_angle_error(angle, robot.orientation))
+    angle_to_ball = _face_angle(robot.position, ball)
+    ball_front_err = abs(_angle_error(angle_to_ball, robot.orientation))
+    behind_ball = (
+        (robot.position[0] - ball[0]) * ux
+        + (robot.position[1] - ball[1]) * uy
+    ) < -0.04
+
+    if (
+        dist_to_ball <= BALL_APPROACH_STOP_DISTANCE
+        and (
+            heading_err > KICK_ALIGN_TOL
+            or ball_front_err > KICK_BALL_FRONT_TOL
+        )
+    ):
+        return MotionTarget(
+            target_velocity=(0.0, 0.0),
+            target_orientation=angle_to_ball if ball_front_err > KICK_BALL_FRONT_TOL else angle,
+            arrival_mode="precision",
+        )
+
+    if not behind_ball or _distance(robot.position, approach) > KICK_APPROACH_TOL:
+        return move_to(
+            snapshot,
+            robot_id,
+            approach,
+            angle,
+            KICK_APPROACH_SPEED,
+        )
+
+    return move_to(
+        snapshot,
+        robot_id,
+        ball,
+        angle,
+        KICK_CONTACT_SPEED,
+    )
+
+
 class DribbleLimitTracker:
     """Tracks continuous dribble time per robot.
 
@@ -217,34 +431,22 @@ def intent_to_motion_target(
     """
     try:
         if isinstance(intent, IntentMove):
-            return move_to(
+            target = move_to(
                 snapshot,
                 robot_id,
                 intent.target_pos,
                 intent.target_orientation,
                 intent.max_speed,
             )
+            if _is_ball_target(intent.target_pos, snapshot.ball_position):
+                return _guard_ball_approach(snapshot, robot_id, target)
+            return target
         if isinstance(intent, IntentKick):
-            return kick_at(snapshot, robot_id, intent.target_pos)
+            return _kick_motion_target(snapshot, robot_id, intent.target_pos)
         if isinstance(intent, IntentDribble):
-            # No dribble skill yet — drive toward the target like move_to,
-            # but compute target_orientation so the robot faces the dribble
-            # target. Without this, move_to defaults orientation to 0.0 and
-            # the robot rotates east while trying to dribble west, leaving
-            # the ball behind.
-            robot = next(
-                (r for r in snapshot.own_robots if r.robot_id == robot_id), None
-            )
-            if robot is not None:
-                angle = math.atan2(
-                    intent.target_pos[1] - robot.position[1],
-                    intent.target_pos[0] - robot.position[0],
-                )
-            else:
-                angle = None
-            return move_to(snapshot, robot_id, intent.target_pos, angle)
+            return _dribble_motion_target(snapshot, robot_id, intent.target_pos)
         if isinstance(intent, IntentPass):
-            return kick_at(snapshot, robot_id, intent.target_pos)
+            return _kick_motion_target(snapshot, robot_id, intent.target_pos)
         if isinstance(intent, IntentOrient):
             return MotionTarget(
                 target_velocity=(0.0, 0.0),
@@ -284,10 +486,11 @@ def intent_to_robot_command(
 
     # Pull the current orientation so we can compute an angular velocity AND
     # rotate the velocity from world frame into the robot's body frame.
-    robot = next(
-        (r for r in snapshot.own_robots if r.robot_id == robot_id), None
-    )
-    current_o = robot.orientation if robot is not None else 0.0
+    try:
+        robot = _get_robot(snapshot, robot_id)
+    except ValueError:
+        return None
+    current_o = robot.orientation
     w = _angular_velocity_to_target(current_o, target.target_orientation)
 
     # Skills produce target_velocity in WORLD frame. grSim's RobotCommand
@@ -301,7 +504,12 @@ def intent_to_robot_command(
     vt = vx_world * cos_o + vy_world * sin_o    # forward along heading
     vn = -vx_world * sin_o + vy_world * cos_o   # left perpendicular
 
-    kick = 1 if isinstance(intent, (IntentKick, IntentPass)) else 0
+    wants_kick = isinstance(intent, (IntentKick, IntentPass))
+    kick = (
+        1
+        if wants_kick and _kick_pose_ready(snapshot, robot_id, intent.target_pos)
+        else 0
+    )
     dribble = 1 if isinstance(intent, IntentDribble) else 0
 
     return RobotCommand(

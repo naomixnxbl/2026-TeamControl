@@ -13,9 +13,11 @@ from TeamControl.bt.contracts.snapshot import (
 from TeamControl.bt.tactics.heuristic_role_swap import assign_roles_heuristically
 from TeamControl.bt.trees.defender import (
     DEFENDER_TEAMMATE_MIN_GAP,
+    DefenderPositioningConfig,
     PASS_BLOCK_FRACTION_FROM_CARRIER,
     SHOT_BLOCK_FRACTION_FROM_GOAL,
     DefenderTree,
+    load_defender_positioning_config,
 )
 
 
@@ -38,8 +40,15 @@ def _snapshot(
     )
 
 
-def _tick_defender(snapshot: Snapshot, robot_id: int):
-    tree = DefenderTree(us_positive=False)
+def _tick_defender(
+    snapshot: Snapshot,
+    robot_id: int,
+    positioning_config: DefenderPositioningConfig | None = None,
+):
+    tree = DefenderTree(
+        us_positive=False,
+        positioning_config=positioning_config,
+    )
     bb = RobotBlackboard(robot_id=robot_id, current_role=RoleType.DEFENDER)
     tree.set_snapshot(snapshot)
     tree.tick(bb)
@@ -115,6 +124,75 @@ def test_secondary_defender_blocks_dangerous_pass_lane() -> None:
             PASS_BLOCK_FRACTION_FROM_CARRIER,
         ),
     )
+
+
+def test_custom_positioning_config_moves_defender_closer_to_ball_holder() -> None:
+    carrier = RobotState(robot_id=8, position=(-1.0, 1.0), orientation=0.0)
+    config = DefenderPositioningConfig(shot_block_fraction_from_goal=0.60)
+    snap = _snapshot(
+        ball=(-1.05, 1.0),
+        own=[
+            RobotState(robot_id=0, position=(-4.3, 0.0), orientation=0.0),
+            RobotState(robot_id=1, position=(-3.7, 0.4), orientation=0.0),
+            RobotState(robot_id=2, position=(-1.5, -2.0), orientation=0.0),
+        ],
+        opponents=[carrier],
+    )
+
+    intent, source = _tick_defender(
+        snap,
+        robot_id=1,
+        positioning_config=config,
+    )
+
+    assert isinstance(intent, IntentMove)
+    assert source == "BlockShotLane"
+    _assert_point_close(
+        intent.target_pos,
+        _interpolate(OWN_GOAL, carrier.position, 0.60),
+    )
+
+
+def test_defender_positioning_config_loads_yaml_section(tmp_path) -> None:
+    config_path = tmp_path / "bt_tuning.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "behavior_tree:",
+                "  defender:",
+                "    positioning:",
+                "      shot_block_fraction_from_goal: 0.55",
+                "      pass_block_fraction_from_carrier: 0.35",
+                "      teammate_min_gap: 0.50",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_defender_positioning_config(config_path)
+
+    assert config.shot_block_fraction_from_goal == 0.55
+    assert config.pass_block_fraction_from_carrier == 0.35
+    assert config.teammate_min_gap == 0.50
+    assert config.pass_lane_clearance == 0.18
+
+
+def test_legacy_defender_positioning_section_still_loads(tmp_path) -> None:
+    config_path = tmp_path / "heuristic_weight.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "defender_positioning:",
+                "  shot_block_fraction_from_goal: 0.52",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_defender_positioning_config(config_path)
+
+    assert config.shot_block_fraction_from_goal == 0.52
+    assert config.pass_block_fraction_from_carrier == PASS_BLOCK_FRACTION_FROM_CARRIER
 
 
 def test_defender_target_keeps_small_gap_from_teammate() -> None:

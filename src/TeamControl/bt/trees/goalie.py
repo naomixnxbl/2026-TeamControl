@@ -41,6 +41,10 @@ GOALIE_ROBOT_ID: int = 0   # robot ID 0 is always GOALIE
 RUSH_DIST: float = 1.5   # metres
 # Distance at which goalie is close enough to the ball to kick it clear.
 KICK_DIST: float = 0.2   # metres
+FIELD_HALF_X: float = 4.5
+GOALIE_BOX_DEPTH: float = 1.0
+GOALIE_BOX_HALF_WIDTH: float = 1.0
+GOALIE_BOX_MARGIN: float = 0.05
 
 
 # -----------------------------------------------------------------------
@@ -122,7 +126,7 @@ class DoBallTrajectory(py_trees.behaviour.Behaviour):
         ball = snap.ball_position
         dist_ball_to_goal = math.hypot(ball[0] - goal_x, ball[1])
 
-        if dist_ball_to_goal < RUSH_DIST:
+        if dist_ball_to_goal < RUSH_DIST and _inside_goalie_box(self._tree, ball):
             # Ball is dangerously close — rush out and intercept
             self._tree.predicted_intercept = ball
             self._tree._rushing = True
@@ -273,3 +277,16 @@ def _find_robot(snap: Snapshot, robot_id: int):
         if r.robot_id == robot_id:
             return r
     return None
+
+
+def _inside_goalie_box(tree: GoalieTree, pos: tuple[float, float]) -> bool:
+    x, y = pos
+    side = 1.0 if tree._neutral_goal_position[0] >= 0.0 else -1.0
+    inner_abs_x = FIELD_HALF_X - GOALIE_BOX_DEPTH + GOALIE_BOX_MARGIN
+    outer_abs_x = FIELD_HALF_X - GOALIE_BOX_MARGIN
+
+    if side > 0.0:
+        in_x = inner_abs_x <= x <= outer_abs_x
+    else:
+        in_x = -outer_abs_x <= x <= -inner_abs_x
+    return in_x and abs(y) <= GOALIE_BOX_HALF_WIDTH - GOALIE_BOX_MARGIN

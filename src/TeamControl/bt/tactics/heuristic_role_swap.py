@@ -32,6 +32,8 @@ from TeamControl.bt.tactics.line_of_sight import (
 )
 
 BallHolder = Literal["yellow", "blue", "own", "opponent", "none", "unknown"]
+BT_TUNING_FILENAME = "bt_tuning.yaml"
+LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,17 @@ class RoleStabilityWeights:
 
 
 @dataclass(frozen=True)
+class DefenderStabilityWeights:
+    """Extra hysteresis for defenders so the defensive anchor does not churn."""
+
+    min_hold_seconds: float = 3.0
+    stay_bias: float = 0.25
+    cooldown_bias: float = 0.40
+    release_margin: float = 0.12
+    allow_attacker_release_margin: float = 0.18
+
+
+@dataclass(frozen=True)
 class ContextScaleWeights:
     """Field-relative context scales used before scoring."""
 
@@ -120,6 +133,7 @@ class RoleHeuristicWeights:
     defender: DefenderScoreWeights = field(default_factory=DefenderScoreWeights)
     supporter: SupporterScoreWeights = field(default_factory=SupporterScoreWeights)
     stability: RoleStabilityWeights = field(default_factory=RoleStabilityWeights)
+    defender_stability: DefenderStabilityWeights = field(default_factory=DefenderStabilityWeights)
     context: ContextScaleWeights = field(default_factory=ContextScaleWeights)
     defender_count: DefenderCountWeights = field(default_factory=DefenderCountWeights)
     role_targets: RoleTargetCounts = field(default_factory=RoleTargetCounts)
@@ -197,13 +211,11 @@ class RoleAssignmentResult:
 
 
 def load_role_heuristic_weights(
-    config_filename: str | Path = "heuristic_weight.yaml",
+    config_filename: str | Path = BT_TUNING_FILENAME,
 ) -> RoleHeuristicWeights:
     """Load heuristic role weights from yaml, preserving defaults for omissions."""
 
-    path = Path(config_filename)
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[2] / "utils" / path
+    path = _resolve_utils_config_path(config_filename)
 
     if not path.exists():
         return RoleHeuristicWeights()
@@ -214,34 +226,42 @@ def load_role_heuristic_weights(
     if not isinstance(raw, MappingABC):
         return RoleHeuristicWeights()
 
+    role_swap = raw.get("role_swap", raw)
+    if not isinstance(role_swap, MappingABC):
+        return RoleHeuristicWeights()
+
     return RoleHeuristicWeights(
         attacker=_dataclass_from_section(
             AttackerScoreWeights,
-            raw.get("attacker"),
+            role_swap.get("attacker"),
         ),
         defender=_dataclass_from_section(
             DefenderScoreWeights,
-            raw.get("defender"),
+            role_swap.get("defender"),
         ),
         supporter=_dataclass_from_section(
             SupporterScoreWeights,
-            raw.get("supporter"),
+            role_swap.get("supporter"),
         ),
         stability=_dataclass_from_section(
             RoleStabilityWeights,
-            raw.get("stability"),
+            role_swap.get("stability"),
+        ),
+        defender_stability=_dataclass_from_section(
+            DefenderStabilityWeights,
+            role_swap.get("defender_stability"),
         ),
         context=_dataclass_from_section(
             ContextScaleWeights,
-            raw.get("context"),
+            role_swap.get("context"),
         ),
         defender_count=_dataclass_from_section(
             DefenderCountWeights,
-            raw.get("defender_count"),
+            role_swap.get("defender_count"),
         ),
         role_targets=_dataclass_from_section(
             RoleTargetCounts,
-            raw.get("role_targets"),
+            role_swap.get("role_targets"),
         ),
     )
 
@@ -327,29 +347,42 @@ def assign_roles_heuristically(
     }
 
     scores = _score_contexts(contexts, own_goal, attack_goal, weights)
-    selected_attackers = _select_role_ids(
-        candidates,
-        scores,
-        current_roles,
-        RoleType.ATTACKER,
-        max(0, min(targets.attackers, len(candidates))),
-    )
-    for rid in selected_attackers:
-        roles[rid] = RoleType.ATTACKER
-
-    remaining = [rid for rid in candidates if rid not in roles]
     defender_target = _target_defender_count(
         contexts,
         len(candidates),
         targets,
         weights.defender_count,
     )
+    sticky_defenders = _select_sticky_defenders(
+        candidates,
+        scores,
+        current_roles,
+        contexts,
+        defender_target,
+        weights.defender_stability,
+    )
+    for rid in sticky_defenders:
+        roles[rid] = RoleType.DEFENDER
+
+    attacker_pool = [rid for rid in candidates if rid not in roles]
+    selected_attackers = _select_role_ids(
+        attacker_pool,
+        scores,
+        current_roles,
+        RoleType.ATTACKER,
+        max(0, min(targets.attackers, len(attacker_pool))),
+    )
+    for rid in selected_attackers:
+        roles[rid] = RoleType.ATTACKER
+
+    remaining = [rid for rid in candidates if rid not in roles]
+    defender_slots = max(0, defender_target - len(sticky_defenders))
     selected_defenders = _select_role_ids(
         remaining,
         scores,
         current_roles,
         RoleType.DEFENDER,
-        max(0, min(defender_target, len(remaining))),
+        max(0, min(defender_slots, len(remaining))),
     )
     for rid in selected_defenders:
         roles[rid] = RoleType.DEFENDER
@@ -563,6 +596,7 @@ def _score_contexts(
             ),
             ctx,
             weights.stability,
+            weights.defender_stability,
         )
 
     return scores
@@ -572,9 +606,20 @@ def _apply_role_stability(
     scores: RoleScores,
     context: RoleSwapContext,
     weights: RoleStabilityWeights,
+    defender_weights: DefenderStabilityWeights,
 ) -> RoleScores:
     if context.current_role == RoleType.GOALIE:
         return scores
+
+    if context.current_role == RoleType.DEFENDER:
+        defender_bias = defender_weights.stay_bias
+        if context.time_since_last_swap < defender_weights.min_hold_seconds:
+            defender_bias = defender_weights.cooldown_bias
+        return RoleScores(
+            attacker=scores.attacker,
+            defender=scores.defender + defender_bias,
+            supporter=scores.supporter,
+        )
 
     bias = weights.current_role_bias
     if context.swap_cooldown_active:
@@ -584,6 +629,111 @@ def _apply_role_stability(
         attacker=scores.attacker + (bias if context.current_role == RoleType.ATTACKER else 0.0),
         defender=scores.defender + (bias if context.current_role == RoleType.DEFENDER else 0.0),
         supporter=scores.supporter + (bias if context.current_role == RoleType.SUPPORTER else 0.0),
+    )
+
+
+def _select_sticky_defenders(
+    robot_ids: list[int],
+    scores: Mapping[int, RoleScores],
+    current_roles: Mapping[int, RoleType],
+    contexts: Mapping[int, RoleSwapContext],
+    defender_target: int,
+    weights: DefenderStabilityWeights,
+) -> list[int]:
+    if defender_target <= 0:
+        return []
+
+    current_defenders = [
+        rid for rid in robot_ids
+        if current_roles.get(rid) == RoleType.DEFENDER
+    ]
+    if not current_defenders:
+        return []
+
+    kept: list[int] = []
+    for rid in sorted(
+        current_defenders,
+        key=lambda robot_id: scores[robot_id].defender,
+        reverse=True,
+    ):
+        if len(kept) >= defender_target:
+            break
+        if _should_keep_current_defender(
+            rid,
+            robot_ids,
+            scores,
+            current_roles,
+            contexts,
+            weights,
+        ):
+            kept.append(rid)
+    return kept
+
+
+def _should_keep_current_defender(
+    robot_id: int,
+    robot_ids: list[int],
+    scores: Mapping[int, RoleScores],
+    current_roles: Mapping[int, RoleType],
+    contexts: Mapping[int, RoleSwapContext],
+    weights: DefenderStabilityWeights,
+) -> bool:
+    context = contexts.get(robot_id)
+    if context is None:
+        return True
+
+    if _should_release_defender_to_attack(
+        robot_id,
+        robot_ids,
+        scores,
+        current_roles,
+        contexts,
+        weights,
+    ):
+        return False
+
+    if context.time_since_last_swap < weights.min_hold_seconds:
+        return True
+
+    best_replacement = max(
+        (
+            scores[rid].defender
+            for rid in robot_ids
+            if rid != robot_id
+        ),
+        default=-math.inf,
+    )
+    return best_replacement <= scores[robot_id].defender + weights.release_margin
+
+
+def _should_release_defender_to_attack(
+    robot_id: int,
+    robot_ids: list[int],
+    scores: Mapping[int, RoleScores],
+    current_roles: Mapping[int, RoleType],
+    contexts: Mapping[int, RoleSwapContext],
+    weights: DefenderStabilityWeights,
+) -> bool:
+    context = contexts.get(robot_id)
+    if context is None:
+        return False
+    if context.current_ball_holder not in ("opponent", "none", "unknown"):
+        return False
+
+    best_non_defender_attacker = max(
+        (
+            scores[rid].attacker
+            for rid in robot_ids
+            if rid != robot_id and current_roles.get(rid) != RoleType.DEFENDER
+        ),
+        default=-math.inf,
+    )
+    if math.isinf(best_non_defender_attacker):
+        return False
+
+    return (
+        scores[robot_id].attacker
+        >= best_non_defender_attacker + weights.allow_attacker_release_margin
     )
 
 
@@ -686,6 +836,20 @@ def _dataclass_from_section(cls: type, section: object) -> Any:
         default_value = getattr(defaults, item.name)
         values[item.name] = _coerce_config_value(section[item.name], default_value)
     return cls(**values)
+
+
+def _resolve_utils_config_path(config_filename: str | Path) -> Path:
+    path = Path(config_filename)
+    if path.is_absolute():
+        return path
+
+    utils_dir = Path(__file__).resolve().parents[2] / "utils"
+    path = utils_dir / path
+    if path.exists() or path.name != BT_TUNING_FILENAME:
+        return path
+
+    legacy_path = utils_dir / LEGACY_HEURISTIC_WEIGHT_FILENAME
+    return legacy_path if legacy_path.exists() else path
 
 
 def _coerce_config_value(value: object, default_value: object) -> object:

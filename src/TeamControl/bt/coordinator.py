@@ -33,6 +33,11 @@ from TeamControl.bt.tactics.heuristic_role_swap import (
     assign_roles_heuristically,
     load_role_heuristic_weights,
 )
+from TeamControl.bt.tactics.rule_following import (
+    MovementSafetyConfig,
+    apply_rule_following,
+    has_rule_following_enabled,
+)
 
 # ---------------------------------------------------------------------------
 # Role assignment — fixed by robot ID
@@ -244,7 +249,8 @@ class Coordinator:
         role_assignment: dict[int, RoleType] | None = None,
         heuristic_role_swap: bool = False,
         heuristic_weights: RoleHeuristicWeights | None = None,
-        heuristic_weights_file: str = "heuristic_weight.yaml",
+        heuristic_weights_file: str = "bt_tuning.yaml",
+        movement_safety: MovementSafetyConfig | dict[str, bool | float] | None = None,
     ) -> None:
         self.trees = trees
         self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
@@ -253,6 +259,11 @@ class Coordinator:
             heuristic_weights
             if heuristic_weights is not None
             else load_role_heuristic_weights(heuristic_weights_file)
+        )
+        self.movement_safety = (
+            movement_safety
+            if isinstance(movement_safety, MovementSafetyConfig)
+            else MovementSafetyConfig.from_mapping(movement_safety)
         )
         self.blackboards: dict[int, RobotBlackboard] = {}
         self._role_swap_last_changed_at: dict[int, float] = {}
@@ -357,43 +368,54 @@ class Coordinator:
             return []
 
         if phase == GamePhase.STOPPED:
-            return self._handle_stopped(snapshot, robot_ids)
+            self._handle_stopped(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.BALL_PLACEMENT:
-            return self._handle_ball_placement(snapshot, robot_ids)
+            self._handle_ball_placement(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_KICKOFF:
             # Lock in the kicker now so it carries into KICKOFF/RUNNING.
             self._lock_kickoff_kicker(snapshot, robot_ids)
-            return self._handle_prepare_kickoff(snapshot, robot_ids)
+            self._handle_prepare_kickoff(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.OPP_KICKOFF:
-            return self._handle_opp_kickoff(snapshot, robot_ids)
+            self._handle_opp_kickoff(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.KICKOFF:
-            return self._handle_kickoff(snapshot, robot_ids)
+            self._handle_kickoff(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.FREE_KICK:
-            return self._handle_free_kick(snapshot, robot_ids)
+            self._handle_free_kick(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.OPP_FREE_KICK:
-            return self._handle_opp_free_kick(snapshot, robot_ids)
+            self._handle_opp_free_kick(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_PENALTY:
-            return self._handle_prepare_penalty(snapshot, robot_ids)
+            self._handle_prepare_penalty(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_PENALTY_OPP:
-            return self._handle_prepare_penalty_opp(snapshot, robot_ids)
+            self._handle_prepare_penalty_opp(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PENALTY_SHOOT:
-            return self._handle_penalty_shoot(snapshot, robot_ids)
+            self._handle_penalty_shoot(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PENALTY_DEFEND:
-            return self._handle_penalty_defend(snapshot, robot_ids)
+            self._handle_penalty_defend(snapshot, robot_ids)
+            return self._finalize_intents(snapshot, robot_ids)
 
         # RUNNING — finish opp kickoff positioning if carry is active.
         if self._opp_kickoff_carry:
-            result = self._handle_opp_kickoff(snapshot, robot_ids)
+            self._handle_opp_kickoff(snapshot, robot_ids)
             # Clear carry once all robots are within 0.2m of their slots.
             all_at_slot = True
             for rid in robot_ids:
@@ -406,15 +428,15 @@ class Coordinator:
                     break
             if all_at_slot:
                 self._opp_kickoff_carry = False
-            return result
+            return self._finalize_intents(snapshot, robot_ids)
 
         # RUNNING — if a kickoff kick hasn't fired yet, finish it first.
         if self._kickoff_kicker_id is not None:
-            result = self._handle_kickoff(snapshot, robot_ids)
+            self._handle_kickoff(snapshot, robot_ids)
             if self._kickoff_kicker_ready:
                 self._kickoff_kicker_id = None
                 self._kickoff_kicker_ready = False
-            return result
+            return self._finalize_intents(snapshot, robot_ids)
 
         # RUNNING — carry penalty shoot until kicker fires OR ball moves.
         if self._penalty_shoot_carry and not self._penalty_shoot_done:
@@ -438,21 +460,66 @@ class Coordinator:
                 self._penalty_defend_carry = False
                 self._penalty_defend_ball_ref = None
             else:
-                return self._handle_penalty_defend(snapshot, robot_ids)
+                self._handle_penalty_defend(snapshot, robot_ids)
+                return self._finalize_intents(snapshot, robot_ids)
 
         # RUNNING — carry penalty shoot until kicker fires.
         if self._penalty_shoot_carry and not self._penalty_shoot_done:
-            result = self._handle_penalty_shoot(snapshot, robot_ids)
+            self._handle_penalty_shoot(snapshot, robot_ids)
             # Check if kicker just issued a kick intent.
             from TeamControl.bt.contracts.intent import IntentKick
             kicker_bb = self.blackboards.get(5)
             if kicker_bb is not None and isinstance(kicker_bb.current_intent, IntentKick):
                 self._penalty_shoot_done = True
                 self._penalty_shoot_carry = False
-            return result
+            return self._finalize_intents(snapshot, robot_ids)
 
         self._apply_heuristic_roles(snapshot, robot_ids)
-        return self._normal_tick(snapshot, robot_ids)
+        self._normal_tick(snapshot, robot_ids)
+        return self._finalize_intents(snapshot, robot_ids)
+
+    def _finalize_intents(
+        self,
+        snapshot: Snapshot,
+        robot_ids: list[int],
+    ) -> list[Intent]:
+        """Apply final movement guard rails and return current intents."""
+        if has_rule_following_enabled(self.movement_safety):
+            self._apply_rule_following(snapshot, robot_ids)
+
+        present_ids = {robot.robot_id for robot in snapshot.own_robots}
+        intents: list[Intent] = []
+        for robot_id in robot_ids:
+            if robot_id not in present_ids:
+                continue
+            bb = self.blackboards.get(robot_id)
+            if bb is not None and bb.current_intent is not None:
+                intents.append(bb.current_intent)
+        return intents
+
+    def _apply_rule_following(
+        self,
+        snapshot: Snapshot,
+        robot_ids: list[int],
+    ) -> None:
+        robot_by_id = {robot.robot_id: robot for robot in snapshot.own_robots}
+        for robot_id in robot_ids:
+            robot = robot_by_id.get(robot_id)
+            if robot is None:
+                continue
+            bb = self.blackboards.get(robot_id)
+            if bb is None or bb.current_intent is None:
+                continue
+            bb.current_intent = apply_rule_following(
+                snapshot=snapshot,
+                robot_id=robot_id,
+                robot_pos=robot.position,
+                role=self._role_of(robot_id),
+                intent=bb.current_intent,
+                config=self.movement_safety,
+                own_goal_line_x=self._own_goal_line_x,
+                opponent_goal=self._opp_goal,
+            )
 
     # ------------------------------------------------------------------
     # Game-phase handlers

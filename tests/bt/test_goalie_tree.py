@@ -507,6 +507,38 @@ class TestDoBallTrajectory:
             tree.tick(bb)
             assert tree.predicted_intercept == exp_pos
 
+    def test_goalie_does_not_rush_ball_outside_goalie_box(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-3.0, 0.2),
+            goalie_pos=(-4.0, 0.0),
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentMove)
+        assert tree._rushing is False
+        assert tree.predicted_intercept == (-4.0, 0.2)
+        assert bb.current_intent.target_pos == (-4.0, 0.2)
+
+    def test_goalie_can_rush_ball_inside_goalie_box(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-4.0, 0.2),
+            goalie_pos=(-4.4, 0.0),
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentMove)
+        assert tree._rushing is True
+        assert tree.predicted_intercept == (-4.0, 0.2)
+        assert bb.current_intent.target_pos == (-4.0, 0.2)
+
 
 # ---------------------------------------------------------------------------
 # TestNoRobotCommandWritten — R008 invariant
