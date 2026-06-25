@@ -362,6 +362,15 @@ def _kick_motion_target(
         + (robot.position[1] - ball[1]) * uy
     ) < -0.04
 
+    if not behind_ball or _distance(robot.position, approach) > KICK_APPROACH_TOL:
+        return move_to(
+            snapshot,
+            robot_id,
+            approach,
+            angle,
+            KICK_APPROACH_SPEED,
+        )
+
     if (
         dist_to_ball <= BALL_APPROACH_STOP_DISTANCE
         and (
@@ -371,17 +380,8 @@ def _kick_motion_target(
     ):
         return MotionTarget(
             target_velocity=(0.0, 0.0),
-            target_orientation=angle_to_ball if ball_front_err > KICK_BALL_FRONT_TOL else angle,
+            target_orientation=angle,
             arrival_mode="precision",
-        )
-
-    if not behind_ball or _distance(robot.position, approach) > KICK_APPROACH_TOL:
-        return move_to(
-            snapshot,
-            robot_id,
-            approach,
-            angle,
-            KICK_APPROACH_SPEED,
         )
 
     return move_to(

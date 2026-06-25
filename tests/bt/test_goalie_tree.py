@@ -26,7 +26,6 @@ Usage contract:
 from __future__ import annotations
 
 import math
-import pytest
 import py_trees
 
 # --- import under test (will ImportError until T014 is implemented) ----------
@@ -538,6 +537,72 @@ class TestDoBallTrajectory:
         assert tree._rushing is True
         assert tree.predicted_intercept == (-4.0, 0.2)
         assert bb.current_intent.target_pos == (-4.0, 0.2)
+
+    def test_goalie_chases_ball_when_ball_is_behind_robot(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-4.35, 0.0),
+            goalie_pos=(-4.0, 0.0),
+            goalie_orientation=0.0,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentMove)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (-4.35, 0.0)
+        assert bb.current_intent.target_orientation == math.pi
+
+    def test_goalie_chases_ball_when_facing_away_from_ball(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-4.0, 0.0),
+            goalie_pos=(-4.4, 0.0),
+            goalie_orientation=math.pi,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentMove)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (-4.0, 0.0)
+        assert bb.current_intent.target_orientation == 0.0
+
+    def test_goalie_dribbles_after_control_until_clear_lane_is_ready(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-4.08, 0.0),
+            goalie_pos=(-4.0, 0.0),
+            goalie_orientation=math.pi,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentDribble)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (4.0, 0.0)
+
+    def test_goalie_kicks_after_control_and_clear_alignment(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-4.1, 0.0),
+            goalie_pos=(-4.2, 0.0),
+            goalie_orientation=0.0,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentKick)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (4.0, 0.0)
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ Topology (from docs/goalie_node.png):
     ├── GoalieBallSequence (Sequence)
     │   ├── GetBallHistory  → stores snap.ball_position as single-frame history
     │   └── DoBallTrajectory → v1: sets predicted_intercept to NEUTRAL_GOAL_POSITION
-    └── GoToTarget          → writes IntentMove(target_pos=predicted_intercept)
+    └── GoToTarget          → positions normally, or rushes/controls/clears
         [IsBallComing stub: always FAILURE — goalie stays at neutral position]
 
 Design notes
@@ -19,7 +19,8 @@ Design notes
   ``_blackboard_ref`` protocol (one-element list). Nodes write
   ``_blackboard_ref[0].current_intent`` to produce their output.
 - No raw motor commands are produced anywhere in this module.
-- v1 simplification: DoBallTrajectory always returns NEUTRAL_GOAL_POSITION.
+- v1 simplification: DoBallTrajectory tracks ball y on the goal line unless
+  the ball is inside the goalie box, then the goalie rushes to clear it.
   IsBallComing is stubbed to always FAILURE.
 """
 from __future__ import annotations
@@ -28,7 +29,12 @@ import math
 import py_trees
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
-from TeamControl.bt.contracts.intent import IntentKick, IntentMove, IntentOrient
+from TeamControl.bt.contracts.intent import (
+    IntentDribble,
+    IntentKick,
+    IntentMove,
+    IntentOrient,
+)
 from TeamControl.bt.contracts.snapshot import Snapshot
 
 # -----------------------------------------------------------------------
@@ -39,8 +45,10 @@ GOALIE_ROBOT_ID: int = 0   # robot ID 0 is always GOALIE
 
 # Distance from own goal at which goalie rushes out to intercept.
 RUSH_DIST: float = 1.5   # metres
-# Distance at which goalie is close enough to the ball to kick it clear.
-KICK_DIST: float = 0.2   # metres
+GOALIE_POSSESSION_DIST: float = 0.11
+GOALIE_POSSESSION_HEADING_TOL: float = 0.3
+CLEAR_HEADING_TOL: float = 0.4
+CLEAR_KICK_BEHIND_MARGIN: float = 0.04
 FIELD_HALF_X: float = 4.5
 GOALIE_BOX_DEPTH: float = 1.0
 GOALIE_BOX_HALF_WIDTH: float = 1.0
@@ -159,10 +167,10 @@ class IsBallComing(py_trees.behaviour.Behaviour):
 
 
 class GoToTarget(py_trees.behaviour.Behaviour):
-    """Write IntentMove(target_pos=predicted_intercept) to the blackboard.
+    """Write the goalie's movement or clear-kick intent to the blackboard.
 
-    Uses tree.predicted_intercept set by DoBallTrajectory.
-    SUCCESS → always (writing the move intent is always valid).
+    Normal positioning uses tree.predicted_intercept. Clearing uses IntentKick.
+    SUCCESS -> always after writing the current goalie intent.
     """
 
     def __init__(self, tree_ref: GoalieTree) -> None:
@@ -178,21 +186,36 @@ class GoToTarget(py_trees.behaviour.Behaviour):
         if self._tree._rushing and snap is not None:
             robot = _find_robot(snap, bb.robot_id)
             if robot is not None:
-                dist = math.hypot(
-                    robot.position[0] - snap.ball_position[0],
-                    robot.position[1] - snap.ball_position[1],
-                )
-                if dist < KICK_DIST:
-                    # Close enough — kick the ball away from own goal
+                if not _has_ball_control(robot, snap.ball_position):
+                    angle_to_ball = math.atan2(
+                        snap.ball_position[1] - robot.position[1],
+                        snap.ball_position[0] - robot.position[0],
+                    )
+                    bb.current_intent = IntentMove(
+                        target_pos=snap.ball_position,
+                        target_orientation=angle_to_ball,
+                    )
+                    bb.intent_source = "GoalieChaseBall"
+                    return py_trees.common.Status.SUCCESS
+
+                if _ready_to_clear(self._tree, robot, snap.ball_position):
                     bb.current_intent = IntentKick(
                         target_pos=self._tree._clear_target
                     )
+                    bb.intent_source = "GoalieClearKick"
                     return py_trees.common.Status.SUCCESS
+
+                bb.current_intent = IntentDribble(
+                    target_pos=self._tree._clear_target
+                )
+                bb.intent_source = "GoalieHoldClear"
+                return py_trees.common.Status.SUCCESS
 
         bb.current_intent = IntentMove(
             target_pos=self._tree.predicted_intercept,
             target_orientation=self._tree._facing_angle,
         )
+        bb.intent_source = "GoaliePosition"
         return py_trees.common.Status.SUCCESS
 
 
@@ -290,3 +313,50 @@ def _inside_goalie_box(tree: GoalieTree, pos: tuple[float, float]) -> bool:
     else:
         in_x = -outer_abs_x <= x <= -inner_abs_x
     return in_x and abs(y) <= GOALIE_BOX_HALF_WIDTH - GOALIE_BOX_MARGIN
+
+
+def _angle_error(target: float, current: float) -> float:
+    return (target - current + math.pi) % (2 * math.pi) - math.pi
+
+
+def _clear_direction(
+    tree: GoalieTree,
+    ball: tuple[float, float],
+) -> tuple[float, float]:
+    dx = tree._clear_target[0] - ball[0]
+    dy = tree._clear_target[1] - ball[1]
+    dist = math.hypot(dx, dy)
+    if dist < 1e-9:
+        return (-1.0 if tree._neutral_goal_position[0] > 0.0 else 1.0, 0.0)
+    return (dx / dist, dy / dist)
+
+
+def _has_ball_control(robot, ball: tuple[float, float]) -> bool:
+    dx = ball[0] - robot.position[0]
+    dy = ball[1] - robot.position[1]
+    if math.hypot(dx, dy) > GOALIE_POSSESSION_DIST:
+        return False
+
+    angle_to_ball = math.atan2(dy, dx)
+    return (
+        abs(_angle_error(angle_to_ball, robot.orientation))
+        <= GOALIE_POSSESSION_HEADING_TOL
+    )
+
+
+def _ready_to_clear(
+    tree: GoalieTree,
+    robot,
+    ball: tuple[float, float],
+) -> bool:
+    ux, uy = _clear_direction(tree, ball)
+    behind_ball_for_clear = (
+        (robot.position[0] - ball[0]) * ux
+        + (robot.position[1] - ball[1]) * uy
+    ) < -CLEAR_KICK_BEHIND_MARGIN
+    clear_angle = math.atan2(uy, ux)
+    clear_heading_ready = (
+        abs(_angle_error(clear_angle, robot.orientation))
+        <= CLEAR_HEADING_TOL
+    )
+    return behind_ball_for_clear and clear_heading_ready

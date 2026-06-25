@@ -205,8 +205,49 @@ def test_kick_does_not_fire_until_robot_is_aligned_with_ball():
 
     assert cmd is not None
     assert cmd.kick == 0
-    assert abs(cmd.vx) < 1e-6
-    assert abs(cmd.vy) < 1e-6
+
+
+def test_kick_repositions_behind_ball_when_close_but_not_behind():
+    snapshot = _bt_snapshot(
+        robot_pos=(0.0, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.15),
+    )
+
+    target = intent_to_motion_target(IntentKick(target_pos=(4.5, 0.0)), 1, snapshot)
+
+    assert target is not None
+    assert target.target_velocity[0] < -0.01
+    assert target.target_orientation < 0.0
+
+
+def test_kick_alignment_uses_stable_target_angle_near_approach_point():
+    snapshot = _bt_snapshot(
+        robot_pos=(-0.22, 0.06),
+        robot_orientation=0.8,
+        ball_pos=(0.0, 0.0),
+    )
+
+    target = intent_to_motion_target(IntentKick(target_pos=(4.5, 0.0)), 1, snapshot)
+
+    assert target is not None
+    assert target.target_velocity == (0.0, 0.0)
+    assert abs(target.target_orientation) < 1e-6
+
+
+def test_kick_moves_into_ball_once_behind_and_aligned():
+    snapshot = _bt_snapshot(
+        robot_pos=(-0.22, 0.0),
+        robot_orientation=0.0,
+        ball_pos=(0.0, 0.0),
+    )
+
+    target = intent_to_motion_target(IntentKick(target_pos=(4.5, 0.0)), 1, snapshot)
+
+    assert target is not None
+    assert target.target_velocity[0] > 0.0
+    assert abs(target.target_velocity[1]) < 1e-6
+    assert abs(target.target_orientation) < 1e-6
 
 
 def test_kick_fires_when_robot_is_close_and_aligned():
