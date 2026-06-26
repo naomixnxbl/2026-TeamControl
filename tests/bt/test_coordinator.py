@@ -84,10 +84,10 @@ class TestCoordinatorImport:
 EXPECTED_ROLE_ASSIGNMENT = {
     0: RoleType.GOALIE,
     1: RoleType.ATTACKER,
-    2: RoleType.ATTACKER,
-    3: RoleType.ATTACKER,
-    4: RoleType.ATTACKER,
-    5: RoleType.ATTACKER,
+    2: RoleType.SUPPORTER,
+    3: RoleType.SUPPORTER,
+    4: RoleType.SUPPORTER,
+    5: RoleType.SUPPORTER,
 }
 
 
@@ -114,25 +114,25 @@ class TestRoleAssignment:
         coord.tick(_make_snapshot([1]), [1])
         assert coord.blackboards[1].current_role == RoleType.ATTACKER
 
-    def test_index_2_gets_attacker(self):
+    def test_index_2_gets_supporter(self):
         coord = self._make_coordinator()
         coord.tick(_make_snapshot([2]), [2])
-        assert coord.blackboards[2].current_role == RoleType.ATTACKER
+        assert coord.blackboards[2].current_role == RoleType.SUPPORTER
 
-    def test_index_3_gets_attacker(self):
+    def test_index_3_gets_supporter(self):
         coord = self._make_coordinator()
         coord.tick(_make_snapshot([3]), [3])
-        assert coord.blackboards[3].current_role == RoleType.ATTACKER
+        assert coord.blackboards[3].current_role == RoleType.SUPPORTER
 
-    def test_index_4_gets_attacker(self):
+    def test_index_4_gets_supporter(self):
         coord = self._make_coordinator()
         coord.tick(_make_snapshot([4]), [4])
-        assert coord.blackboards[4].current_role == RoleType.ATTACKER
+        assert coord.blackboards[4].current_role == RoleType.SUPPORTER
 
-    def test_index_5_gets_attacker(self):
+    def test_index_5_gets_supporter(self):
         coord = self._make_coordinator()
         coord.tick(_make_snapshot([5]), [5])
-        assert coord.blackboards[5].current_role == RoleType.ATTACKER
+        assert coord.blackboards[5].current_role == RoleType.SUPPORTER
 
     def test_all_roles_assigned_for_full_team(self):
         coord = self._make_coordinator()
@@ -183,9 +183,9 @@ class TestCorrectTreeDispatched:
         robot_ids = list(range(6))
         coord.tick(_make_snapshot(robot_ids), robot_ids)
         assert tick_counts[RoleType.GOALIE] == 1
-        assert tick_counts[RoleType.ATTACKER] == 5   # robots 1-5
+        assert tick_counts[RoleType.ATTACKER] == 1   # robot 1
         assert tick_counts[RoleType.DEFENDER] == 0
-        assert tick_counts[RoleType.SUPPORTER] == 0
+        assert tick_counts[RoleType.SUPPORTER] == 4  # robots 2-5
 
 
 # ---------------------------------------------------------------------------

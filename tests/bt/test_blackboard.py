@@ -118,7 +118,13 @@ class TestNoWorldStateFields:
 
     def test_only_expected_fields_present(self):
         field_names = {f.name for f in dataclasses.fields(RobotBlackboard)}
-        assert field_names == {"robot_id", "current_role", "current_intent", "last_intent"}
+        assert field_names == {
+            "robot_id",
+            "current_role",
+            "current_intent",
+            "last_intent",
+            "intent_source",
+        }
 
 
 # ---------------------------------------------------------------------------
