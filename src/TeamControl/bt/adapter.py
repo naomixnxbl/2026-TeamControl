@@ -152,12 +152,20 @@ def _team_to_states(team) -> tuple[RobotState, ...]:
     return tuple(out)
 
 
-def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapshot | None:
+def build_snapshot_from_world_model(
+    wm,
+    is_yellow: bool | None = None,
+    active_robot_ids: Iterable[int] | None = None,
+) -> Snapshot | None:
     """Build a frozen ``Snapshot`` from the latest data in ``WorldModel``.
 
     ``is_yellow`` selects whose perspective the snapshot is built from. Pass
     it explicitly when more than one BT process shares the same WorldModel
     (e.g. 6v6 simulation). When omitted, falls back to ``wm.us_yellow()``.
+
+    ``active_robot_ids`` limits which same-colour robots are treated as
+    controllable teammates. Same-colour robots outside this set are still
+    included as obstacles by moving them into ``opponent_robots``.
 
     Returns ``None`` when no vision frame has been received yet — callers
     should skip the tick in that case.
@@ -172,6 +180,18 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
         is_yellow = bool(wm.us_yellow())
     own_team = frame.robots_yellow if is_yellow else frame.robots_blue
     opp_team = frame.robots_blue if is_yellow else frame.robots_yellow
+    own_states = _team_to_states(own_team)
+    opponent_states = _team_to_states(opp_team)
+    if active_robot_ids is not None:
+        active_ids = {int(robot_id) for robot_id in active_robot_ids}
+        active_own_states = tuple(
+            robot for robot in own_states if robot.robot_id in active_ids
+        )
+        inactive_own_states = tuple(
+            robot for robot in own_states if robot.robot_id not in active_ids
+        )
+        own_states = active_own_states
+        opponent_states = opponent_states + inactive_own_states
 
     get_placement = getattr(wm, "get_ball_placement_pos", None)
     raw_placement = get_placement() if get_placement is not None else None
@@ -180,8 +200,8 @@ def build_snapshot_from_world_model(wm, is_yellow: bool | None = None) -> Snapsh
     return Snapshot(
         ball_position=ball_pos,
         ball_velocity=ball_vel,
-        own_robots=_team_to_states(own_team),
-        opponent_robots=_team_to_states(opp_team),
+        own_robots=own_states,
+        opponent_robots=opponent_states,
         referee_state=RefereeState(
             game_phase=_phase_for_perspective(wm, is_yellow),
             score=(0, 0),  # TODO: read from wm.ref_data once exposed

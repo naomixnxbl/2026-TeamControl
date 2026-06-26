@@ -99,6 +99,35 @@ def test_build_snapshot_from_world_model_converts_mm_to_m():
     assert snapshot.referee_state.game_phase == GamePhase.RUNNING
 
 
+def test_build_snapshot_filters_inactive_same_colour_robots_as_obstacles():
+    class FrameWithInactiveOwn:
+        ball = _Ball(0.0, 0.0)
+        robots_yellow = [
+            _Robot(0, 0.0, 0.0, 0.0),
+            _Robot(1, 1000.0, 0.0, 0.0),
+            _Robot(2, 2000.0, 0.0, 0.0),
+            _Robot(3, 3000.0, 0.0, 0.0),
+        ]
+        robots_blue = [_Robot(0, -1000.0, 0.0, 0.0)]
+
+    class WorldModelWithInactiveOwn(_WorldModel):
+        def get_latest_frame(self):
+            return FrameWithInactiveOwn()
+
+    snapshot = build_snapshot_from_world_model(
+        WorldModelWithInactiveOwn(),
+        is_yellow=True,
+        active_robot_ids=[0, 1, 2],
+    )
+
+    assert snapshot is not None
+    assert [robot.robot_id for robot in snapshot.own_robots] == [0, 1, 2]
+    assert {robot.position for robot in snapshot.opponent_robots} == {
+        (-1.0, 0.0),
+        (3.0, 0.0),
+    }
+
+
 def test_dribble_tracker_allows_up_to_three_seconds():
     tracker = DribbleLimitTracker(max_dribble_seconds=3.0)
 

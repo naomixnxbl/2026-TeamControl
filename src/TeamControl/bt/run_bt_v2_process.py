@@ -135,7 +135,11 @@ def run_bt_v2_process(
 
     try:
         while is_running.is_set():
-            snapshot = build_snapshot_from_world_model(wm, is_yellow=is_yellow)
+            snapshot = build_snapshot_from_world_model(
+                wm,
+                is_yellow=is_yellow,
+                active_robot_ids=robot_ids,
+            )
             if snapshot is None:
                 time.sleep(tick_period)
                 continue
