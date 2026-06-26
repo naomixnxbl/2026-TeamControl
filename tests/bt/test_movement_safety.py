@@ -124,7 +124,26 @@ def test_non_goalie_target_inside_own_goalie_box_is_moved_out() -> None:
 
     result = coord.tick(_snapshot(1, position=(-2.0, 0.0)), [1])
 
-    assert result[0].target_pos == (-3.38, 0.0)
+    assert result[0].target_pos == (-3.3, 0.0)
+
+
+def test_non_goalie_target_inside_own_goalie_box_uses_route_safe_exit() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentMove(target_pos=(-4.4, 0.9), target_orientation=None)),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=True,
+            goalie_box_avoid_margin=0.15,
+            goalie_box_exit_margin=0.10,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(-2.0, 0.0)), [1])
+
+    assert result[0].target_pos == pytest.approx((-3.3, 0.9))
 
 
 def test_non_goalie_route_crossing_goalie_box_is_rerouted_to_corner() -> None:
@@ -142,7 +161,72 @@ def test_non_goalie_route_crossing_goalie_box_is_rerouted_to_corner() -> None:
 
     result = coord.tick(_snapshot(1, position=(-2.0, 0.0)), [1])
 
-    assert result[0].target_pos == pytest.approx((-3.38, 1.12))
+    assert result[0].target_pos == pytest.approx((-3.3, 1.2))
+
+
+def test_non_goalie_kick_is_blocked_when_ball_is_inside_own_goalie_box() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentKick(target_pos=(4.5, 0.0))),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=True,
+            avoid_ball_touch_in_opponent_defense_area=False,
+            goalie_box_avoid_margin=0.15,
+            goalie_box_exit_margin=0.10,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(-2.0, 0.0), ball=(-4.0, 0.0)), [1])
+
+    assert isinstance(result[0], IntentMove)
+    assert result[0].target_pos == pytest.approx((-3.3, 0.0))
+
+
+def test_non_goalie_kick_is_blocked_when_ball_is_near_own_goalie_box() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentKick(target_pos=(4.5, 0.0))),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=True,
+            avoid_ball_touch_in_opponent_defense_area=False,
+            goalie_box_avoid_margin=0.15,
+            goalie_box_exit_margin=0.10,
+            defense_area_ball_touch_margin=0.18,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(-2.0, 0.0), ball=(-3.38, 0.0)), [1])
+
+    assert isinstance(result[0], IntentMove)
+    assert result[0].target_pos == pytest.approx((-3.27, 0.0))
+
+
+def test_non_goalie_move_to_ball_is_blocked_near_own_goalie_box() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentMove(target_pos=(-3.38, 0.0), target_orientation=None)),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=True,
+            avoid_ball_touch_in_opponent_defense_area=False,
+            goalie_box_avoid_margin=0.15,
+            goalie_box_exit_margin=0.10,
+            defense_area_ball_touch_margin=0.18,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(-2.0, 0.0), ball=(-3.38, 0.0)), [1])
+
+    assert isinstance(result[0], IntentMove)
+    assert result[0].target_pos == pytest.approx((-3.27, 0.0))
 
 
 def test_non_goalie_goalie_box_avoidance_can_be_disabled() -> None:
@@ -180,6 +264,27 @@ def test_move_to_ball_inside_opponent_defense_area_stops_at_edge() -> None:
 
     assert isinstance(result[0], IntentMove)
     assert result[0].target_pos == (3.38, 0.0)
+
+
+def test_move_to_ball_near_opponent_defense_area_stops_at_touch_edge() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentMove(target_pos=(3.38, 0.0), target_orientation=None)),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=False,
+            avoid_ball_touch_in_opponent_defense_area=True,
+            goalie_box_avoid_margin=0.15,
+            defense_area_ball_touch_margin=0.18,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(2.0, 0.0), ball=(3.38, 0.0)), [1])
+
+    assert isinstance(result[0], IntentMove)
+    assert result[0].target_pos == pytest.approx((3.35, 0.0))
 
 
 def test_kick_is_blocked_when_ball_is_in_opponent_defense_area() -> None:

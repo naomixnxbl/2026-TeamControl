@@ -49,6 +49,10 @@ GOALIE_POSSESSION_DIST: float = 0.11
 GOALIE_POSSESSION_HEADING_TOL: float = 0.3
 CLEAR_HEADING_TOL: float = 0.4
 CLEAR_KICK_BEHIND_MARGIN: float = 0.04
+CLEAR_DRIBBLE_STEP_DIST: float = 0.18
+CLEAR_DRIBBLE_EDGE_BUFFER: float = 0.20
+CLEAR_DRIBBLE_MIN_STEP: float = 0.05
+GOALIE_BALL_INTERACTION_MARGIN: float = 0.18
 FIELD_HALF_X: float = 4.5
 GOALIE_BOX_DEPTH: float = 1.0
 GOALIE_BOX_HALF_WIDTH: float = 1.0
@@ -205,8 +209,19 @@ class GoToTarget(py_trees.behaviour.Behaviour):
                     bb.intent_source = "GoalieClearKick"
                     return py_trees.common.Status.SUCCESS
 
+                hold_target = _clear_dribble_target(
+                    self._tree,
+                    snap.ball_position,
+                )
+                if hold_target is None:
+                    bb.current_intent = IntentKick(
+                        target_pos=self._tree._clear_target
+                    )
+                    bb.intent_source = "GoalieClearKickNoDribbleRoom"
+                    return py_trees.common.Status.SUCCESS
+
                 bb.current_intent = IntentDribble(
-                    target_pos=self._tree._clear_target
+                    target_pos=hold_target
                 )
                 bb.intent_source = "GoalieHoldClear"
                 return py_trees.common.Status.SUCCESS
@@ -303,16 +318,26 @@ def _find_robot(snap: Snapshot, robot_id: int):
 
 
 def _inside_goalie_box(tree: GoalieTree, pos: tuple[float, float]) -> bool:
+    min_x, max_x, min_y, max_y = _goalie_box_bounds(tree)
     x, y = pos
+    margin = GOALIE_BALL_INTERACTION_MARGIN
+    return (
+        min_x - margin <= x <= max_x + margin
+        and min_y - margin <= y <= max_y + margin
+    )
+
+
+def _goalie_box_bounds(tree: GoalieTree) -> tuple[float, float, float, float]:
     side = 1.0 if tree._neutral_goal_position[0] >= 0.0 else -1.0
     inner_abs_x = FIELD_HALF_X - GOALIE_BOX_DEPTH + GOALIE_BOX_MARGIN
     outer_abs_x = FIELD_HALF_X - GOALIE_BOX_MARGIN
 
     if side > 0.0:
-        in_x = inner_abs_x <= x <= outer_abs_x
+        min_x, max_x = inner_abs_x, outer_abs_x
     else:
-        in_x = -outer_abs_x <= x <= -inner_abs_x
-    return in_x and abs(y) <= GOALIE_BOX_HALF_WIDTH - GOALIE_BOX_MARGIN
+        min_x, max_x = -outer_abs_x, -inner_abs_x
+    max_y = GOALIE_BOX_HALF_WIDTH - GOALIE_BOX_MARGIN
+    return (min_x, max_x, -max_y, max_y)
 
 
 def _angle_error(target: float, current: float) -> float:
@@ -360,3 +385,40 @@ def _ready_to_clear(
         <= CLEAR_HEADING_TOL
     )
     return behind_ball_for_clear and clear_heading_ready
+
+
+def _clear_dribble_target(
+    tree: GoalieTree,
+    ball: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Return a short in-box dribble target, or None when kick is safer.
+
+    The clear target is outside the goalie box by design. If the goalie
+    dribbles directly toward it, movement safety clamps the target to the
+    box boundary and the ball can get parked on that line. This target gives
+    the goalie a small amount of room to turn/settle without carrying the ball
+    to the edge; when there is no safe room left, the tree should kick.
+    """
+    ux, uy = _clear_direction(tree, ball)
+    min_x, max_x, min_y, max_y = _goalie_box_bounds(tree)
+    safe_min_x = min_x + CLEAR_DRIBBLE_EDGE_BUFFER
+    safe_max_x = max_x - CLEAR_DRIBBLE_EDGE_BUFFER
+
+    target_x = ball[0] + ux * CLEAR_DRIBBLE_STEP_DIST
+    target_y = ball[1] + uy * CLEAR_DRIBBLE_STEP_DIST
+
+    if ux > 0.0:
+        if ball[0] >= safe_max_x - CLEAR_DRIBBLE_MIN_STEP:
+            return None
+        target_x = min(target_x, safe_max_x)
+    elif ux < 0.0:
+        if ball[0] <= safe_min_x + CLEAR_DRIBBLE_MIN_STEP:
+            return None
+        target_x = max(target_x, safe_min_x)
+    else:
+        target_x = max(safe_min_x, min(safe_max_x, target_x))
+
+    target_y = max(min_y, min(max_y, target_y))
+    if math.hypot(target_x - ball[0], target_y - ball[1]) < CLEAR_DRIBBLE_MIN_STEP:
+        return None
+    return (target_x, target_y)

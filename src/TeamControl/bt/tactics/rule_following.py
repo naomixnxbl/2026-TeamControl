@@ -36,6 +36,8 @@ class MovementSafetyConfig:
     goalie_box_width: float = 2.0
     goalie_box_margin: float = 0.05
     goalie_box_avoid_margin: float = 0.15
+    goalie_box_exit_margin: float = 0.10
+    defense_area_ball_touch_margin: float = 0.18
 
     @classmethod
     def from_mapping(
@@ -80,6 +82,14 @@ def apply_rule_following(
         config=config,
         opponent_goal=opponent_goal,
     )
+    if config.keep_non_goalies_out_of_goalie_box and not is_goalie:
+        intent = _avoid_non_goalie_own_goalie_box_intent(
+            snapshot=snapshot,
+            robot_pos=robot_pos,
+            intent=intent,
+            config=config,
+            own_goal_line_x=own_goal_line_x,
+        )
     if not isinstance(intent, (IntentMove, IntentDribble)):
         return intent
 
@@ -211,21 +221,30 @@ def _avoid_opponent_defense_area_ball_touch(
     ):
         return intent
 
-    bounds = _opponent_defense_area_bounds(
+    avoid_margin = max(0.0, config.goalie_box_avoid_margin)
+    touch_margin = max(avoid_margin, config.defense_area_ball_touch_margin)
+    bounds = _opponent_defense_area_bounds(config, opponent_goal, expand=avoid_margin)
+    touch_bounds = _opponent_defense_area_bounds(
         config,
         opponent_goal,
-        expand=max(0.0, config.goalie_box_avoid_margin),
+        expand=touch_margin,
     )
     robot_in_area = _point_in_rect(robot_pos, bounds)
     ball_in_area = _point_in_rect(snapshot.ball_position, bounds)
+    ball_in_touch_area = _point_in_rect(snapshot.ball_position, touch_bounds)
+    ball_exit_bounds = (
+        bounds
+        if robot_in_area or ball_in_area
+        else touch_bounds
+    )
 
     if isinstance(intent, (IntentKick, IntentPass)):
-        if robot_in_area or ball_in_area:
+        if robot_in_area or ball_in_touch_area:
             return IntentMove(
                 target_pos=_attacker_foul_avoidance_target(
                     robot_pos,
                     snapshot.ball_position,
-                    bounds,
+                    ball_exit_bounds,
                 ),
                 target_orientation=None,
             )
@@ -238,9 +257,12 @@ def _avoid_opponent_defense_area_ball_touch(
                 target_pos=_nearest_box_exit(robot_pos, bounds),
                 target_orientation=None,
             )
-        if ball_in_area:
+        if ball_in_touch_area:
             return IntentMove(
-                target_pos=_nearest_box_exit(snapshot.ball_position, bounds),
+                target_pos=_nearest_box_exit(
+                    snapshot.ball_position,
+                    ball_exit_bounds,
+                ),
                 target_orientation=None,
             )
         if _point_in_rect(target, bounds):
@@ -261,10 +283,13 @@ def _avoid_opponent_defense_area_ball_touch(
                 intent,
                 target_pos=_nearest_box_exit(robot_pos, bounds),
             )
-        if ball_in_area:
+        if ball_in_touch_area:
             return replace(
                 intent,
-                target_pos=_nearest_box_exit(snapshot.ball_position, bounds),
+                target_pos=_nearest_box_exit(
+                    snapshot.ball_position,
+                    ball_exit_bounds,
+                ),
             )
 
     return intent
@@ -277,18 +302,108 @@ def _avoid_own_goalie_box(
     config: MovementSafetyConfig,
     own_goal_line_x: float,
 ) -> tuple[float, float]:
+    avoid_margin = max(0.0, config.goalie_box_avoid_margin)
+    touch_margin = max(avoid_margin, config.defense_area_ball_touch_margin)
     bounds = _goalie_box_bounds(
         config,
         own_goal_line_x,
-        expand=max(0.0, config.goalie_box_avoid_margin),
+        expand=avoid_margin,
     )
+    touch_bounds = _goalie_box_bounds(
+        config,
+        own_goal_line_x,
+        expand=touch_margin,
+    )
+    exit_margin = max(0.02, config.goalie_box_exit_margin)
     if _point_in_rect(robot_pos, bounds):
-        return _nearest_box_exit(robot_pos, bounds)
+        return _nearest_box_exit(robot_pos, bounds, pad=exit_margin)
     if _point_in_rect(target, bounds):
-        return _nearest_box_exit(target, bounds)
+        return _safe_box_exit_target(
+            robot_pos,
+            target,
+            bounds,
+            pad=exit_margin,
+        )
     if _segment_intersects_rect(robot_pos, target, bounds):
-        return _box_reroute_waypoint(robot_pos, target, bounds)
+        return _box_reroute_waypoint(
+            robot_pos,
+            target,
+            bounds,
+            pad=exit_margin,
+        )
     return target
+
+
+def _avoid_non_goalie_own_goalie_box_intent(
+    *,
+    snapshot: Snapshot,
+    robot_pos: tuple[float, float],
+    intent: Intent,
+    config: MovementSafetyConfig,
+    own_goal_line_x: float,
+) -> Intent:
+    avoid_margin = max(0.0, config.goalie_box_avoid_margin)
+    touch_margin = max(avoid_margin, config.defense_area_ball_touch_margin)
+    bounds = _goalie_box_bounds(
+        config,
+        own_goal_line_x,
+        expand=avoid_margin,
+    )
+    touch_bounds = _goalie_box_bounds(
+        config,
+        own_goal_line_x,
+        expand=touch_margin,
+    )
+    exit_margin = max(0.02, config.goalie_box_exit_margin)
+
+    if _point_in_rect(robot_pos, bounds):
+        return IntentMove(
+            target_pos=_nearest_box_exit(robot_pos, bounds, pad=exit_margin),
+            target_orientation=None,
+        )
+
+    ball_in_bounds = _point_in_rect(snapshot.ball_position, bounds)
+    ball_in_touch_bounds = _point_in_rect(snapshot.ball_position, touch_bounds)
+    ball_exit_bounds = bounds if ball_in_bounds else touch_bounds
+    if isinstance(intent, (IntentKick, IntentPass)) and ball_in_touch_bounds:
+        return IntentMove(
+            target_pos=_safe_box_exit_target(
+                robot_pos,
+                snapshot.ball_position,
+                ball_exit_bounds,
+                pad=exit_margin,
+            ),
+            target_orientation=None,
+        )
+
+    if (
+        isinstance(intent, IntentMove)
+        and ball_in_touch_bounds
+        and _is_ball_target(intent.target_pos, snapshot.ball_position)
+    ):
+        return IntentMove(
+            target_pos=_safe_box_exit_target(
+                robot_pos,
+                snapshot.ball_position,
+                ball_exit_bounds,
+                pad=exit_margin,
+            ),
+            target_orientation=None,
+            max_speed=intent.max_speed,
+        )
+
+    if isinstance(intent, IntentDribble) and ball_in_touch_bounds:
+        return IntentMove(
+            target_pos=_safe_box_exit_target(
+                robot_pos,
+                snapshot.ball_position,
+                ball_exit_bounds,
+                pad=exit_margin,
+            ),
+            target_orientation=None,
+        )
+
+    return intent
 
 
 def _goalie_box_bounds(
@@ -346,30 +461,68 @@ def _defense_area_bounds(
 def _nearest_box_exit(
     point: tuple[float, float],
     bounds: tuple[float, float, float, float],
+    pad: float = 0.02,
 ) -> tuple[float, float]:
+    candidates = _box_exit_candidates(point, bounds, pad=pad)
+    return min(candidates, key=lambda candidate: _distance(point, candidate))
+
+
+def _safe_box_exit_target(
+    robot_pos: tuple[float, float],
+    blocked_target: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+    pad: float = 0.02,
+) -> tuple[float, float]:
+    candidates = _box_exit_candidates(blocked_target, bounds, pad=pad)
+    safe_candidates = [
+        candidate
+        for candidate in candidates
+        if not _segment_intersects_rect(robot_pos, candidate, bounds)
+    ]
+    if not safe_candidates:
+        return _box_reroute_waypoint(
+            robot_pos,
+            blocked_target,
+            bounds,
+            pad=pad,
+        )
+    return min(
+        safe_candidates,
+        key=lambda candidate: (
+            _distance(blocked_target, candidate)
+            + 0.25 * _distance(robot_pos, candidate)
+        ),
+    )
+
+
+def _box_exit_candidates(
+    point: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+    pad: float = 0.02,
+) -> list[tuple[float, float]]:
     min_x, max_x, min_y, max_y = bounds
     x, y = point
-    pad = 0.02
+    pad = max(0.0, pad)
     center_x = (min_x + max_x) * 0.5
     if center_x >= 0.0:
         inner_candidate = (min_x - pad, _clamp(y, min_y, max_y))
     else:
         inner_candidate = (max_x + pad, _clamp(y, min_y, max_y))
-    candidates = [
+    return [
         inner_candidate,
         (_clamp(x, min_x, max_x), min_y - pad),
         (_clamp(x, min_x, max_x), max_y + pad),
     ]
-    return min(candidates, key=lambda candidate: _distance(point, candidate))
 
 
 def _box_reroute_waypoint(
     robot_pos: tuple[float, float],
     target: tuple[float, float],
     bounds: tuple[float, float, float, float],
+    pad: float = 0.02,
 ) -> tuple[float, float]:
     min_x, max_x, min_y, max_y = bounds
-    pad = 0.02
+    pad = max(0.0, pad)
     center_x = (min_x + max_x) * 0.5
     if center_x >= 0.0:
         inner_x = min_x - pad
@@ -390,6 +543,7 @@ def _box_entry_guard_point(
     robot_pos: tuple[float, float],
     target: tuple[float, float],
     bounds: tuple[float, float, float, float],
+    pad: float = 0.02,
 ) -> tuple[float, float]:
     """Return a point just before a segment enters a protected box."""
     min_x, max_x, min_y, max_y = bounds
@@ -397,7 +551,7 @@ def _box_entry_guard_point(
     tx, ty = target
     dx = tx - sx
     dy = ty - sy
-    pad = 0.02
+    pad = max(0.0, pad)
     candidates: list[tuple[float, float, float]] = []
 
     if abs(dx) > 1e-9:

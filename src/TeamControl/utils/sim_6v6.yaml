@@ -53,7 +53,17 @@ movement_safety:
   goalie_box_depth: 1.0
   goalie_box_width: 2.0
   goalie_box_margin: 0.05
+
+  # Extra distance outside the protected goalie-box boundary used for rewritten
+  # non-goalie targets. Increase this if robots still jitter at the boundary;
+  # decrease it if they stay too far away from the box.
   goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+
+  # Treat balls this close to a defense area as touch-risky even when the ball
+  # center is technically outside the box. This accounts for robot/ball size
+  # and prevents boundary-line contact edge cases.
+  defense_area_ball_touch_margin: 0.18
 
 # Tick period in seconds for each BT process (100 Hz = 0.01).
 tick_period: 0.01

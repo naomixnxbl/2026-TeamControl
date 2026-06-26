@@ -522,6 +522,22 @@ class TestDoBallTrajectory:
         assert tree.predicted_intercept == (-4.0, 0.2)
         assert bb.current_intent.target_pos == (-4.0, 0.2)
 
+    def test_goalie_clears_ball_just_outside_box_when_still_interactable(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-3.50, 0.0),
+            goalie_pos=(-3.58, 0.0),
+            goalie_orientation=0.0,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentKick)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (4.0, 0.0)
+
     def test_goalie_can_rush_ball_inside_goalie_box(self) -> None:
         snap = make_goalie_snapshot(
             ball_pos=(-4.0, 0.2),
@@ -585,6 +601,22 @@ class TestDoBallTrajectory:
         tree.tick(bb)
 
         assert isinstance(bb.current_intent, IntentDribble)
+        assert tree._rushing is True
+        assert bb.current_intent.target_pos == (-3.9, 0.0)
+
+    def test_goalie_does_not_dribble_clear_to_goalie_box_edge(self) -> None:
+        snap = make_goalie_snapshot(
+            ball_pos=(-3.64, 0.0),
+            goalie_pos=(-3.56, 0.0),
+            goalie_orientation=math.pi,
+        )
+        tree = GoalieTree(us_positive=False)
+        bb = _make_goalie_blackboard()
+
+        tree.set_snapshot(snap)
+        tree.tick(bb)
+
+        assert isinstance(bb.current_intent, IntentKick)
         assert tree._rushing is True
         assert bb.current_intent.target_pos == (4.0, 0.0)
 

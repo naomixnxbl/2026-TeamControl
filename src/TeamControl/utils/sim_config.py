@@ -31,6 +31,8 @@ _DEFAULT_MOVEMENT_SAFETY = {
     "goalie_box_width": 2.0,
     "goalie_box_margin": 0.05,
     "goalie_box_avoid_margin": 0.15,
+    "goalie_box_exit_margin": 0.10,
+    "defense_area_ball_touch_margin": 0.18,
 }
 
 
@@ -69,6 +71,8 @@ def _parse_movement_safety(raw: dict | None) -> dict[str, bool | float]:
         "goalie_box_width",
         "goalie_box_margin",
         "goalie_box_avoid_margin",
+        "goalie_box_exit_margin",
+        "defense_area_ball_touch_margin",
     ):
         if key in raw:
             out[key] = float(raw[key])
