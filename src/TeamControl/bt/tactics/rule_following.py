@@ -38,6 +38,7 @@ class MovementSafetyConfig:
     goalie_box_avoid_margin: float = 0.15
     goalie_box_exit_margin: float = 0.10
     defense_area_ball_touch_margin: float = 0.18
+    defense_area_dribble_kick_margin: float = 0.30
 
     @classmethod
     def from_mapping(
@@ -122,6 +123,28 @@ def _distance(
     b: tuple[float, float],
 ) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _distance_to_rect(
+    point: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+) -> float:
+    min_x, max_x, min_y, max_y = bounds
+    x, y = point
+    dx = max(min_x - x, 0.0, x - max_x)
+    dy = max(min_y - y, 0.0, y - max_y)
+    return math.hypot(dx, dy)
+
+
+def _should_kick_dribble_before_defense_area(
+    ball: tuple[float, float],
+    touch_bounds: tuple[float, float, float, float],
+    config: MovementSafetyConfig,
+) -> bool:
+    return (
+        _distance_to_rect(ball, touch_bounds)
+        <= max(0.0, config.defense_area_dribble_kick_margin)
+    )
 
 
 def _point_in_rect(
@@ -239,7 +262,7 @@ def _avoid_opponent_defense_area_ball_touch(
     )
 
     if isinstance(intent, (IntentKick, IntentPass)):
-        if robot_in_area or ball_in_touch_area:
+        if robot_in_area or ball_in_area:
             return IntentMove(
                 target_pos=_attacker_foul_avoidance_target(
                     robot_pos,
@@ -257,7 +280,7 @@ def _avoid_opponent_defense_area_ball_touch(
                 target_pos=_nearest_box_exit(robot_pos, bounds),
                 target_orientation=None,
             )
-        if ball_in_touch_area:
+        if ball_in_area:
             return IntentMove(
                 target_pos=_nearest_box_exit(
                     snapshot.ball_position,
@@ -265,6 +288,16 @@ def _avoid_opponent_defense_area_ball_touch(
                 ),
                 target_orientation=None,
             )
+        dribble_enters_area = (
+            _point_in_rect(target, bounds)
+            or _segment_intersects_rect(robot_pos, target, bounds)
+        )
+        if dribble_enters_area and _should_kick_dribble_before_defense_area(
+            snapshot.ball_position,
+            touch_bounds,
+            config,
+        ):
+            return IntentKick(target_pos=target)
         if _point_in_rect(target, bounds):
             return replace(intent, target_pos=_nearest_box_exit(target, bounds))
         if _segment_intersects_rect(robot_pos, target, bounds):

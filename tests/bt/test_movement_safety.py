@@ -307,6 +307,27 @@ def test_kick_is_blocked_when_ball_is_in_opponent_defense_area() -> None:
     assert result[0].target_pos == (3.38, 0.0)
 
 
+def test_kick_near_opponent_defense_area_is_allowed_before_ball_enters() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentKick(target_pos=(4.5, 0.0))),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=False,
+            avoid_ball_touch_in_opponent_defense_area=True,
+            goalie_box_avoid_margin=0.15,
+            defense_area_ball_touch_margin=0.18,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(3.2, 0.0), ball=(3.38, 0.0)), [1])
+
+    assert isinstance(result[0], IntentKick)
+    assert result[0].target_pos == (4.5, 0.0)
+
+
 def test_dribble_toward_opponent_defense_area_is_rerouted_to_edge() -> None:
     coord = Coordinator(
         trees=_trees(IntentDribble(target_pos=(4.5, 0.0))),
@@ -325,6 +346,28 @@ def test_dribble_toward_opponent_defense_area_is_rerouted_to_edge() -> None:
 
     assert isinstance(result[0], IntentDribble)
     assert result[0].target_pos == (3.38, 0.0)
+
+
+def test_dribble_near_opponent_defense_area_kicks_instead_of_parking_at_edge() -> None:
+    coord = Coordinator(
+        trees=_trees(IntentDribble(target_pos=(4.5, 0.0))),
+        us_positive=False,
+        role_assignment={1: RoleType.ATTACKER},
+        movement_safety=MovementSafetyConfig(
+            keep_robots_in_bounds=False,
+            keep_goalie_in_goal_box=False,
+            keep_non_goalies_out_of_goalie_box=False,
+            avoid_ball_touch_in_opponent_defense_area=True,
+            goalie_box_avoid_margin=0.15,
+            defense_area_ball_touch_margin=0.18,
+            defense_area_dribble_kick_margin=0.30,
+        ),
+    )
+
+    result = coord.tick(_snapshot(1, position=(3.2, 0.0), ball=(3.28, 0.0)), [1])
+
+    assert isinstance(result[0], IntentKick)
+    assert result[0].target_pos == (4.5, 0.0)
 
 
 def test_kick_from_inside_opponent_defense_area_moves_out_first() -> None:

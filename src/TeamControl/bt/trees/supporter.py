@@ -41,8 +41,17 @@ Known limitations
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 import math
+from pathlib import Path
 import py_trees
+import yaml
+
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import (
@@ -52,6 +61,9 @@ from TeamControl.bt.contracts.intent import (
     IntentPass,
 )
 from TeamControl.bt.contracts.snapshot import Snapshot
+
+BT_TUNING_FILENAME = "bt_tuning.yaml"
+LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 # -----------------------------------------------------------------------
 # Tuneable constants
@@ -78,6 +90,88 @@ REPOSITION_Y_MAX: float = 2.5
 
 PASS_ORIENT_TOL: float = 0.2
 PASS_SIGNAL_TIMEOUT_TICKS: int = 100
+
+
+@dataclass(frozen=True)
+class SupporterBehaviorConfig:
+    """Configurable supporter tree values."""
+
+    possession_dist: float = POSSESSION_DIST
+    possession_heading_tol: float = POSSESSION_HEADING_TOL
+    shoot_dist_threshold: float = SHOOT_DIST_THRESHOLD
+    marked_threshold: float = MARKED_THRESHOLD
+    attacker_id: int = ATTACKER_ID
+    attacker_pass_bonus: float = ATTACKER_PASS_BONUS
+    goal_proximity_weight: float = GOAL_PROXIMITY_WEIGHT
+    max_field_dist: float = MAX_FIELD_DIST
+    grid_step: float = GRID_STEP
+    reposition_x_min: float = REPOSITION_X_MIN
+    reposition_x_max: float = REPOSITION_X_MAX
+    reposition_y_min: float = REPOSITION_Y_MIN
+    reposition_y_max: float = REPOSITION_Y_MAX
+    pass_orient_tol: float = PASS_ORIENT_TOL
+    pass_signal_timeout_ticks: int = PASS_SIGNAL_TIMEOUT_TICKS
+
+
+def load_supporter_behavior_config(
+    config_filename: str | Path = BT_TUNING_FILENAME,
+) -> SupporterBehaviorConfig:
+    """Load supporter behavior config from yaml, preserving defaults."""
+
+    path = _resolve_utils_config_path(config_filename)
+
+    if not path.exists():
+        return SupporterBehaviorConfig()
+
+    with open(path, "r") as f:
+        raw = yaml.load(f, Loader) or {}
+    if not isinstance(raw, Mapping):
+        return SupporterBehaviorConfig()
+
+    section = _nested_mapping(raw, ("behavior_tree", "supporter"))
+    if section is None:
+        section = raw.get("supporter_behavior")
+    if not isinstance(section, Mapping):
+        return SupporterBehaviorConfig()
+
+    defaults = SupporterBehaviorConfig()
+    values = {}
+    for item in fields(SupporterBehaviorConfig):
+        default = getattr(defaults, item.name)
+        if item.name in section:
+            values[item.name] = _coerce_config_value(section[item.name], default)
+        else:
+            values[item.name] = default
+    return SupporterBehaviorConfig(**values)
+
+
+def _coerce_config_value(value, default):
+    if isinstance(default, int):
+        return int(value)
+    return float(value)
+
+
+def _resolve_utils_config_path(config_filename: str | Path) -> Path:
+    path = Path(config_filename)
+    if path.is_absolute():
+        return path
+
+    utils_dir = Path(__file__).resolve().parents[2] / "utils"
+    path = utils_dir / path
+    if path.exists() or path.name != BT_TUNING_FILENAME:
+        return path
+
+    legacy_path = utils_dir / LEGACY_HEURISTIC_WEIGHT_FILENAME
+    return legacy_path if legacy_path.exists() else path
+
+
+def _nested_mapping(raw: Mapping, keys: tuple[str, ...]) -> Mapping | None:
+    current: object = raw
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, Mapping) else None
 
 
 # -----------------------------------------------------------------------
@@ -178,13 +272,14 @@ class InPossession(py_trees.behaviour.Behaviour):
         dx = snap.ball_position[0] - robot.position[0]
         dy = snap.ball_position[1] - robot.position[1]
         dist = math.hypot(dx, dy)
-        if dist > POSSESSION_DIST:
+        config = self._tree.behavior_config
+        if dist > config.possession_dist:
             return py_trees.common.Status.FAILURE
 
         if not self._tree._pass_committed:
             angle_to_ball = math.atan2(dy, dx)
             err = (angle_to_ball - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-            if abs(err) > POSSESSION_HEADING_TOL:
+            if abs(err) > config.possession_heading_tol:
                 return py_trees.common.Status.FAILURE
 
         return py_trees.common.Status.SUCCESS
@@ -211,16 +306,19 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
         best_pos = None
         best_score = -1.0
         gx, gy = self._tree.goal_position
+        config = self._tree.behavior_config
 
         for r in snap.own_robots:
             if r.robot_id == GOALIE_ID or r.robot_id == bb.robot_id:
                 continue
 
             dist_to_goal = math.hypot(r.position[0] - gx, r.position[1] - gy)
-            goal_proximity = 1.0 - (dist_to_goal / MAX_FIELD_DIST)
+            goal_proximity = 1.0 - (dist_to_goal / config.max_field_dist)
 
-            if r.robot_id == ATTACKER_ID:
-                score = ATTACKER_PASS_BONUS * (1.0 + goal_proximity * GOAL_PROXIMITY_WEIGHT)
+            if r.robot_id == config.attacker_id:
+                score = config.attacker_pass_bonus * (
+                    1.0 + goal_proximity * config.goal_proximity_weight
+                )
             else:
                 if snap.opponent_robots:
                     min_opp_dist = min(
@@ -230,14 +328,16 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
                     )
                 else:
                     min_opp_dist = float("inf")
-                score = min_opp_dist * (1.0 + goal_proximity * GOAL_PROXIMITY_WEIGHT)
+                score = min_opp_dist * (
+                    1.0 + goal_proximity * config.goal_proximity_weight
+                )
 
             if score > best_score:
                 best_score = score
                 best_id = r.robot_id
                 best_pos = r.position
 
-        if best_id is None or best_score < MARKED_THRESHOLD:
+        if best_id is None or best_score < config.marked_threshold:
             return py_trees.common.Status.FAILURE
 
         self._tree._pass_target_id = best_id
@@ -276,7 +376,7 @@ class DribbleTowardTarget(py_trees.behaviour.Behaviour):
             tx - robot.position[0],
         )
         err = (angle_to_target - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(err) <= PASS_ORIENT_TOL:
+        if abs(err) <= self._tree.behavior_config.pass_orient_tol:
             return py_trees.common.Status.SUCCESS
 
         bb.current_intent = IntentDribble(target_pos=self._tree._pass_target_pos)
@@ -324,7 +424,7 @@ class ShootIfClose(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
         goal = self._tree.goal_position
         dist = math.hypot(robot.position[0] - goal[0], robot.position[1] - goal[1])
-        if dist > SHOOT_DIST_THRESHOLD:
+        if dist > self._tree.behavior_config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
         bb.current_intent = IntentKick(target_pos=goal)
         bb.intent_source = "ShootIfClose"
@@ -454,8 +554,8 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
                     best_pos = (cx, cy)
                     best_goal_dist = goal_dist
 
-                cy += GRID_STEP
-            cx += GRID_STEP
+                cy += t.behavior_config.grid_step
+            cx += t.behavior_config.grid_step
 
         angle_to_ball = math.atan2(
             snap.ball_position[1] - robot.position[1],
@@ -484,10 +584,20 @@ class SupporterTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self, us_positive: bool = True) -> None:
+    def __init__(
+        self,
+        us_positive: bool = True,
+        behavior_config: SupporterBehaviorConfig | None = None,
+        behavior_config_file: str = BT_TUNING_FILENAME,
+    ) -> None:
         self._snapshot: Snapshot | None = None
         self._blackboard_ref: list = [None]
         self.us_positive = us_positive
+        self.behavior_config = (
+            behavior_config
+            if behavior_config is not None
+            else load_supporter_behavior_config(behavior_config_file)
+        )
 
         self.goal_position: tuple[float, float] = (
             (-GOAL_POSITION[0], GOAL_POSITION[1]) if us_positive
@@ -509,13 +619,13 @@ class SupporterTree:
 
         # Reposition bounds (mirror x when us_positive=True)
         if us_positive:
-            self.repo_x_min = -REPOSITION_X_MAX
-            self.repo_x_max = -REPOSITION_X_MIN
+            self.repo_x_min = -self.behavior_config.reposition_x_max
+            self.repo_x_max = -self.behavior_config.reposition_x_min
         else:
-            self.repo_x_min = REPOSITION_X_MIN
-            self.repo_x_max = REPOSITION_X_MAX
-        self.repo_y_min = REPOSITION_Y_MIN
-        self.repo_y_max = REPOSITION_Y_MAX
+            self.repo_x_min = self.behavior_config.reposition_x_min
+            self.repo_x_max = self.behavior_config.reposition_x_max
+        self.repo_y_min = self.behavior_config.reposition_y_min
+        self.repo_y_max = self.behavior_config.reposition_y_max
         self._reposition_fallback: tuple[float, float] = (
             (self.repo_x_min + self.repo_x_max) / 2.0,
             (self.repo_y_min + self.repo_y_max) / 2.0,
@@ -539,7 +649,10 @@ class SupporterTree:
         # Age the pass signal and clear on timeout.
         if self._active_pass_target is not None:
             self._active_pass_target_age += 1
-            if self._active_pass_target_age > PASS_SIGNAL_TIMEOUT_TICKS:
+            if (
+                self._active_pass_target_age
+                > self.behavior_config.pass_signal_timeout_ticks
+            ):
                 self._active_pass_target = None
                 self._active_pass_target_age = 0
 

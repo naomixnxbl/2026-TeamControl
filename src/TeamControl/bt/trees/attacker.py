@@ -41,13 +41,25 @@ Design notes
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 import math
+from pathlib import Path
 import py_trees
+import yaml
+
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentDribble, IntentKick, IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import Snapshot
 from TeamControl.bt.tactics.line_of_sight import line_of_sight_clear
+
+BT_TUNING_FILENAME = "bt_tuning.yaml"
+LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 # -----------------------------------------------------------------------
 # Tuneable constants
@@ -95,6 +107,99 @@ PASS_LANE_CLEARANCE_FRAC: float = 0.02
 PASS_ORIENT_TOL: float = 0.2
 
 
+@dataclass(frozen=True)
+class AttackerBehaviorConfig:
+    """Configurable attacker tree values."""
+
+    ball_in_range_threshold: float = BALL_IN_RANGE_THRESHOLD
+    supporter_role_ids: tuple[int, ...] = SUPPORTER_ROLE_IDS
+    possession_dist: float = POSSESSION_DIST
+    possession_heading_tol: float = POSSESSION_HEADING_TOL
+    shot_corridor_radius: float = SHOT_CORRIDOR_RADIUS
+    shot_heading_tol: float = SHOT_HEADING_TOL
+    shot_settle_ticks: int = SHOT_SETTLE_TICKS
+    chase_slow_speed: float = CHASE_SLOW_SPEED
+    shoot_dist_threshold: float = SHOOT_DIST_THRESHOLD
+    wait_x: float = WAIT_X
+    wait_y_limit: float = FIELD_HALF_Y
+    pass_min_distance_frac: float = PASS_MIN_DISTANCE_FRAC
+    pass_backward_allowance_frac: float = PASS_BACKWARD_ALLOWANCE_FRAC
+    pass_marked_distance_frac: float = PASS_MARKED_DISTANCE_FRAC
+    pass_pressure_radius_frac: float = PASS_PRESSURE_RADIUS_FRAC
+    pass_lane_clearance_frac: float = PASS_LANE_CLEARANCE_FRAC
+    pass_orient_tol: float = PASS_ORIENT_TOL
+    pass_openness_weight: float = 0.45
+    pass_forward_score_weight: float = 0.25
+    pass_distance_score_weight: float = 0.20
+    pass_goal_proximity_weight: float = 0.10
+    pass_forward_scale_frac: float = 0.35
+    pass_ideal_distance_frac: float = 0.22
+    pass_distance_window_frac: float = 0.25
+
+
+def load_attacker_behavior_config(
+    config_filename: str | Path = BT_TUNING_FILENAME,
+) -> AttackerBehaviorConfig:
+    """Load attacker behavior config from yaml, preserving defaults."""
+
+    path = _resolve_utils_config_path(config_filename)
+
+    if not path.exists():
+        return AttackerBehaviorConfig()
+
+    with open(path, "r") as f:
+        raw = yaml.load(f, Loader) or {}
+    if not isinstance(raw, Mapping):
+        return AttackerBehaviorConfig()
+
+    section = _nested_mapping(raw, ("behavior_tree", "attacker"))
+    if section is None:
+        section = raw.get("attacker_behavior")
+    if not isinstance(section, Mapping):
+        return AttackerBehaviorConfig()
+
+    defaults = AttackerBehaviorConfig()
+    values = {}
+    for item in fields(AttackerBehaviorConfig):
+        default = getattr(defaults, item.name)
+        if item.name in section:
+            values[item.name] = _coerce_config_value(section[item.name], default)
+        else:
+            values[item.name] = default
+    return AttackerBehaviorConfig(**values)
+
+
+def _coerce_config_value(value, default):
+    if isinstance(default, tuple):
+        return tuple(int(item) for item in value)
+    if isinstance(default, int):
+        return int(value)
+    return float(value)
+
+
+def _resolve_utils_config_path(config_filename: str | Path) -> Path:
+    path = Path(config_filename)
+    if path.is_absolute():
+        return path
+
+    utils_dir = Path(__file__).resolve().parents[2] / "utils"
+    path = utils_dir / path
+    if path.exists() or path.name != BT_TUNING_FILENAME:
+        return path
+
+    legacy_path = utils_dir / LEGACY_HEURISTIC_WEIGHT_FILENAME
+    return legacy_path if legacy_path.exists() else path
+
+
+def _nested_mapping(raw: Mapping, keys: tuple[str, ...]) -> Mapping | None:
+    current: object = raw
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, Mapping) else None
+
+
 # -----------------------------------------------------------------------
 # Condition / action nodes
 # -----------------------------------------------------------------------
@@ -127,7 +232,8 @@ class HasBallControl(py_trees.behaviour.Behaviour):
         dx = snap.ball_position[0] - robot.position[0]
         dy = snap.ball_position[1] - robot.position[1]
         dist = math.hypot(dx, dy)
-        if dist > POSSESSION_DIST:
+        config = self._tree.behavior_config
+        if dist > config.possession_dist:
             self._tree._possession_ticks_by_robot[bb.robot_id] = 0
             self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
             return py_trees.common.Status.FAILURE
@@ -135,7 +241,7 @@ class HasBallControl(py_trees.behaviour.Behaviour):
         # Heading: ball must be in front of the kicker.
         angle_to_ball = math.atan2(dy, dx)
         err = (angle_to_ball - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(err) > POSSESSION_HEADING_TOL:
+        if abs(err) > config.possession_heading_tol:
             self._tree._possession_ticks_by_robot[bb.robot_id] = 0
             self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
             return py_trees.common.Status.FAILURE
@@ -161,7 +267,7 @@ class HasSettledPossession(py_trees.behaviour.Behaviour):
         if bb is None:
             return py_trees.common.Status.FAILURE
         ticks = self._tree._possession_ticks_by_robot.get(bb.robot_id, 0)
-        if ticks >= SHOT_SETTLE_TICKS:
+        if ticks >= self._tree.behavior_config.shot_settle_ticks:
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -194,19 +300,23 @@ class HasClearShot(py_trees.behaviour.Behaviour):
         dist_to_goal = math.hypot(
             robot.position[0] - goal[0], robot.position[1] - goal[1]
         )
-        if dist_to_goal > SHOOT_DIST_THRESHOLD:
+        config = self._tree.behavior_config
+        if dist_to_goal > config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
 
         angle_to_goal = math.atan2(
             goal[1] - robot.position[1], goal[0] - robot.position[0]
         )
         heading_err = (angle_to_goal - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(heading_err) > SHOT_HEADING_TOL:
+        if abs(heading_err) > config.shot_heading_tol:
             return py_trees.common.Status.FAILURE
 
         ball = snap.ball_position
         for opp in snap.opponent_robots:
-            if _point_to_segment_dist(opp.position, ball, goal) <= SHOT_CORRIDOR_RADIUS:
+            if (
+                _point_to_segment_dist(opp.position, ball, goal)
+                <= config.shot_corridor_radius
+            ):
                 return py_trees.common.Status.FAILURE
 
         return py_trees.common.Status.SUCCESS
@@ -241,7 +351,7 @@ class ChaseBall(py_trees.behaviour.Behaviour):
         )
         speed = None
         if not self._is_closest_to_ball(snap, robot, bb.robot_id):
-            speed = CHASE_SLOW_SPEED
+            speed = self._tree.behavior_config.chase_slow_speed
         bb.current_intent = IntentMove(
             target_pos=snap.ball_position,
             target_orientation=angle_to_ball,
@@ -289,7 +399,7 @@ class IsBallInRangeOrMove(py_trees.behaviour.Behaviour):
             snap.ball_position[0] - robot.position[0],
             snap.ball_position[1] - robot.position[1],
         )
-        if dist <= BALL_IN_RANGE_THRESHOLD:
+        if dist <= self._tree.behavior_config.ball_in_range_threshold:
             return py_trees.common.Status.SUCCESS
 
         # Ball out of range — write move intent and signal failure so the
@@ -314,7 +424,7 @@ class IsSupporterAvailable(py_trees.behaviour.Behaviour):
         if snap is None:
             return py_trees.common.Status.FAILURE
         for robot in snap.own_robots:
-            if robot.robot_id in SUPPORTER_ROLE_IDS:
+            if robot.robot_id in self._tree.behavior_config.supporter_role_ids:
                 return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -332,7 +442,7 @@ class PassToSupporter(py_trees.behaviour.Behaviour):
         if snap is None or bb is None:
             return py_trees.common.Status.FAILURE
         for robot in snap.own_robots:
-            if robot.robot_id in SUPPORTER_ROLE_IDS:
+            if robot.robot_id in self._tree.behavior_config.supporter_role_ids:
                 bb.current_intent = IntentPass(
                     target_robot_id=robot.robot_id,
                     target_pos=robot.position,
@@ -361,11 +471,15 @@ class ShouldLookForPass(py_trees.behaviour.Behaviour):
 
         goal = self._tree.goal_position
         field_scale = _field_scale(snap, goal)
-        pressure_radius = field_scale * PASS_PRESSURE_RADIUS_FRAC
+        pressure_radius = field_scale * self._tree.behavior_config.pass_pressure_radius_frac
         under_pressure = (
             _nearest_opponent_distance(snap, robot.position) <= pressure_radius
         )
-        shot_blocked = _goal_lane_blocked(snap, goal)
+        shot_blocked = _goal_lane_blocked(
+            snap,
+            goal,
+            self._tree.behavior_config,
+        )
 
         if shot_blocked or under_pressure:
             return py_trees.common.Status.SUCCESS
@@ -389,6 +503,7 @@ class FindOpenPassTarget(py_trees.behaviour.Behaviour):
             snap,
             bb.robot_id,
             self._tree.goal_position,
+            self._tree.behavior_config,
         )
         if target_id is None or target_pos is None:
             return py_trees.common.Status.FAILURE
@@ -425,7 +540,7 @@ class DribbleTowardPassTarget(py_trees.behaviour.Behaviour):
         err = (
             angle_to_target - robot.orientation + math.pi
         ) % (2 * math.pi) - math.pi
-        if abs(err) <= PASS_ORIENT_TOL:
+        if abs(err) <= self._tree.behavior_config.pass_orient_tol:
             return py_trees.common.Status.SUCCESS
 
         bb.current_intent = IntentDribble(target_pos=self._tree._pass_target_pos)
@@ -488,7 +603,7 @@ class IsCloseToGoal(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
         goal = self._tree.goal_position
         dist = math.hypot(robot.position[0] - goal[0], robot.position[1] - goal[1])
-        if dist > SHOOT_DIST_THRESHOLD:
+        if dist > self._tree.behavior_config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
         return py_trees.common.Status.SUCCESS
 
@@ -531,8 +646,13 @@ class WaitNearGoal(py_trees.behaviour.Behaviour):
         robot = _find_robot(snap, bb.robot_id)
         if robot is None:
             return py_trees.common.Status.FAILURE
-        wait_x = -WAIT_X if self._tree.us_positive else WAIT_X
-        wait_y = max(-FIELD_HALF_Y, min(FIELD_HALF_Y, snap.ball_position[1]))
+        wait_x = (
+            -self._tree.behavior_config.wait_x
+            if self._tree.us_positive
+            else self._tree.behavior_config.wait_x
+        )
+        wait_y_limit = self._tree.behavior_config.wait_y_limit
+        wait_y = max(-wait_y_limit, min(wait_y_limit, snap.ball_position[1]))
         angle_to_ball = math.atan2(
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
@@ -576,11 +696,21 @@ class AttackerTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self, us_positive: bool = True) -> None:
+    def __init__(
+        self,
+        us_positive: bool = True,
+        behavior_config: AttackerBehaviorConfig | None = None,
+        behavior_config_file: str = BT_TUNING_FILENAME,
+    ) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
+        self.behavior_config = (
+            behavior_config
+            if behavior_config is not None
+            else load_attacker_behavior_config(behavior_config_file)
+        )
         # Convention: us_positive=True means we are on +x, so the opponent
         # goal is at -x. GOAL_POSITION = (4.5, 0) is the un-mirrored "opp
         # goal" used when us_positive=False; negate x when us_positive=True.
@@ -698,6 +828,7 @@ def _find_best_pass_target(
     snap: Snapshot,
     passer_id: int,
     goal: tuple[float, float],
+    config: AttackerBehaviorConfig,
 ) -> tuple[int | None, tuple[float, float] | None]:
     passer = _find_robot(snap, passer_id)
     if passer is None:
@@ -705,10 +836,10 @@ def _find_best_pass_target(
 
     field_scale = _field_scale(snap, goal)
     attack_sign = 1.0 if goal[0] >= snap.ball_position[0] else -1.0
-    min_pass_distance = field_scale * PASS_MIN_DISTANCE_FRAC
-    backward_allowance = field_scale * PASS_BACKWARD_ALLOWANCE_FRAC
-    marked_distance = field_scale * PASS_MARKED_DISTANCE_FRAC
-    lane_clearance = field_scale * PASS_LANE_CLEARANCE_FRAC
+    min_pass_distance = field_scale * config.pass_min_distance_frac
+    backward_allowance = field_scale * config.pass_backward_allowance_frac
+    marked_distance = field_scale * config.pass_marked_distance_frac
+    lane_clearance = field_scale * config.pass_lane_clearance_frac
 
     best_id: int | None = None
     best_pos: tuple[float, float] | None = None
@@ -751,11 +882,13 @@ def _find_best_pass_target(
 
         openness = 1.0 if math.isinf(nearest_opp) else _clamp(nearest_opp / field_scale)
         forward_score = _clamp(
-            (forward_progress + backward_allowance) / (field_scale * 0.35)
+            (forward_progress + backward_allowance)
+            / (field_scale * config.pass_forward_scale_frac)
         )
-        ideal_pass_distance = field_scale * 0.22
+        ideal_pass_distance = field_scale * config.pass_ideal_distance_frac
         distance_score = 1.0 - _clamp(
-            abs(pass_distance - ideal_pass_distance) / (field_scale * 0.25)
+            abs(pass_distance - ideal_pass_distance)
+            / (field_scale * config.pass_distance_window_frac)
         )
         goal_proximity = 1.0 - _clamp(
             math.hypot(
@@ -766,10 +899,10 @@ def _find_best_pass_target(
         )
 
         score = (
-            0.45 * openness
-            + 0.25 * forward_score
-            + 0.20 * distance_score
-            + 0.10 * goal_proximity
+            config.pass_openness_weight * openness
+            + config.pass_forward_score_weight * forward_score
+            + config.pass_distance_score_weight * distance_score
+            + config.pass_goal_proximity_weight * goal_proximity
         )
         if score > best_score:
             best_score = score
@@ -779,9 +912,16 @@ def _find_best_pass_target(
     return best_id, best_pos
 
 
-def _goal_lane_blocked(snap: Snapshot, goal: tuple[float, float]) -> bool:
+def _goal_lane_blocked(
+    snap: Snapshot,
+    goal: tuple[float, float],
+    config: AttackerBehaviorConfig,
+) -> bool:
     field_scale = _field_scale(snap, goal)
-    clearance = max(SHOT_CORRIDOR_RADIUS, field_scale * PASS_LANE_CLEARANCE_FRAC)
+    clearance = max(
+        config.shot_corridor_radius,
+        field_scale * config.pass_lane_clearance_frac,
+    )
     return any(
         _point_to_segment_dist(opp.position, snap.ball_position, goal) <= clearance
         for opp in snap.opponent_robots

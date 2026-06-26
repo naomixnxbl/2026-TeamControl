@@ -65,5 +65,11 @@ movement_safety:
   # and prevents boundary-line contact edge cases.
   defense_area_ball_touch_margin: 0.18
 
+  # If an attacker is dribbling toward the opponent defense area and the ball is
+  # this close to the touch-risk boundary, kick instead of parking at the edge.
+  # Increase if attackers still freeze near the opponent goalie box; decrease if
+  # they shoot too early before carrying the ball into a useful position.
+  defense_area_dribble_kick_margin: 0.30
+
 # Tick period in seconds for each BT process (100 Hz = 0.01).
 tick_period: 0.01
