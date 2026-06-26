@@ -17,6 +17,8 @@ from TeamControl.process_workers.wm_runner import WMWorker
 from TeamControl.process_workers.robot_recv_runner import RobotRecv
 from TeamControl.world.model_manager import WorldModelManager
 from TeamControl.dispatcher.dispatch import Dispatcher
+from TeamControl.bt.run_bt_v2_process import run_bt_v2_process
+from TeamControl.utils.sim_config import Sim3v3Config, Sim6v6Config
 from TeamControl.utils.yaml_config import Config
 
 from TeamControl.robot.goalie import run_goalie
@@ -77,7 +79,16 @@ class SimEngine(QObject):
     log_message = Signal(str)            # log line
     onboard_packet = Signal(object, object)  # (OnboardObservation, addr)
 
-    MODES = ["vision_only", "goalie", "1v1", "obstacle", "coop", "6v6"]
+    MODES = [
+        "vision_only",
+        "goalie",
+        "1v1",
+        "obstacle",
+        "coop",
+        "6v6",
+        "bt_3v3",
+        "bt_6v6",
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -312,6 +323,41 @@ class SimEngine(QObject):
             procs.append(Process(target=run_team,
                                  args=(ev, dq, wm, False, opp_id),
                                  daemon=True))
+        elif mode in ("bt_3v3", "bt_6v6"):
+            sim = Sim3v3Config() if mode == "bt_3v3" else Sim6v6Config()
+            self.log_message.emit(
+                f"[engine] {mode}: yellow={sim.yellow_ids} "
+                f"blue={sim.blue_ids} "
+                f"roles={ {k: v.name for k, v in sim.roles.items()} }"
+            )
+            procs.append(Process(
+                target=run_bt_v2_process,
+                args=(ev, wm, dq),
+                kwargs=dict(
+                    is_yellow=True,
+                    robot_ids=sim.yellow_ids,
+                    role_assignment=sim.roles,
+                    heuristic_role_swap=sim.heuristic_role_swap,
+                    movement_safety=sim.movement_safety,
+                    tick_period=sim.tick_period,
+                ),
+                daemon=True,
+                name=f"{mode}_yellow",
+            ))
+            procs.append(Process(
+                target=run_bt_v2_process,
+                args=(ev, wm, dq),
+                kwargs=dict(
+                    is_yellow=False,
+                    robot_ids=sim.blue_ids,
+                    role_assignment=sim.roles,
+                    heuristic_role_swap=sim.heuristic_role_swap,
+                    movement_safety=sim.movement_safety,
+                    tick_period=sim.tick_period,
+                ),
+                daemon=True,
+                name=f"{mode}_blue",
+            ))
         return procs
 
     # ── Polling ───────────────────────────────────────────────────
