@@ -80,16 +80,18 @@ _PHASE_MAP = {
     GameState.HALTED:          GamePhase.HALTED,
     GameState.HALF_TIME:       GamePhase.HALF_TIME,
     GameState.STOPPED:         GamePhase.STOPPED,
-    GameState.PREPARE_KICKOFF: GamePhase.PREPARE_KICKOFF,
-    GameState.OPP_KICKOFF:    GamePhase.OPP_KICKOFF,
-    GameState.KICKOFF:         GamePhase.KICKOFF,
-    GameState.FREE_KICK:       GamePhase.FREE_KICK,
-    GameState.OPP_FREE_KICK:   GamePhase.OPP_FREE_KICK,
-    GameState.BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
-    GameState.PREPARE_PENALTY:     GamePhase.PREPARE_PENALTY,
-    GameState.PREPARE_PENALTY_OPP: GamePhase.PREPARE_PENALTY_OPP,
-    GameState.PENALTY_SHOOT:       GamePhase.PENALTY_SHOOT,
-    GameState.PENALTY_DEFEND:      GamePhase.PENALTY_DEFEND,
+    GameState.OUR_PREPARE_KICKOFF: GamePhase.PREPARE_KICKOFF,
+    GameState.ENEMY_PREPARE_KICKOFF: GamePhase.ENEMY_KICKOFF,
+    GameState.ENEMY_KICKOFF:    GamePhase.ENEMY_KICKOFF,
+    GameState.OUR_KICKOFF:         GamePhase.KICKOFF,
+    GameState.OUR_FREE_KICK:       GamePhase.FREE_KICK,
+    GameState.ENEMY_FREE_KICK:   GamePhase.ENEMY_FREE_KICK,
+    GameState.OUR_BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
+    GameState.ENEMY_BALL_PLACEMENT:  GamePhase.BALL_PLACEMENT,
+    GameState.OUR_PREPARE_PENALTY: GamePhase.PREPARE_PENALTY,
+    GameState.ENEMY_PREPARE_PENALTY: GamePhase.PREPARE_PENALTY_OPP,
+    GameState.OUR_PENALTY_SHOOTOUT: GamePhase.PENALTY_SHOOT,
+    GameState.ENEMY_PENALTY_SHOOTOUT: GamePhase.PENALTY_DEFEND,
     GameState.RUNNING:         GamePhase.RUNNING,
 }
 
@@ -100,11 +102,11 @@ def _phase_from_state(state) -> GamePhase:
     return _PHASE_MAP.get(state, GamePhase.RUNNING)
 
 
-_OPPONENT_PHASE_MAP = {
-    GamePhase.KICKOFF: GamePhase.OPP_KICKOFF,
-    GamePhase.OPP_KICKOFF: GamePhase.KICKOFF,
-    GamePhase.FREE_KICK: GamePhase.OPP_FREE_KICK,
-    GamePhase.OPP_FREE_KICK: GamePhase.FREE_KICK,
+_ENEMY_PHASE_MAP = {
+    GamePhase.KICKOFF: GamePhase.ENEMY_KICKOFF,
+    GamePhase.ENEMY_KICKOFF: GamePhase.KICKOFF,
+    GamePhase.FREE_KICK: GamePhase.ENEMY_FREE_KICK,
+    GamePhase.ENEMY_FREE_KICK: GamePhase.FREE_KICK,
     GamePhase.PREPARE_PENALTY: GamePhase.PREPARE_PENALTY_OPP,
     GamePhase.PREPARE_PENALTY_OPP: GamePhase.PREPARE_PENALTY,
     GamePhase.PENALTY_SHOOT: GamePhase.PENALTY_DEFEND,
@@ -118,7 +120,7 @@ def _phase_for_perspective(wm, is_yellow: bool) -> GamePhase:
     wm_yellow = bool(wm.us_yellow())
     if is_yellow == wm_yellow:
         return phase
-    return _OPPONENT_PHASE_MAP.get(phase, phase)
+    return _ENEMY_PHASE_MAP.get(phase, phase)
 
 
 def _mm_to_m(value: float) -> float:
@@ -165,7 +167,7 @@ def build_snapshot_from_world_model(
 
     ``active_robot_ids`` limits which same-colour robots are treated as
     controllable teammates. Same-colour robots outside this set are still
-    included as obstacles by moving them into ``opponent_robots``.
+    included as obstacles by moving them into ``enemy_robots``.
 
     Returns ``None`` when no vision frame has been received yet — callers
     should skip the tick in that case.
@@ -179,9 +181,9 @@ def build_snapshot_from_world_model(
     if is_yellow is None:
         is_yellow = bool(wm.us_yellow())
     own_team = frame.robots_yellow if is_yellow else frame.robots_blue
-    opp_team = frame.robots_blue if is_yellow else frame.robots_yellow
+    enemy_team = frame.robots_blue if is_yellow else frame.robots_yellow
     own_states = _team_to_states(own_team)
-    opponent_states = _team_to_states(opp_team)
+    enemy_states = _team_to_states(enemy_team)
     if active_robot_ids is not None:
         active_ids = {int(robot_id) for robot_id in active_robot_ids}
         active_own_states = tuple(
@@ -191,7 +193,7 @@ def build_snapshot_from_world_model(
             robot for robot in own_states if robot.robot_id not in active_ids
         )
         own_states = active_own_states
-        opponent_states = opponent_states + inactive_own_states
+        enemy_states = enemy_states + inactive_own_states
 
     get_placement = getattr(wm, "get_ball_placement_pos", None)
     raw_placement = get_placement() if get_placement is not None else None
@@ -201,7 +203,7 @@ def build_snapshot_from_world_model(
         ball_position=ball_pos,
         ball_velocity=ball_vel,
         own_robots=own_states,
-        opponent_robots=opponent_states,
+        enemy_robots=enemy_states,
         referee_state=RefereeState(
             game_phase=_phase_for_perspective(wm, is_yellow),
             score=(0, 0),  # TODO: read from wm.ref_data once exposed

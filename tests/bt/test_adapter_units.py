@@ -83,7 +83,7 @@ def _bt_snapshot(
                 orientation=robot_orientation,
             ),
         ),
-        opponent_robots=(),
+        enemy_robots=(),
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 
@@ -94,7 +94,7 @@ def test_build_snapshot_from_world_model_converts_mm_to_m():
     assert snapshot is not None
     assert snapshot.ball_position == (1.5, -2.5)
     assert snapshot.own_robots[0].position == (1.0, 2.0)
-    assert snapshot.opponent_robots[0].position == (-3.0, 0.5)
+    assert snapshot.enemy_robots[0].position == (-3.0, 0.5)
     assert snapshot.own_robots[0].orientation == 1.25
     assert snapshot.referee_state.game_phase == GamePhase.RUNNING
 
@@ -122,7 +122,7 @@ def test_build_snapshot_filters_inactive_same_colour_robots_as_obstacles():
 
     assert snapshot is not None
     assert [robot.robot_id for robot in snapshot.own_robots] == [0, 1, 2]
-    assert {robot.position for robot in snapshot.opponent_robots} == {
+    assert {robot.position for robot in snapshot.enemy_robots} == {
         (-1.0, 0.0),
         (3.0, 0.0),
     }

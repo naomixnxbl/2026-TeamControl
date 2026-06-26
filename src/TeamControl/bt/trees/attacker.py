@@ -312,7 +312,7 @@ class HasClearShot(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         ball = snap.ball_position
-        for opp in snap.opponent_robots:
+        for opp in snap.enemy_robots:
             if (
                 _point_to_segment_dist(opp.position, ball, goal)
                 <= config.shot_corridor_radius
@@ -866,7 +866,7 @@ def _find_best_pass_target(
         if nearest_opp < marked_distance:
             continue
 
-        obstacles = list(snap.opponent_robots)
+        obstacles = list(snap.enemy_robots)
         obstacles.extend(
             robot
             for robot in snap.own_robots
@@ -924,7 +924,7 @@ def _goal_lane_blocked(
     )
     return any(
         _point_to_segment_dist(opp.position, snap.ball_position, goal) <= clearance
-        for opp in snap.opponent_robots
+        for opp in snap.enemy_robots
     )
 
 
@@ -932,18 +932,18 @@ def _nearest_opponent_distance(
     snap: Snapshot,
     position: tuple[float, float],
 ) -> float:
-    if not snap.opponent_robots:
+    if not snap.enemy_robots:
         return math.inf
     return min(
         math.hypot(position[0] - opp.position[0], position[1] - opp.position[1])
-        for opp in snap.opponent_robots
+        for opp in snap.enemy_robots
     )
 
 
 def _field_scale(snap: Snapshot, goal: tuple[float, float]) -> float:
     points = [snap.ball_position, goal]
     points.extend(robot.position for robot in snap.own_robots)
-    points.extend(robot.position for robot in snap.opponent_robots)
+    points.extend(robot.position for robot in snap.enemy_robots)
 
     max_dist = math.hypot(FIELD_HALF_X * 2.0, FIELD_HALF_Y * 2.0)
     for i, point_a in enumerate(points):

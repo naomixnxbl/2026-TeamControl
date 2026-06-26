@@ -51,15 +51,23 @@ Point to:
 ## Run the UI
 python ui_main.py
 
+The UI starts the shared world model and world-map update worker. For the API
+used by robot behaviours and planners, see
+[`docs/active-world-map.md`](active-world-map.md#activation-and-api).
+
 ## Run TeamControl Headless
 python main.py
 
 Available modes:
 python main.py --mode goalie
 python main.py --mode 1v1
+python main.py --mode voronoi_test
 python main.py --mode obstacle
 python main.py --mode coop
 python main.py --mode 6v6
+
+`voronoi_test` is the quickest mode for seeing the active world map, planning
+obstacles, Voronoi map layer, and planned-path layer working together.
 
 ## Run With grSim
 To install grSim, please use one of the following. 
@@ -83,6 +91,13 @@ Basic flow:
 5. Check and Update `grSim Vision Port` and change to `10006` for ease of access
 5. Run `python ui_main.py`.
 
+Dashboard field controls such as placing the ball, placing robots, selecting a
+robot from the field, `Go to Ball`, and `Go to Ball & Kick` are guarded for
+simulation use. They require the UI engine to be running, a non-`6v6` mode, and
+`Send Commands to grSim` enabled. When placing the ball from the field, the
+dashboard draws an orange `X` at the requested point so you can compare the
+commanded location with the vision-reported ball.
+
 ## Troubleshooting
 Common checks:
 - Is the virtual environment active?
@@ -96,6 +111,7 @@ Common checks:
 ## Next Steps
 - Developers: `CONTRIBUTING.md`
 - Network ports: `docs/SSL-NetworkPorts.md`
+- Active world map API: `docs/active-world-map.md`
 - Multiprocessing internals: `docs/Multiprocessing.md`
 - Writing code: `https://www.turtlerabbit.org/docs/python-code-standards/`
 - RoboCup SSL Official GitHub Repositories: `https://github.com/RoboCup-SSL`

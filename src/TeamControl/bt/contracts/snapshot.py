@@ -20,12 +20,12 @@ class GamePhase(str, Enum):
     # Set-piece states (our team has the privilege)
     PREPARE_KICKOFF = "PREPARE_KICKOFF"   # move to kickoff positions
     KICKOFF = "KICKOFF"                   # attacker kicks off from centre
-    OPP_KICKOFF = "OPP_KICKOFF"          # opponent kickoff — all robots to own half
+    ENEMY_KICKOFF = "ENEMY_KICKOFF"          # enemy kickoff — all robots to own half
     FREE_KICK = "FREE_KICK"               # attacker takes free kick
-    OPP_FREE_KICK = "OPP_FREE_KICK"       # opponent free kick — keep 0.5m from ball
+    ENEMY_FREE_KICK = "ENEMY_FREE_KICK"       # enemy free kick — keep 0.5m from ball
     BALL_PLACEMENT = "BALL_PLACEMENT"     # we place the ball
     PREPARE_PENALTY = "PREPARE_PENALTY"   # pre-kick: position robots before we shoot
-    PREPARE_PENALTY_OPP = "PREPARE_PENALTY_OPP"  # pre-kick: position robots before opponent shoots
+    PREPARE_PENALTY_OPP = "PREPARE_PENALTY_OPP"  # pre-kick: position robots before enemy shoots
     PENALTY_SHOOT = "PENALTY_SHOOT"       # we shoot a penalty
     PENALTY_DEFEND = "PENALTY_DEFEND"     # we defend a penalty
     # Normal play
@@ -44,7 +44,7 @@ class RobotState:
 class RefereeState:
     """Referee-reported game state at a given tick."""
     game_phase: GamePhase
-    score: tuple[int, int]  # (own, opponent)
+    score: tuple[int, int]  # (own, enemy)
     # Target position for BALL_PLACEMENT — None in all other states.
     # Coordinates are in the same unit as robot/ball positions (metres).
     ball_placement_pos: tuple[float, float] | None = None
@@ -64,7 +64,7 @@ class Snapshot:
     ball_position: tuple[float, float]
     ball_velocity: tuple[float, float]
     own_robots: tuple[RobotState, ...]
-    opponent_robots: tuple[RobotState, ...]
+    enemy_robots: tuple[RobotState, ...]
     referee_state: RefereeState
 
     def __init__(
@@ -72,12 +72,12 @@ class Snapshot:
         ball_position: tuple[float, float],
         ball_velocity: tuple[float, float],
         own_robots: Sequence[RobotState],
-        opponent_robots: Sequence[RobotState],
+        enemy_robots: Sequence[RobotState],
         referee_state: RefereeState,
     ) -> None:
         # Use object.__setattr__ because the dataclass is frozen.
         object.__setattr__(self, "ball_position", tuple(ball_position))
         object.__setattr__(self, "ball_velocity", tuple(ball_velocity))
         object.__setattr__(self, "own_robots", tuple(own_robots))
-        object.__setattr__(self, "opponent_robots", tuple(opponent_robots))
+        object.__setattr__(self, "enemy_robots", tuple(enemy_robots))
         object.__setattr__(self, "referee_state", referee_state)

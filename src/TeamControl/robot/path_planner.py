@@ -13,7 +13,7 @@ import math
 from typing import Tuple, Optional
 
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.constants import MAX_W, PP_GAIN, PP_MIN_IMPULSE, HALF_WID
+from TeamControl.robot.constants import MAX_W, PP_GAIN, PP_MIN_IMPULSE
 
 
 def clamp(value: float, lo: float, hi: float) -> float:

@@ -44,6 +44,54 @@ def _send_stop_commands(
         if not dispatcher_q.full():
             dispatcher_q.put([cmd, 0.1])
 
+
+def _intent_debug(intent) -> tuple[str | None, tuple[float, float] | None]:
+    """Return the small intent summary consumed by the Qt dashboard."""
+    if intent is None:
+        return None, None
+    intent_type = type(intent).__name__
+    if intent_type.startswith("Intent"):
+        intent_type = intent_type[len("Intent"):]
+    target = getattr(intent, "target_pos", None)
+    return intent_type.upper(), target
+
+
+def _pack_bt_state(
+    *,
+    tick_count: int,
+    is_yellow: bool,
+    snapshot,
+    coordinator: Coordinator,
+    robot_ids: list[int],
+) -> dict:
+    """Build the lightweight BT state packet displayed in the dashboard."""
+    robot_map = {robot.robot_id: robot for robot in snapshot.own_robots}
+    robots = []
+    for rid in robot_ids:
+        bb = coordinator.blackboards.get(rid)
+        robot = robot_map.get(rid)
+        intent_type, intent_target = _intent_debug(
+            None if bb is None else bb.current_intent
+        )
+        robots.append(
+            {
+                "id": rid,
+                "role": "UNKNOWN" if bb is None else bb.current_role.value,
+                "pos": None if robot is None else robot.position,
+                "ori": None if robot is None else robot.orientation,
+                "intent_type": intent_type,
+                "intent_target": intent_target,
+                "intent_source": None if bb is None else bb.intent_source,
+            }
+        )
+    return {
+        "tick": tick_count,
+        "phase": snapshot.referee_state.game_phase.value,
+        "ball": snapshot.ball_position,
+        "is_yellow": is_yellow,
+        "robots": robots,
+    }
+
 # Robot ids 0..5 — matches Coordinator.ROLE_ASSIGNMENT.
 DEFAULT_ROBOT_IDS: list[int] = [0, 1, 2, 3, 4, 5]
 
@@ -90,6 +138,7 @@ def run_bt_v2_process(
     movement_safety: dict[str, bool | float] | None = None,
     tick_period: float = TICK_PERIOD,
     config_file: str = "ipconfig.yaml",
+    bt_state_q: Queue | None = None,
 ) -> None:
     """Tick the v2 (TurtleRabbitBT) coordinator in a child process.
 
@@ -108,6 +157,7 @@ def run_bt_v2_process(
         movement_safety: optional movement guard rails from sim_6v6.yaml.
         tick_period: seconds to sleep between ticks.
         config_file: path to yaml config (relative to utils/).
+        bt_state_q: optional GUI queue for compact BT inspector state.
     """
     if robot_ids is None:
         robot_ids = DEFAULT_ROBOT_IDS
@@ -154,6 +204,20 @@ def run_bt_v2_process(
             coordinator.tick(snapshot, robot_ids)
 
             tick_count += 1
+
+            if bt_state_q is not None and tick_count % 30 == 0:
+                try:
+                    bt_state_q.put_nowait(
+                        _pack_bt_state(
+                            tick_count=tick_count,
+                            is_yellow=is_yellow,
+                            snapshot=snapshot,
+                            coordinator=coordinator,
+                            robot_ids=robot_ids,
+                        )
+                    )
+                except Exception:
+                    pass
 
             # Print intents every 100 ticks (~1 sec)
             if tick_count % 100 == 0:

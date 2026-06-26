@@ -31,7 +31,7 @@ def _make_snapshot(robot_ids: list[int]) -> Snapshot:
         ball_position=(0.0, 0.0),
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 

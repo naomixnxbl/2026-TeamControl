@@ -117,12 +117,13 @@ class SSL_Multicast(Receiver):
     
     @staticmethod
     def _get_vision_ip() -> str:
-        """Get vision network interface IP from ipconfig.yaml, fallback 192.168.1.2."""
+        """Get vision network interface IP from ipconfig.yaml, fallback 0.0.0.0 (all interfaces)."""
         try:
             from TeamControl.utils.yaml_config import Config
             cfg = Config()
             return cfg.vision_ip
         except Exception:
+            return "0.0.0.0"
             return "0.0.0.0"
 
     def _add_group(self):

@@ -81,7 +81,7 @@ def make_goalie_snapshot(
                 orientation=goalie_orientation,
             )
         ],
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 

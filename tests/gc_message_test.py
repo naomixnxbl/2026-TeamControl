@@ -1,17 +1,31 @@
-## this is for testing parsing and connectivity
-from TeamControl.network.ssl_sockets import GameControl
-from TeamControl.SSL.game_controller.Message import RefereeMessage
+"""Integration check for receiving SSL game-controller messages."""
+
+import os
 import time
+from multiprocessing import Event
 
-gc_recv = GameControl()
+import pytest
 
-for i in range(5):
-    ref_msg,_ = gc_recv.listen()
+from TeamControl.SSL.game_controller.Message import RefereeMessage
+from TeamControl.network.ssl_sockets import GameControl
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.skipif(
+    os.getenv("TEAMCONTROL_RUN_NETWORK_TESTS") != "1",
+    reason="Set TEAMCONTROL_RUN_NETWORK_TESTS=1 to run live network tests.",
+)
+def test_game_controller_message_can_be_received_and_parsed():
+    is_running = Event()
+    is_running.set()
+    gc_recv = GameControl(is_running=is_running)
+
+    ref_msg = gc_recv.listen()
     start_time = time.time()
-    new_ref_msg = RefereeMessage.from_proto(referee=ref_msg)
-    elapsed = (time.time() - start_time) * 1000  # milliseconds
-    total_elapsed = (time.time() - new_ref_msg.packet_timestamp / 1_000_000) * 1000
-    print(f"internal process time :{elapsed:.3f} ms\t\n"+
-            f"recv + process time :{total_elapsed:.3f} ms\t\n"+
-            f"{(new_ref_msg.command)}\t  {new_ref_msg.stage}\n"
-            )
+    parsed = RefereeMessage.from_proto(referee=ref_msg)
+    elapsed_ms = (time.time() - start_time) * 1000
+
+    assert parsed is not None
+    assert elapsed_ms >= 0.0

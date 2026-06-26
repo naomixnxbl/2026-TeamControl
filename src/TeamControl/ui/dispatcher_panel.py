@@ -83,7 +83,6 @@ class DispatcherPanel(QWidget):
         self._cmd_table.setAlternatingRowColors(True)
         self._cmd_table.verticalHeader().setVisible(False)
         self._cmd_table.setShowGrid(True)
-        self._cmd_table.setPlaceholderText("No active commands")
         hh = self._cmd_table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Stretch)
         hh.setMinimumSectionSize(45)
@@ -196,7 +195,7 @@ class DispatcherPanel(QWidget):
         else:
             self._state_lbl.setText("IDLE")
             self._state_lbl.setStyleSheet(f"color:{TEXT_DIM};")
-            self._cmd_table.setRowCount(0)
+            self._update_cmd_table({})
             self._raw_text.clear()
             self._queue_lbl.setText("—")
             self._active_lbl.setText("0")
@@ -227,6 +226,17 @@ class DispatcherPanel(QWidget):
         self._update_lbl.setText(QTime.currentTime().toString("HH:mm:ss.zzz"))
 
     def _update_cmd_table(self, commands: dict):
+        self._cmd_table.clearSpans()
+        if not commands:
+            self._cmd_table.setRowCount(1)
+            item = QTableWidgetItem("No active commands")
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setForeground(QColor(TEXT_DIM))
+            item.setFlags(Qt.ItemIsEnabled)
+            self._cmd_table.setItem(0, 0, item)
+            self._cmd_table.setSpan(0, 0, 1, len(self.CMD_COLS))
+            return
+
         self._cmd_table.setRowCount(len(commands))
         for row, (rid, c) in enumerate(commands.items()):
             team = "Yellow" if c["isYellow"] else "Blue"

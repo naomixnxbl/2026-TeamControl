@@ -33,7 +33,7 @@ def _snapshot(
         own_robots=[
             RobotState(robot_id=robot_id, position=position, orientation=0.0)
         ],
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(game_phase=phase, score=(0, 0)),
     )
 

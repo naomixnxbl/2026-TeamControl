@@ -21,10 +21,10 @@ import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
-    QPushButton, QFrame, QDoubleSpinBox, QSpinBox,
+    QPushButton, QFrame, QDoubleSpinBox, QSpinBox, QComboBox,
     QPlainTextEdit, QProgressBar, QScrollArea, QGridLayout,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QFont
 
 from TeamControl.ui.theme import (
@@ -33,11 +33,11 @@ from TeamControl.ui.theme import (
 )
 from TeamControl.ui.field_canvas import FieldCanvas
 from TeamControl.network.robot_command import RobotCommand
-from TeamControl.network.sender import Sender
-from TeamControl.network.ssl_sockets import grSimSender
-from TeamControl.robot.constants import HALF_LEN, HALF_WID, FIELD_MARGIN, MAX_W
+from TeamControl.robot.constants import FIELD_MARGIN, MAX_W
+from TeamControl.world.field_config import FIELD_LENGTH_MM, FIELD_WIDTH_MM
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import clamp, move_toward, wall_brake
+from TeamControl.robot.ball_nav import clamp, move_toward
+from TeamControl.utils.yaml_config import Config
 
 
 # ── Constants ─────────────────────────────────────────────────────
@@ -81,6 +81,28 @@ def _val_label(text="—"):
     return lbl
 
 
+class _SquareFieldContainer(QWidget):
+    """Keep the calibration field canvas square inside the splitter pane."""
+
+    def __init__(self, field: FieldCanvas, parent=None):
+        super().__init__(parent)
+        self._field = field
+        self._field.setParent(self)
+        self._field.setMinimumSize(0, 0)
+        self.setMinimumSize(520, 520)
+        self.setStyleSheet(f"background:{BG_DARK};")
+
+    def resizeEvent(self, event):
+        side = min(self.width(), self.height())
+        x = (self.width() - side) // 2
+        y = (self.height() - side) // 2
+        self._field.setGeometry(x, y, side, side)
+        super().resizeEvent(event)
+
+    def sizeHint(self):
+        return QSize(760, 760)
+
+
 class CalibrationPage(QWidget):
     """Calibration tab — auto-learn speed scale and drift correction."""
 
@@ -89,7 +111,7 @@ class CalibrationPage(QWidget):
         self._engine = engine
         self._test_panel = test_panel
         self._our_id_spin = None
-        self._sender = Sender("192.168.1.2")
+        self._robots = []
 
         # ── Load existing calibration ─────────────────────────
         self._cal = self._load_cal()
@@ -103,7 +125,8 @@ class CalibrationPage(QWidget):
 
         # Left: field canvas (separate widget from Dashboard — must wire signals here)
         self._field = FieldCanvas()
-        splitter.addWidget(self._field)
+        field_box = _SquareFieldContainer(self._field)
+        splitter.addWidget(field_box)
         if self._test_panel is not None:
             self._field.point_picked.connect(self._test_panel.go_to_point)
             self._field.action_requested.connect(self._test_panel.field_action)
@@ -174,6 +197,8 @@ class CalibrationPage(QWidget):
         self._stop_pose = None
         self._test_speed = 0.0
         self._line_y = 0.0          # ideal Y for drift measurement
+        self._field_half_len = FIELD_LENGTH_MM / 2.0
+        self._field_half_wid = FIELD_WIDTH_MM / 2.0
 
         self._ideal_heading = 0.0   # heading to hold during runs
 
@@ -193,12 +218,58 @@ class CalibrationPage(QWidget):
     def set_our_bot_spin(self, spin):
         self._our_id_spin = spin
 
+    def _load_robot_choices(self):
+        if not hasattr(self, "_robot_combo"):
+            return
+        current = self._robot_combo.currentData()
+        self._robots = []
+        self._robot_combo.clear()
+        try:
+            cfg = Config()
+        except Exception:
+            self._robot_combo.addItem("Yellow shell 0", (0, True))
+            return
+
+        for team_name, team_data, is_yellow in (
+            ("Yellow", cfg.yellow, True),
+            ("Blue", cfg.blue, False),
+        ):
+            if not team_data:
+                continue
+            for key, rd in team_data.items():
+                shell_id = int(rd.get("shellID", 0))
+                label = (
+                    f"{team_name} {key}  shell {shell_id}  "
+                    f"{rd.get('ip', '127.0.0.1')}:{rd.get('port', 50514)}"
+                )
+                data = (shell_id, is_yellow)
+                self._robots.append(data)
+                self._robot_combo.addItem(label, data)
+
+        if self._robot_combo.count() == 0:
+            self._robot_combo.addItem("Yellow shell 0", (0, True))
+        elif current is not None:
+            idx = self._robot_combo.findData(current)
+            if idx >= 0:
+                self._robot_combo.setCurrentIndex(idx)
+
     # ══════════════════════════════════════════════════════════════
     #  UI Builders
     # ══════════════════════════════════════════════════════════════
 
     def _build_settings_card(self, parent_lay):
         card, lay = _card("Test Settings")
+
+        robot_row = QHBoxLayout()
+        robot_row.addWidget(_label("Robot:"))
+        self._robot_combo = QComboBox()
+        self._robot_combo.setMinimumWidth(180)
+        robot_row.addWidget(self._robot_combo, 1)
+        reload_btn = QPushButton("Reload")
+        reload_btn.clicked.connect(self._load_robot_choices)
+        robot_row.addWidget(reload_btn)
+        lay.addLayout(robot_row)
+        self._load_robot_choices()
 
         # Speed
         row = QHBoxLayout()
@@ -379,6 +450,12 @@ class CalibrationPage(QWidget):
     #  Frame polling
     # ══════════════════════════════════════════════════════════════
 
+    def set_field_geometry(self, field):
+        """Refresh the canvas and calibration waypoint bounds from vision."""
+        self._field.set_field_geometry(field)
+        self._field_half_len = float(field.field_length) / 2.0
+        self._field_half_wid = float(field.field_width) / 2.0
+
     def _poll_frame(self):
         if not self._engine or not self._engine._wm:
             return
@@ -386,7 +463,7 @@ class CalibrationPage(QWidget):
             frame = self._engine._wm.get_latest_frame()
             if frame is None:
                 return
-            snap = self._engine._extract_snapshot(frame)
+            snap = self._engine._wm.snapshot()
             self._field.set_frame(snap)
         except Exception:
             pass
@@ -396,6 +473,10 @@ class CalibrationPage(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _get_rid_and_yellow(self):
+        if hasattr(self, "_robot_combo"):
+            data = self._robot_combo.currentData()
+            if data is not None:
+                return int(data[0]), bool(data[1])
         rid = self._our_id_spin.value() if self._our_id_spin else 0
         cfg = self._engine.config if self._engine else None
         is_yellow = cfg.us_yellow if cfg else True
@@ -423,8 +504,9 @@ class CalibrationPage(QWidget):
         cmd = RobotCommand(
             robot_id=rid, vx=vx, vy=vy, w=w,
             kick=kick, dribble=dribble, isYellow=is_yellow)
-        if self._test_panel:
-            self._test_panel._do_send(cmd)
+        if self._engine and self._engine.send_robot_command(cmd, runtime=0.20):
+            return
+        self._set_status("Start the engine before sending calibration commands", DANGER)
 
     def _send_stop(self):
         self._send_cmd()
@@ -544,8 +626,9 @@ class CalibrationPage(QWidget):
 
     def _begin_pass(self):
         """Set up waypoints for one pass and start."""
-        left_x = -HALF_LEN + _MARGIN
-        right_x = HALF_LEN - _MARGIN
+        margin = min(_MARGIN, max(self._field_half_len - 200.0, 0.0))
+        left_x = -self._field_half_len + margin
+        right_x = self._field_half_len - margin
         y = self._line_y
 
         if self._direction == 1:
@@ -632,7 +715,6 @@ class CalibrationPage(QWidget):
         # Move to start using ball_nav functions
         vx, vy = move_toward(rel, _NAV_SPEED, ramp_dist=300, stop_dist=50)
         w = clamp(angle * _TURN_GAIN, -MAX_W, MAX_W)
-        vx, vy = wall_brake(pose[0], pose[1], vx, vy)
         self._send_cmd(vx=vx, vy=vy, w=w)
 
     def _tick_running(self, pose):
@@ -697,9 +779,6 @@ class CalibrationPage(QWidget):
             half = -w * dt * 0.5
             c, s = math.cos(half), math.sin(half)
             vx_r, vy_r = vx_r * c - vy_r * s, vx_r * s + vy_r * c
-
-        # ── 6. Wall brake ───────────────────────────────────────
-        vx_r, vy_r = wall_brake(pose[0], pose[1], vx_r, vy_r)
 
         self._send_cmd(vx=vx_r, vy=vy_r, w=w)
 

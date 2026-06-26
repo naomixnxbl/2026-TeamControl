@@ -38,7 +38,7 @@ def _make_snapshot(
                 orientation=robot_orientation,
             )
         ],
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(
             game_phase=GamePhase.RUNNING,
             score=(0, 0),

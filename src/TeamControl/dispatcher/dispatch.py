@@ -22,6 +22,9 @@ class Dispatcher(BaseWorker):
         self.running_commands = {}
         self._info_q = None
         self._last_info_time = 0
+        self._grsim_send_counts = {}
+        self._grsim_errors = {}
+        self._last_grsim_error = None
         
     
     def setup(self,*args):
@@ -37,10 +40,13 @@ class Dispatcher(BaseWorker):
         self.yellow = config.yellow
         self.blue = config.blue
         self.r_sender = Sender(device_ip=config.robot_ip)
+        self.g_sender = None
         if self.send_to_grSim is True:
-            self.g_sender = grSimSender(*config.grSim_addr)
-        else:
-            self.g_sender = None
+            try:
+                self.g_sender = grSimSender(*config.grSim_addr)
+            except Exception as exc:
+                self._last_grsim_error = f"{type(exc).__name__}: {exc}"
+                self.send_to_grSim = False
 
         # Build shell ID lookup caches for O(1) lookups
         self._yellow_shell_cache = {}
@@ -107,17 +113,27 @@ class Dispatcher(BaseWorker):
     def check_new_commands(self):
         while not self.q.empty():
             queue_item = self.q.get_nowait()
-            command, runtime = queue_item
-            self.add(command, runtime)
+            if len(queue_item) >= 3:
+                command, runtime, source = queue_item[:3]
+            else:
+                command, runtime = queue_item
+                source = "auto"
+            self.add(command, runtime, source)
         
 
     # Add a new command to the running commands and replace existing commands
     # for the robot with the same ID
-    def add(self, command: RobotCommand, run_time: float):
+    def add(self, command: RobotCommand, run_time: float, source: str = "auto"):
         robot_id = command.robot_id
         isYellow = command.isYellow
         key = (robot_id, isYellow)
-        self.running_commands[key] = {"isYellow": isYellow,"command": command, "runtime": run_time, "start_time": time.time()}
+        self.running_commands[key] = {
+            "isYellow": isYellow,
+            "command": command,
+            "runtime": run_time,
+            "start_time": time.time(),
+            "source": source,
+        }
         self.logger.debug(f"[{robot_id=},{isYellow=}] New command added for {run_time}s , command: {command}")
         
     # Check if any commands have expired
@@ -142,7 +158,13 @@ class Dispatcher(BaseWorker):
         reset_command = RobotCommand(robot_id=robot_id, vx=0, vy=0, w=0, kick=0, dribble=0,isYellow=isYellow)
         self.logger.debug(f"[{isYellow=} {robot_id}] Reset to idle command")
 
-        self.running_commands[key] = {"isYellow" : isYellow, "command": reset_command, "runtime": 9999999, "start_time": time.time()}
+        self.running_commands[key] = {
+            "isYellow": isYellow,
+            "command": reset_command,
+            "runtime": 9999999,
+            "start_time": time.time(),
+            "source": "reset",
+        }
 
     def reset_all_robots(self):
         for key in list(self.running_commands.keys()):
@@ -156,19 +178,26 @@ class Dispatcher(BaseWorker):
         for key, packet in self.running_commands.items():
             command = packet["command"]
             # if time.time() >= self.last_sent_time + 0.01:
-            self.send_command(command, now)
+            self.send_command(command, now, packet.get("source", "auto"))
 
-    def send_command(self, command:RobotCommand, now=None):
+    def send_command(self, command:RobotCommand, now=None, source: str = "auto"):
         if now is None:
             now = time.time()
         shell_id = command.robot_id
         isYellow = command.isYellow
-        if (shell_id, isYellow) in self._manual_field_blocked:
+        if (shell_id, isYellow) in self._manual_field_blocked and source != "manual":
             return
         robot_dict = self.get_dict_from_shell(shell_id,isYellow)
 
-        if self.send_to_grSim is True:
-            self.g_sender.send_robot_command(command,override_id=robot_dict["grSimID"])
+        if self.send_to_grSim is True and self.g_sender is not None:
+            try:
+                self.g_sender.send_robot_command(command,override_id=robot_dict["grSimID"])
+                key = (shell_id, isYellow)
+                self._grsim_send_counts[key] = self._grsim_send_counts.get(key, 0) + 1
+            except Exception as exc:
+                key = (shell_id, isYellow)
+                self._grsim_errors[key] = self._grsim_errors.get(key, 0) + 1
+                self._last_grsim_error = f"{type(exc).__name__}: {exc}"
 
         key = (shell_id, isYellow)
         last = self._last_sent_per_robot.get(key, 0)
@@ -200,10 +229,15 @@ class Dispatcher(BaseWorker):
                     "ip": self.get_dict_from_shell(cmd.robot_id, cmd.isYellow).get("ip", "?"),
                     "port": self.get_dict_from_shell(cmd.robot_id, cmd.isYellow).get("port", 0),
                     "sends": self._send_counts.get(key, 0),
+                    "grsim_sends": self._grsim_send_counts.get(key, 0),
+                    "grsim_errors": self._grsim_errors.get(key, 0),
+                    "source": pkt.get("source", "auto"),
                 }
             info = {
                 "commands": cmds,
                 "send_to_grSim": self.send_to_grSim,
+                "grsim_sender_ready": self.g_sender is not None,
+                "last_grsim_error": self._last_grsim_error,
                 "queue_size": self.q.qsize() if hasattr(self.q, "qsize") else -1,
                 "yellow_shells": {sid: {"ip": d.get("ip"), "port": d.get("port"),
                                         "grSimID": d.get("grSimID")}

@@ -94,7 +94,7 @@ def make_snapshot(
         ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        opponent_robots=[],
+        enemy_robots=[],
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 
@@ -342,7 +342,7 @@ class TestBallOutOfRange:
                 own_robots=[
                     RobotState(robot_id=_ATTACKER_ID, position=(0.0, 0.0), orientation=0.0),
                 ],
-                opponent_robots=[],
+                enemy_robots=[],
                 referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
             )
             # Only use positions guaranteed to be far (>= 2.0 distance)

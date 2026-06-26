@@ -12,20 +12,23 @@ import math
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
 from TeamControl.robot.ball_nav import (
-    clamp, move_toward, wall_brake, rotation_compensate,
+    clamp, move_toward, rotation_compensate,
 )
 from TeamControl.robot.navigator import _compute_avoidance
 from TeamControl.robot.kick_engine import KickState, kick_tick
 from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
-    FIELD_LENGTH, HALF_LEN, HALF_WID,
-    GOAL_WIDTH, GOAL_HW, GOAL_DEPTH,
-    PENALTY_DEPTH, PENALTY_HW,
     KICK_RANGE, BALL_NEAR, BEHIND_DIST, AVOID_RADIUS,
     CRUISE_SPEED, CHARGE_SPEED, DRIBBLE_SPEED,
     MAX_W, TURN_GAIN,
     KICK_COOLDOWN, LOOP_RATE, FRAME_INTERVAL,
-    DEFENSE_DEPTH, POSSESS_DIST
+    DEFENSE_DEPTH,POSSESS_DIST,
+)
+from TeamControl.world.field_config import (
+    DEFENCE_X_MM,
+    DEFENCE_Y_MM,
+    GOAL_HALF_WIDTH_MM,
+    GOAL_DEPTH_MM,
 )
 
 # -- Tuning ---------------------------------------------------------------
@@ -36,13 +39,13 @@ BALL_MEMORY_TIME = 0.5    # seconds to trust last-known ball when occluded
 
 
 def _in_penalty_box(px, py, goal_x):
-    return abs(px - goal_x) < PENALTY_DEPTH and abs(py) < PENALTY_HW
+    return abs(px - goal_x) < float(DEFENCE_X_MM) and abs(py) < float(DEFENCE_Y_MM)
 
 
 def _pick_aim(cache, ball, goal_x, is_yellow):
-    """Pick aim point in goal mouth, away from opponent goalie."""
+    """Pick aim point in goal mouth, away from enemy goalie."""
     aim_inward = 1 if goal_x > 0 else -1
-    aim_x = goal_x + aim_inward * (GOAL_DEPTH * 0.5)
+    aim_x = goal_x + aim_inward * (float(GOAL_DEPTH_MM) * 0.5)
 
     gk_y = None
     for _oid, pos in cache.robots.iter_team(not is_yellow):
@@ -51,29 +54,30 @@ def _pick_aim(cache, ball, goal_x, is_yellow):
             break
 
     if gk_y is not None:
-        aim_y = -GOAL_HW * 0.6 if gk_y > 0 else GOAL_HW * 0.6
+        goal_hw = float(GOAL_HALF_WIDTH_MM)
+        aim_y = -goal_hw * 0.6 if gk_y > 0 else goal_hw * 0.6
     else:
         aim_y = 0.0
 
     return (aim_x, aim_y)
 
 
-def _get_opponent(cache, is_yellow):
-    """Return first visible opponent as (x, y, orientation), or None."""
+def _get_enemy(cache, is_yellow):
+    """Return first visible enemy as (x, y, orientation), or None."""
     for _oid, pos in cache.robots.iter_team(not is_yellow):
         return pos
     return None
 
 
-def _opponent_has_ball(opp, ball):
-    """Check if opponent is possessing the ball (close + ball in front)."""
-    if opp is None or ball is None:
+def _enemy_has_ball(enemy, ball):
+    """Check if enemy is possessing the ball (close + ball in front)."""
+    if enemy is None or ball is None:
         return False
-    d = math.hypot(opp[0] - ball[0], opp[1] - ball[1])
+    d = math.hypot(enemy[0] - ball[0], enemy[1] - ball[1])
     if d > POSSESS_DIST:
         return False
-    # Check if ball is roughly in front of opponent
-    rel = world2robot(opp, ball)
+    # Check if ball is roughly in front of enemy
+    rel = world2robot(enemy, ball)
     return rel[0] > -30  # ball not behind them
 
 
@@ -124,11 +128,11 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
         if ball_visible:
             last_d_ball = d_ball
 
-        # -- Opponent info ----------------------------------------------
-        opp = _get_opponent(cache, is_yellow)
-        opp_has_ball = _opponent_has_ball(opp, ball)
-        opp_dist_to_ball = math.hypot(opp[0] - ball[0], opp[1] - ball[1]) \
-            if opp is not None else float('inf')
+        # -- enemy info ----------------------------------------------
+        enemy = _get_enemy(cache, is_yellow)
+        enemy_has_ball = _enemy_has_ball(enemy, ball)
+        enemy_dist_to_ball = math.hypot(enemy[0] - ball[0], enemy[1] - ball[1]) \
+            if enemy is not None else float('inf')
 
         aim = _pick_aim(cache, ball, goal_x, is_yellow)
 
@@ -157,9 +161,6 @@ def run_striker(is_running, dispatch_q, wm, robot_id=0, is_yellow=True):
                 w = 0.0
             else:
                 w = clamp(ang_ball * TURN_GAIN, -MAX_W, MAX_W)
-
-        # -- Wall braking -----------------------------------------------
-        vx, vy = wall_brake(rpos[0], rpos[1], vx, vy)
 
         # -- Rotation compensation --------------------------------------
         vx, vy = rotation_compensate(vx, vy, w)

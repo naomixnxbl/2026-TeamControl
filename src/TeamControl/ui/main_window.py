@@ -9,24 +9,34 @@ Tabs:
   Console         Scrolling log viewer
 """
 
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QToolBar, QLabel, QComboBox, QPushButton,
-    QTabWidget, QStatusBar, QWidget, QHBoxLayout, QSizePolicy,
-    QApplication, QSpinBox,
+    QApplication,
+    QAbstractSpinBox,
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QStatusBar,
+    QTabWidget,
+    QToolBar,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon
 
-from TeamControl.ui.theme import QSS, ACCENT, TEXT, TEXT_DIM, SUCCESS, DANGER, WARNING
-from TeamControl.ui.engine import SimEngine
-from TeamControl.ui.field_canvas import FieldCanvas
-from TeamControl.ui.dashboard_page import DashboardPage
-from TeamControl.ui.test_panel import TestPanel
-from TeamControl.ui.settings_page import SettingsPage
-from TeamControl.ui.dispatcher_panel import DispatcherPanel
-from TeamControl.ui.log_panel import LogPanel
 from TeamControl.ui.calibration_page import CalibrationPage
+from TeamControl.ui.dashboard_page import DashboardPage
+from TeamControl.ui.dispatcher_panel import DispatcherPanel
+from TeamControl.ui.engine import SimEngine
+from TeamControl.ui.log_panel import LogPanel
+from TeamControl.ui.map_canvas import MapCanvas, MapDebugWidget
 from TeamControl.ui.onboard_possession_panel import OnboardPossessionPanel
+from TeamControl.ui.settings_page import SettingsPage
+from TeamControl.ui.test_panel import TestPanel
+from TeamControl.ui.theme import ACCENT, DANGER, QSS, SUCCESS, TEXT, TEXT_DIM, WARNING
 
 
 class MainWindow(QMainWindow):
@@ -35,7 +45,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TurtleRabbit — SSL Command Center")
-        self.setMinimumSize(1280, 800)
+        self.setMinimumSize(900, 620)
         self.resize(1800, 1050)
         self.setStyleSheet(QSS)
 
@@ -43,30 +53,41 @@ class MainWindow(QMainWindow):
         self._engine = SimEngine(self)
 
         # ── Shared field canvas ──────────────────────────────────
-        self._field = FieldCanvas()
+        self._field = MapCanvas()
 
         # ── Pages ─────────────────────────────────────────────────
         self._test_panel = TestPanel(engine=self._engine, field=self._field)
         self._dispatch_panel = DispatcherPanel(engine=self._engine)
         self._calibration = CalibrationPage(
-            engine=self._engine, test_panel=self._test_panel)
+            engine=self._engine,
+            test_panel=self._test_panel,
+        )
         self._dashboard = DashboardPage(
-            self._field, engine=self._engine, test_panel=self._test_panel)
+            self._field, engine=self._engine, test_panel=self._test_panel,
+        )
         self._settings = SettingsPage()
+        self._settings.set_channel_defaults(self._engine.reload_config())
         self._log_panel = LogPanel()
+        self._map_debug = MapDebugWidget()
         self._onboard_panel = OnboardPossessionPanel(engine=self._engine)
 
         # ── Central tabs ──────────────────────────────────────────
         self._tabs = QTabWidget()
         self._tabs.setObjectName("mainTabs")
         self._tabs.setDocumentMode(True)
-        self._tabs.addTab(self._dashboard, "  Dashboard  ")
+        self._tabs.setElideMode(Qt.ElideRight)
+        self._tabs.tabBar().setUsesScrollButtons(True)
+
+        # Dashboard is the top-level Home tab; Calibration has its own main tab.
+        self._tabs.addTab(self._dashboard, "  Home  ")
+        self._tabs.addTab(self._map_debug, "  World Map  ")
+        self._tabs.addTab(self._calibration, "  Calibration  ")
         self._tabs.addTab(self._settings, "  Settings  ")
         self._tabs.addTab(self._log_panel, "  Console  ")
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
         self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
-        self._tabs.addTab(self._calibration, "  Calibration  ")
         self._tabs.addTab(self._onboard_panel, "  Onboard Possession  ")
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self._tabs)
 
         # ── Toolbar ──────────────────────────────────────────────
@@ -124,21 +145,25 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._mode_combo)
         tb.addSeparator()
 
-        tb.addWidget(QLabel("  Our Bot: "))
+        tb.addWidget(QLabel("  Our ID: "))
         self._our_id_spin = QSpinBox()
         self._our_id_spin.setRange(0, 15)
         self._our_id_spin.setValue(0)
         self._our_id_spin.setToolTip("Shell ID of our robot (from ipconfig.yaml)")
-        self._our_id_spin.setFixedWidth(55)
+        self._our_id_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._our_id_spin.setAlignment(Qt.AlignCenter)
+        self._our_id_spin.setFixedWidth(44)
         tb.addWidget(self._our_id_spin)
 
-        tb.addWidget(QLabel("  Opp Bot: "))
-        self._opp_id_spin = QSpinBox()
-        self._opp_id_spin.setRange(0, 15)
-        self._opp_id_spin.setValue(0)
-        self._opp_id_spin.setToolTip("Shell ID of opponent robot")
-        self._opp_id_spin.setFixedWidth(55)
-        tb.addWidget(self._opp_id_spin)
+        tb.addWidget(QLabel("  Enemy ID: "))
+        self._enemy_id_spin = QSpinBox()
+        self._enemy_id_spin.setRange(0, 15)
+        self._enemy_id_spin.setValue(0)
+        self._enemy_id_spin.setToolTip("Shell ID of enemy robot")
+        self._enemy_id_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._enemy_id_spin.setAlignment(Qt.AlignCenter)
+        self._enemy_id_spin.setFixedWidth(44)
+        tb.addWidget(self._enemy_id_spin)
         tb.addSeparator()
 
         self._start_btn = QPushButton("  Start  ")
@@ -176,34 +201,36 @@ class MainWindow(QMainWindow):
         view_menu = mb.addMenu("View")
         view_menu.addAction("Reset Field View", self._field._zoom_fit)
         view_menu.addSeparator()
-        for i, name in enumerate(["Dashboard", "Settings", "Console",
-                                   "Hardware Test", "Dispatcher",
-                                   "Calibration", "Onboard Possession"]):
-            view_menu.addAction(
-                name, lambda checked=False, idx=i: self._tabs.setCurrentIndex(idx))
+        view_menu.addAction(
+            "Calibration",
+            lambda checked=False: self._tabs.setCurrentWidget(self._calibration),
+        )
 
         sim_menu = mb.addMenu("Simulation")
-        sim_menu.addAction("Center Ball",
-                           lambda: self._engine.place_ball(0, 0))
-        sim_menu.addAction("Kickoff Formation",
-                           self._settings.sim_panel._kickoff_formation)
+        sim_menu.addAction("Center Ball", lambda: self._place_ball_from_dashboard(0, 0))
+        sim_menu.addAction(
+            "Kickoff Formation", self._settings.sim_panel._kickoff_formation
+        )
 
         mode_menu = mb.addMenu("Mode")
         for m in SimEngine.MODES:
             mode_menu.addAction(
-                m.capitalize(),
-                lambda checked=False, mode=m: self._switch_mode(mode))
+                m.capitalize(), lambda checked=False, mode=m: self._switch_mode(mode)
+            )
 
         help_menu = mb.addMenu("Help")
         help_menu.addAction("About", self._show_about)
 
     def _show_about(self):
         from PySide6.QtWidgets import QMessageBox
+
         QMessageBox.about(
-            self, "TurtleRabbit",
+            self,
+            "TurtleRabbit",
             "WSU TurtleRabbit SSL Command Center\n\n"
             "RoboCup Small Size League\n"
-            "Team Control Dashboard v2.0")
+            "Team Control Dashboard v2.0",
+        )
 
     # ── Signal wiring ────────────────────────────────────────────
 
@@ -211,8 +238,15 @@ class MainWindow(QMainWindow):
         eng = self._engine
 
         eng.frame_ready.connect(self._on_frame)
+        eng.map_render_ready.connect(self._map_debug.set_render_data)
+        eng.map_render_ready.connect(self._dashboard.set_render_data)
+        eng.field_geometry_ready.connect(self._field.set_field_geometry)
+        eng.field_geometry_ready.connect(self._map_debug.set_field_geometry)
+        eng.field_geometry_ready.connect(self._calibration.set_field_geometry)
         eng.game_state_ready.connect(self._dashboard.update_game_state)
+        eng.bt_state_ready.connect(self._dashboard.update_bt_state)
         eng.dispatch_info.connect(self._dispatch_panel.update_info)
+        eng.channel_status_ready.connect(self._dashboard.update_channel_status)
         eng.engine_started.connect(self._on_engine_started)
         eng.engine_stopped.connect(self._on_engine_stopped)
         eng.log_message.connect(self._log_panel.append)
@@ -220,26 +254,83 @@ class MainWindow(QMainWindow):
         self._dashboard.coordinate_hover.connect(self._on_coord_hover)
 
         sp = self._settings.sim_panel
-        sp.place_ball_requested.connect(
-            lambda x, y, vx, vy: eng.place_ball(x, y, vx, vy))
-        sp.place_robot_requested.connect(
-            lambda rid, yl, x, y, o: eng.place_robot(rid, yl, x, y, o))
-        sp.field_place_ball.connect(
-            lambda: self._field.set_place_mode("ball"))
+        sp.place_ball_requested.connect(self._place_ball_from_dashboard)
+        sp.place_robot_requested.connect(self._place_robot_from_dashboard)
+        sp.field_place_ball.connect(self._begin_field_ball_placement)
         sp.field_place_robot.connect(
-            lambda rid, yl: self._field.set_place_mode(("robot", rid, yl)))
+            self._begin_field_robot_placement
+        )
 
-        self._field.ball_placed.connect(
-            lambda x, y: eng.place_ball(x, y))
-        self._field.robot_placed.connect(
-            lambda rid, yl, x, y: eng.place_robot(rid, yl, x, y))
-        self._field.point_picked.connect(self._test_panel.go_to_point)
-        self._field.action_requested.connect(self._test_panel.field_action)
+        self._field.ball_placed.connect(self._place_ball_from_field)
+        self._field.robot_placed.connect(self._place_robot_from_field)
+        self._field.point_picked.connect(self._go_to_point_from_field)
+        self._field.action_requested.connect(self._field_action_requested)
+        self._field.robot_selected.connect(self._select_robot_from_field)
 
         self._settings.config_panel.config_changed.connect(
-            lambda: self._log_panel.append("[config] Configuration saved"))
+            lambda: self._log_panel.append("[config] Configuration saved")
+        )
 
     # ── Handlers ─────────────────────────────────────────────────
+
+    def _on_tab_changed(self, index):
+        active = self._tabs.widget(index)
+        self._engine.set_map_render_enabled(
+            active is self._dashboard or active is self._map_debug
+        )
+
+    def _dashboard_block_reason(self, action_name: str) -> str | None:
+        reason = self._engine.dashboard_action_block_reason()
+        if reason:
+            self._log_panel.append(f"[dashboard] {action_name} blocked: {reason}")
+        return reason
+
+    def _begin_field_ball_placement(self):
+        if self._dashboard_block_reason("Place ball"):
+            return
+        self._field.set_place_mode("ball")
+        self._log_panel.append("[dashboard] Click the field to place the ball")
+
+    def _begin_field_robot_placement(self, robot_id: int, is_yellow: bool):
+        if self._dashboard_block_reason("Place robot"):
+            return
+        self._field.set_place_mode(("robot", robot_id, is_yellow))
+        team = "Yellow" if is_yellow else "Blue"
+        self._log_panel.append(
+            f"[dashboard] Click the field to place {team} #{robot_id}"
+        )
+
+    def _place_ball_from_dashboard(self, x_mm, y_mm, vx=0.0, vy=0.0):
+        if self._engine.place_ball(x_mm, y_mm, vx, vy):
+            self._field.set_ball_place_marker(x_mm, y_mm)
+
+    def _place_ball_from_field(self, x_mm, y_mm):
+        self._place_ball_from_dashboard(x_mm, y_mm)
+
+    def _place_robot_from_dashboard(self, robot_id, is_yellow, x_mm, y_mm, orientation):
+        self._engine.place_robot(robot_id, is_yellow, x_mm, y_mm, orientation)
+
+    def _place_robot_from_field(self, robot_id, is_yellow, x_mm, y_mm):
+        self._place_robot_from_dashboard(robot_id, is_yellow, x_mm, y_mm, 0.0)
+
+    def _go_to_point_from_field(self, x_mm, y_mm):
+        if self._dashboard_block_reason("Go to point"):
+            return
+        self._test_panel.go_to_point(x_mm, y_mm)
+
+    def _field_action_requested(self, action_name: str):
+        if action_name != "stop" and self._dashboard_block_reason(action_name):
+            return
+        self._test_panel.field_action(action_name)
+
+    def _select_robot_from_field(self, is_yellow: bool, robot_id: int):
+        if self._dashboard_block_reason("Robot control selection"):
+            return
+        self._test_panel.select_robot(is_yellow, robot_id)
+        team = "Yellow" if is_yellow else "Blue"
+        self._log_panel.append(
+            f"[dashboard] Field control target set to {team} #{robot_id}"
+        )
 
     def _on_mode_combo_changed(self, mode):
         self._dashboard.set_mode(mode)
@@ -247,11 +338,17 @@ class MainWindow(QMainWindow):
     def _on_start(self):
         mode = self._mode_combo.currentText()
         our_id = self._our_id_spin.value()
-        opp_id = self._opp_id_spin.value()
+        enemy_id = self._enemy_id_spin.value()
         self._log_panel.append(
-            f"[engine] Starting {mode} — our bot #{our_id}, opp bot #{opp_id}")
+            f"[engine] Starting {mode} — our bot #{our_id}, enemy bot #{enemy_id}"
+        )
         try:
-            self._engine.start(mode, our_id=our_id, opp_id=opp_id)
+            self._engine.start(
+                mode,
+                our_id=our_id,
+                enemy_id=enemy_id,
+                channel_options=self._settings.channel_options(),
+            )
         except Exception as e:
             self._log_panel.append(f"[error] Failed to start: {e}")
 
@@ -264,33 +361,39 @@ class MainWindow(QMainWindow):
         self._mode_combo.setCurrentIndex(idx)
         if self._engine.is_running:
             self._engine.stop()
-        self._engine.start(mode,
-                           our_id=self._our_id_spin.value(),
-                           opp_id=self._opp_id_spin.value())
+        self._engine.start(
+            mode,
+            our_id=self._our_id_spin.value(),
+            enemy_id=self._enemy_id_spin.value(),
+            channel_options=self._settings.channel_options(),
+        )
 
     def _on_engine_started(self, mode):
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._mode_combo.setEnabled(False)
         self._our_id_spin.setEnabled(False)
-        self._opp_id_spin.setEnabled(False)
+        self._enemy_id_spin.setEnabled(False)
         self._state_label.setText(f"  RUNNING — {mode.upper()}  ")
         self._state_label.setStyleSheet(f"color:{SUCCESS}; font-weight:bold;")
         self._status_mode.setText(f"Mode: {mode}")
         self._dashboard.set_mode(mode)
         self._dashboard.set_engine_running(True)
+        self._settings.set_engine_running(True)
         self._dispatch_panel.set_running(True)
+        self._on_tab_changed(self._tabs.currentIndex())
 
     def _on_engine_stopped(self):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._mode_combo.setEnabled(True)
         self._our_id_spin.setEnabled(True)
-        self._opp_id_spin.setEnabled(True)
+        self._enemy_id_spin.setEnabled(True)
         self._state_label.setText("  IDLE  ")
         self._state_label.setStyleSheet(f"color:{TEXT_DIM};")
         self._status_mode.setText("Mode: —")
         self._dashboard.set_engine_running(False)
+        self._settings.set_engine_running(False)
         self._dispatch_panel.set_running(False)
 
     def _on_frame(self, snap):

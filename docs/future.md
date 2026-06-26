@@ -14,7 +14,7 @@ resolved before moving to the longer-term improvements below.
 **File:** `src/TeamControl/bt/trees/attacker.py` — `HasBallControl`, constant `POSSESSION_DIST`
 
 **Symptom:** The robot approaches the ball, stops just short of triggering the
-dribbler, then oscillates — orienting toward the opponent goal (thinking it has
+dribbler, then oscillates — orienting toward the enemy goal (thinking it has
 possession), then back toward the ball (realising it doesn't), endlessly. The
 dribbler fires on every other tick but the ball never actually sticks.
 
@@ -41,7 +41,7 @@ ball in front again → repeat.
 **Symptom:** The attacker kicks the ball prematurely instead of holding
 possession and working into a better position.
 
-**Root cause:** `HasClearShot` only checks for opponent robots in the shooting
+**Root cause:** `HasClearShot` only checks for enemy robots in the shooting
 corridor. It fires `IntentKick` any time the corridor is geometrically clear,
 even if the robot is far from goal or in a poor angle.
 
@@ -95,8 +95,8 @@ SupporterRoot (Selector)
 │       ├── PassSequence (Sequence)
 │       │   ├── FindOpenTeammate   → finds least-marked own robot (excl. goalie)
 │       │   └── PassToTeammate     → IntentPass(target_robot_id, target_pos)
-│       ├── ShootIfClose       → IntentKick(opp_goal) if within shooting threshold
-│       └── DribbleToGoal      → IntentDribble(opp_goal_pos)
+│       ├── ShootIfClose       → IntentKick(enemy_goal) if within shooting threshold
+│       └── DribbleToGoal      → IntentDribble(enemy_goal_pos)
 └── RepositionToSpace          → IntentMove(least_crowded_open_position)
 ```
 
@@ -113,17 +113,17 @@ SupporterRoot (Selector)
   (`dist ≤ POSSESSION_DIST` AND heading within tolerance). Share as a utility.
 
 - **`FindOpenTeammate`** — for each own robot (excluding goalie, excluding self),
-  compute a "marking pressure" score: the distance to the nearest opponent.
+  compute a "marking pressure" score: the distance to the nearest enemy.
   The robot with the highest score (most space) is the pass target. Writes the
   chosen robot and position to tree state. Returns FAILURE if all teammates
-  are within `MARKED_THRESHOLD` of an opponent.
+  are within `MARKED_THRESHOLD` of an enemy.
 
-- **`ShootIfClose`** — fires `IntentKick` at the opponent goal only when
-  `dist(robot, opp_goal) ≤ SHOOT_DIST_THRESHOLD`. Prevents long-range
+- **`ShootIfClose`** — fires `IntentKick` at the enemy goal only when
+  `dist(robot, enemy_goal) ≤ SHOOT_DIST_THRESHOLD`. Prevents long-range
   speculative shots.
 
 - **`RepositionToSpace`** — divides the field into a grid and scores each cell
-  by `min(dist_to_nearest_opponent, dist_to_nearest_own_robot)`. Picks the
+  by `min(dist_to_nearest_enemy, dist_to_nearest_own_robot)`. Picks the
   highest-scoring cell within a sensible area of the field (not too close to
   own goal, not offside). Writes `IntentMove` to that position.
 
@@ -147,20 +147,20 @@ SupporterRoot (Selector)
 
 ---
 
-## 2. Opponent Modeling
+## 2. enemy Modeling
 
 ### Current state
-- Goalie detection only (is a robot near opponent goal line?)
+- Goalie detection only (is a robot near enemy goal line?)
 - Threat scoring: `distance_to_ball + distance_to_goal`
 - No formation recognition, no behavior prediction, no pattern tracking
 
 ### Improvements
-- **Formation classifier**: Track opponent robot positions over N frames. Cluster into known formations (2-3-1, 3-2-1, etc.). Adjust our formation in response.
-- **Attacker trajectory prediction**: For each opponent, extrapolate their heading + speed forward 0.5–1.0s. Predict where they'll be, not where they are. Massively improves marking.
-- **Pass interception probability**: Given opponent ball carrier and potential receivers, estimate which passes are likely and position defenders to intercept.
-- **Pressing trigger detection**: Detect when opponents are pressing us (multiple robots advancing fast). Trigger long clearance or quick switch of play.
-- **Behavioral fingerprinting**: Over the course of a match, build a model of each opponent robot's tendencies (always goes left, always shoots near-post, etc.). Adjust goalie positioning and defender marking.
-- **Opponent possession prediction**: Don't just track "who has the ball now" — predict who will have it in 0.5s based on trajectories. Allows preemptive positioning.
+- **Formation classifier**: Track enemy robot positions over N frames. Cluster into known formations (2-3-1, 3-2-1, etc.). Adjust our formation in response.
+- **Attacker trajectory prediction**: For each enemy, extrapolate their heading + speed forward 0.5–1.0s. Predict where they'll be, not where they are. Massively improves marking.
+- **Pass interception probability**: Given enemy ball carrier and potential receivers, estimate which passes are likely and position defenders to intercept.
+- **Pressing trigger detection**: Detect when enemys are pressing us (multiple robots advancing fast). Trigger long clearance or quick switch of play.
+- **Behavioral fingerprinting**: Over the course of a match, build a model of each enemy robot's tendencies (always goes left, always shoots near-post, etc.). Adjust goalie positioning and defender marking.
+- **enemy possession prediction**: Don't just track "who has the ball now" — predict who will have it in 0.5s based on trajectories. Allows preemptive positioning.
 
 ---
 
@@ -195,29 +195,29 @@ SupporterRoot (Selector)
 - **Free kick routines**: When awarded a free kick, position robots in rehearsed formations before kicking. Dummy runners to pull defenders.
 - **Corner kicks**: Deliver ball to near/far post with robots positioned to attack. Simple but effective.
 - **Goal kicks**: Goalie distributes to specific safe positions rather than blind clearance.
-- **Penalty kicks**: Goalie uses opponent history to choose dive direction. Shooter picks corner based on goalie lean.
-- **Throw-in equivalent**: Quick restart plays to exploit opponents not yet set.
-- **Defensive set pieces**: When opponent has a free kick/corner, position defensively at goal line and mark dangerous positions.
+- **Penalty kicks**: Goalie uses enemy history to choose dive direction. Shooter picks corner based on goalie lean.
+- **Throw-in equivalent**: Quick restart plays to exploit enemys not yet set.
+- **Defensive set pieces**: When enemy has a free kick/corner, position defensively at goal line and mark dangerous positions.
 
 ---
 
 ## 5. Defensive Strategy
 
 ### Current state
-- Defenders mark opponents by interpolating between opponent and own goal
-- Coordinated pressing exists (2-robot) but only in opponent half
+- Defenders mark enemys by interpolating between enemy and own goal
+- Coordinated pressing exists (2-robot) but only in enemy half
 - No zonal defense, no offside trap, no defensive line concept
 - Goalie never leaves penalty box
 
 ### Improvements
 - **Defensive line**: All defenders hold a consistent horizontal line. Line shifts based on ball position. Compresses space.
-- **Offside trap**: Defenders step up in unison when opponent is about to pass, catching receiver offside (if rules apply) or at minimum forcing them deep.
+- **Offside trap**: Defenders step up in unison when enemy is about to pass, catching receiver offside (if rules apply) or at minimum forcing them deep.
 - **Zonal defense**: Instead of man-marking, defenders cover zones. More resilient to overlapping runs and player switches.
 - **Counter-press**: Immediately after losing the ball, the nearest 2-3 robots swarm the new ball carrier for 3-5 seconds. If unsuccessful, fall back to shape.
 - **Goalie sweeper**: When ball is >3m from goal and no shot threat, goalie advances to the edge of the penalty area to act as an extra defender. Intercepts through-balls.
 - **Defensive compactness metric**: Track the spread of our defensive shape. If spread > threshold, prioritize getting compact over pressing.
 - **Covering runs**: When one defender steps out to press, another slides over to cover the gap.
-- **Shot blocking**: Non-goalie robots position themselves between ball and goal when opponent is shooting from distance.
+- **Shot blocking**: Non-goalie robots position themselves between ball and goal when enemy is shooting from distance.
 
 ---
 
@@ -244,14 +244,21 @@ SupporterRoot (Selector)
 ## 7. Voronoi Planner Integration
 
 ### Current state
-- **Complete Voronoi planner exists** (`voronoi_planner/`) with Dijkstra pathfinding, obstacle inflation, field boundary handling
-- **Completely unused** by any part of the main AI
-- Test/demo code only
+- **Current planner API exists** in `src/TeamControl/planner/` with
+  `PlannerAPI`, `PlannerInput`, waypoint caching, direct-path checks, and
+  Dijkstra routing over the bounded Voronoi map.
+- **`voronoi_test` uses it** through `src/TeamControl/robot/voronoi_navigator.py`
+  to chase the ball by waypoint.
+- **Legacy code still exists** in `src/TeamControl/voronoi_planner/`; treat that
+  package as old/experimental unless it is explicitly revived.
 
 ### Improvements
+- **Broader behaviour integration**: Wire `PlannerAPI` into normal striker,
+  goalie, team, and future skill-intent flows where obstacle-aware routing is
+  needed.
 - **Passing lane validation**: Use Voronoi edges to find the safest passing corridors. A pass is safe if it travels near a Voronoi edge (maximum distance from all obstacles).
 - **Territory control**: Voronoi cells show which robot "owns" which area of the field. Use for role assignment — the robot whose Voronoi cell contains the ball is the natural winner.
-- **Gap detection**: Large Voronoi cells in the opponent defense indicate exploitable gaps. Direct attacks there.
+- **Gap detection**: Large Voronoi cells in the enemy defense indicate exploitable gaps. Direct attacks there.
 - **Positioning optimization**: Support robots should position at Voronoi vertices (equidistant from multiple threats) for maximum coverage.
 - **Incremental updates**: Don't recompute full Voronoi each frame. Only update when robots move more than a threshold distance. Cache between frames.
 - **Weighted Voronoi**: Weight sites by robot speed/threat level so faster robots get larger cells.
@@ -303,7 +310,7 @@ SupporterRoot (Selector)
 
 ### Improvements
 - **Utility-based AI**: Instead of threshold checks, compute a utility score for every possible action (shoot, pass to each teammate, dribble in each direction). Execute the highest-utility action. Much more flexible than if/else.
-- **Monte Carlo Tree Search (MCTS)**: Simulate 100-1000 possible futures from current state. Each simulation: pick action → simulate physics → opponent responds → evaluate. Picks the action that leads to the best average outcome. Used by AlphaGo, works great for multi-agent games.
+- **Monte Carlo Tree Search (MCTS)**: Simulate 100-1000 possible futures from current state. Each simulation: pick action → simulate physics → enemy responds → evaluate. Picks the action that leads to the best average outcome. Used by AlphaGo, works great for multi-agent games.
 - **Minimax with alpha-beta pruning**: For critical 1v1 situations (striker vs goalie, 1v1 dribble). Look 2-3 moves ahead and pick the move that maximizes our minimum outcome.
 - **Hierarchical task network**: High-level plan ("score a goal") decomposes into sub-plans ("get behind ball" → "dribble forward" → "shoot"). More robust than flat state machines.
 - **Reinforcement learning**: Train a neural network policy on thousands of simulated games. Start with imitation learning from the current rule-based system, then improve with self-play. Long-term but highest ceiling.
@@ -322,7 +329,7 @@ SupporterRoot (Selector)
 - **Auction-based role assignment**: Instead of centralized winner selection, robots "bid" for roles based on their ability to execute. The best-positioned striker bids highest for the attacker role.
 - **Cooperative path planning**: When two robots need to go through the same narrow space, negotiate who goes first instead of both trying to avoid each other.
 - **Pass request protocol**: A robot in a good position can "call for the ball" by signaling readiness. The ball carrier sees the request and evaluates the pass.
-- **Defensive assignments**: Share marking assignments explicitly. "I've got #3, you take #5." Prevents double-marking and leaving opponents free.
+- **Defensive assignments**: Share marking assignments explicitly. "I've got #3, you take #5." Prevents double-marking and leaving enemys free.
 
 ---
 
@@ -358,11 +365,15 @@ SupporterRoot (Selector)
 - **Single ball physics module**: One `ball_predict(pos, vel, dt)` function used everywhere.
 - **Deprecate Movement.py**: Everything useful is in path_planner.py. Remove the dead code.
 - **Fix or remove time_to_intercept.py**: Broken imports, not used anywhere.
-- **Integrate or archive Voronoi planner**: Either wire it into team.py or move it to an `experimental/` folder so it's not confusing.
+- **Archive legacy Voronoi planner**: Keep `src/TeamControl/planner/` as the
+  supported planner path and move or clearly label `src/TeamControl/voronoi_planner/`.
 - **Fix Formation imports**: Relative imports so the package actually works.
 - **Type hints everywhere**: All function signatures should have type annotations. Catches bugs early.
 - **Structured logging**: Replace `print()` statements with proper leveled logging. Enable per-module log levels.
-- **Configuration validation**: Constants.py should validate ranges (speeds > 0, distances > 0, gains in [0, 10], etc.).
+- **Configuration validation**: `robot/constants.py` and
+  `world/field_config.py` should validate ranges (speeds > 0, distances > 0,
+  gains in [0, 10], Voronoi clearances/insets do not collapse the field, render
+  density stays within a UI-safe range, etc.).
 
 ---
 
@@ -370,7 +381,10 @@ SupporterRoot (Selector)
 
 ### Current state
 - Decision loop runs at ~60Hz (16ms per tick)
-- Voronoi planner (if enabled) would be expensive per-frame
+- `PlannerAPI` is enabled in `voronoi_test`; it avoids Dijkstra when the direct
+  path is free and reuses cached waypoints when still valid.
+- The UI's full Voronoi debug overlay is generated in `WorldMapRenderWorker`,
+  separate from the robot planner API.
 - No spatial indexing for nearest-robot queries
 - No caching of expensive computations
 
@@ -392,7 +406,7 @@ SupporterRoot (Selector)
 - **Substitution strategy**: If a robot malfunctions or is removed, immediately redistribute roles. Don't leave a formation gap.
 - **Adaptable aggression**: Tunable parameter from 0 (ultra-defensive) to 1 (ultra-attacking) that shifts all thresholds. Expose in UI for real-time adjustment during matches.
 - **Post-goal behavior**: After scoring, immediately sprint back to formation for the kickoff instead of celebrating (wasting time).
-- **Timeout strategy**: Use timeouts (if allowed) to break opponent momentum and adjust parameters.
+- **Timeout strategy**: Use timeouts (if allowed) to break enemy momentum and adjust parameters.
 
 ---
 
@@ -404,7 +418,7 @@ SupporterRoot (Selector)
 | Kalman filter for ball state | High | Medium (8h) | **Do first** |
 | Striker passing ability | High | Medium (6h) | **Do first** |
 | Set piece plays (kickoff + free kick) | High | Medium (12h) | **Do first** |
-| Opponent trajectory prediction | High | Medium (8h) | **High** |
+| enemy trajectory prediction | High | Medium (8h) | **High** |
 | Integrate formation system | Medium | Medium (6h) | **High** |
 | Unit test suite for AI | High | High (20h) | **High** |
 | Defensive line + compactness | High | Medium (10h) | **High** |
@@ -416,5 +430,5 @@ SupporterRoot (Selector)
 | Latency compensation | Medium | Medium (6h) | **Medium** |
 | MCTS for multi-step planning | Very High | Very High (40h) | **Long-term** |
 | Reinforcement learning | Very High | Very High (80h+) | **Long-term** |
-| Opponent behavioral fingerprinting | High | High (24h) | **Long-term** |
+| enemy behavioral fingerprinting | High | High (24h) | **Long-term** |
 | Graph neural networks for coordination | Very High | Very High (60h+) | **Long-term** |

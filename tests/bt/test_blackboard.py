@@ -104,7 +104,7 @@ class TestNoWorldStateFields:
         "ball_position",
         "ball_velocity",
         "own_robots",
-        "opponent_robots",
+        "enemy_robots",
         "referee_state",
         "snapshot",
         "game_phase",

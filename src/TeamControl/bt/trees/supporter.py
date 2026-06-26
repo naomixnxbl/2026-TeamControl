@@ -320,11 +320,11 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
                     1.0 + goal_proximity * config.goal_proximity_weight
                 )
             else:
-                if snap.opponent_robots:
+                if snap.enemy_robots:
                     min_opp_dist = min(
                         math.hypot(r.position[0] - opp.position[0],
                                    r.position[1] - opp.position[1])
-                        for opp in snap.opponent_robots
+                        for opp in snap.enemy_robots
                     )
                 else:
                     min_opp_dist = float("inf")
@@ -529,10 +529,10 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
         while cx <= t.repo_x_max:
             cy = t.repo_y_min
             while cy <= t.repo_y_max:
-                if snap.opponent_robots:
+                if snap.enemy_robots:
                     opp_score = min(
                         math.hypot(cx - opp.position[0], cy - opp.position[1])
-                        for opp in snap.opponent_robots
+                        for opp in snap.enemy_robots
                     )
                 else:
                     opp_score = float("inf")

@@ -67,7 +67,7 @@ SSL-Vision  →  WorldModel  ─┐
 | `ball_position`         | `frame.ball.x`, `frame.ball.y`                                 |
 | `ball_velocity`         | `(0, 0)` — **TODO** wire `velocity_est`                        |
 | `own_robots`            | `frame.robots_yellow` or `_blue` depending on `wm.us_yellow()` |
-| `opponent_robots`       | the other team                                                 |
+| `enemy_robots`          | the other team                                                 |
 | `referee_state.phase`   | `wm.get_game_state()` mapped via `_PHASE_MAP`                  |
 | `referee_state.score`   | `(0, 0)` — **TODO** read from `wm.ref_data` once exposed       |
 
@@ -128,11 +128,11 @@ argument at construction time.
 ```
 us_positive = True   →   OUR team occupies the +x half of the field
                          Our goal is at  x ≈ +4.5 m  (goalie defends +x end)
-                         Opponent goal is at  x ≈ −4.5 m  (attacker shoots −x)
+                         enemy goal is at  x ≈ −4.5 m  (attacker shoots −x)
 
 us_positive = False  →   OUR team occupies the −x half of the field
                          Our goal is at  x ≈ −4.5 m  (goalie defends −x end)
-                         Opponent goal is at  x ≈ +4.5 m  (attacker shoots +x)
+                         enemy goal is at  x ≈ +4.5 m  (attacker shoots +x)
 ```
 
 This value is read from `ipconfig.yaml` (`us_positive: true/false`) and
@@ -146,7 +146,7 @@ cfg_us_positive = bool(_cfg.us_positive)   # our team's side from yaml
 cfg_us_yellow   = bool(_cfg.us_yellow)     # which colour is "us" in yaml
 
 # Same team as configured → use yaml value directly.
-# Opponent team → flip it (they're on the other half).
+# enemy team → flip it (they're on the other half).
 _us_positive = cfg_us_positive if (is_yellow == cfg_us_yellow) else not cfg_us_positive
 ```
 

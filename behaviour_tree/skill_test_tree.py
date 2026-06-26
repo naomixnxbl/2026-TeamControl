@@ -12,7 +12,7 @@ Usage (pick one skill to test):
     # move robot 0 to centre field
     skill = MoveTo("MoveTo_R0", target_pos=(0, 0))
 
-    # kick toward opponent goal (robot 0)
+    # kick toward enemy goal (robot 0)
     skill = KickAt("KickAt_R0", aim_pos=(4500, 0))
 
     # wait for ball at a receiving position

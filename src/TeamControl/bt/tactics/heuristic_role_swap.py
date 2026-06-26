@@ -433,7 +433,7 @@ def build_role_swap_context(
         raise ValueError(f"Robot {robot_id} not found in snapshot")
 
     teammates = tuple(r for r in snapshot.own_robots if r.robot_id != robot_id)
-    goal_blockers = tuple(snapshot.opponent_robots) + teammates
+    goal_blockers = tuple(snapshot.enemy_robots) + teammates
     goal_sight = evaluate_line_of_sight(
         snapshot.ball_position,
         attack_goal,
@@ -481,7 +481,7 @@ def build_role_swap_context(
         teammate_spacing=_nearest_distance(robot.position, teammates),
         opponent_pressure=_opponent_pressure(
             robot.position,
-            snapshot.opponent_robots,
+            snapshot.enemy_robots,
             pressure_radius,
         ),
         attacker_count=counts[RoleType.ATTACKER],
@@ -953,7 +953,7 @@ def _opponent_pressure(position: Point, opponents: tuple[RobotState, ...], radiu
 def _field_scale(snapshot: Snapshot, own_goal: Point, attack_goal: Point) -> float:
     points = [own_goal, attack_goal, snapshot.ball_position]
     points.extend(robot.position for robot in snapshot.own_robots)
-    points.extend(robot.position for robot in snapshot.opponent_robots)
+    points.extend(robot.position for robot in snapshot.enemy_robots)
 
     max_dist = distance(own_goal, attack_goal)
     for i, point_a in enumerate(points):
@@ -978,7 +978,7 @@ def _estimate_ball_holder(
     own_distance = _nearest_distance(snapshot.ball_position, tuple(snapshot.own_robots))
     opponent_distance = _nearest_distance(
         snapshot.ball_position,
-        tuple(snapshot.opponent_robots),
+        tuple(snapshot.enemy_robots),
     )
     if math.isinf(own_distance) and math.isinf(opponent_distance):
         return "unknown"

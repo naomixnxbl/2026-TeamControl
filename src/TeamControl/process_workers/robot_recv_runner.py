@@ -1,8 +1,7 @@
 import socket
-
 from multiprocessing import Queue
-from TeamControl.process_workers.worker import BaseWorker
 
+from TeamControl.process_workers.worker import BaseWorker
 
 RECV_PORT = 50513
 RECV_TIMEOUT = 0.5
@@ -28,14 +27,15 @@ class RobotRecv(BaseWorker):
         self._parse_errors = 0
         self._last_log = 0.0
 
-    def setup(self, recv_queue: Queue):
+    def setup(self, *args):
+        robot_ip, recv_queue = args
         self._queue = recv_queue
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", RECV_PORT))
+        sock.bind((robot_ip, RECV_PORT))
         sock.settimeout(RECV_TIMEOUT)
         self._sock = sock
-        msg = f"[RobotRecv] listening on 0.0.0.0:{RECV_PORT}"
+        msg = f"[RobotRecv] listening on {robot_ip},:{RECV_PORT}"
         self.logger.info(msg)
         print(msg, flush=True)
         super().setup()
@@ -55,12 +55,17 @@ class RobotRecv(BaseWorker):
         self._packets += 1
 
         import time as _t
+
         now = _t.time()
         if self._packets <= 5 or (now - self._last_log) > 2.0:
             self._last_log = now
-            preview = data[:60] if isinstance(data, (bytes, bytearray)) else str(data)[:60]
-            msg = (f"[RobotRecv] pkt #{self._packets} from {addr} "
-                   f"len={len(data)} head={preview!r}")
+            preview = (
+                data[:60] if isinstance(data, (bytes, bytearray)) else str(data)[:60]
+            )
+            msg = (
+                f"[RobotRecv] pkt #{self._packets} from {addr} "
+                f"len={len(data)} head={preview!r}"
+            )
             self.logger.info(msg)
             print(msg, flush=True)
 

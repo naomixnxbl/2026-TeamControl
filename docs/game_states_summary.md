@@ -68,7 +68,7 @@ When `us_positive=False` (we attack toward negative-x), all fixed position maps 
 ---
 
 ### FREE_KICK
-**Rule:** Attacker takes a free kick from the designated ball position. Opponent robots must keep 0.5 m from ball; our robots can approach normally.
+**Rule:** Attacker takes a free kick from the designated ball position. enemy robots must keep 0.5 m from ball; our robots can approach normally.
 
 **Implementation:**
 - **Attacker (robot 5):** `IntentMove` to `snapshot.ball_position`.
@@ -89,13 +89,13 @@ When `us_positive=False` (we attack toward negative-x), all fixed position maps 
 ---
 
 ### PENALTY_SHOOT
-**Rule (§8.2):** Our attacker shoots from penalty spot (1 m from opponent's goal line). All other robots must be ≥ 1 m behind the ball (i.e., x ≤ penalty_spot_x − 1.0 = 2.5 m) and in our own half.
+**Rule (§8.2):** Our attacker shoots from penalty spot (1 m from enemy's goal line). All other robots must be ≥ 1 m behind the ball (i.e., x ≤ penalty_spot_x − 1.0 = 2.5 m) and in our own half.
 
 **Implementation:** `_handle_fixed_positions()` moves every robot to `PENALTY_SHOOT_POSITIONS`:
 
 | Robot ID | Role | Position | Note |
 |---|---|---|---|
-| 0 | Our goalie | (2.0, 0.5) | Behind ball; not defending (opponent keeper defends their goal) |
+| 0 | Our goalie | (2.0, 0.5) | Behind ball; not defending (enemy keeper defends their goal) |
 | 1 | Defender | (2.0, −1.5) | Behind ball |
 | 2 | Defender | (2.0, 1.5) | Behind ball |
 | 3 | Supporter | (2.0, −0.5) | Behind ball |
@@ -103,12 +103,12 @@ When `us_positive=False` (we attack toward negative-x), all fixed position maps 
 | 5 | Attacker | **(3.5, 0.0) — penalty spot** | Shoots |
 
 > Penalty spot corrected from (3.6, 0) to **(3.5, 0)** — 1 m from goal line on a 9 m field.
-> Robot 0 corrected: previously placed at a goalie/goal-line position; corrected to (2.0, 0.5) — our goalie is NOT the defending keeper during an opponent penalty, it simply waits behind the ball.
+> Robot 0 corrected: previously placed at a goalie/goal-line position; corrected to (2.0, 0.5) — our goalie is NOT the defending keeper during an enemy penalty, it simply waits behind the ball.
 
 ---
 
 ### PENALTY_DEFEND
-**Rule (§8.2):** Opponent shoots a penalty. Our goalie defends on our goal line. All other robots stay behind the ball (in own half).
+**Rule (§8.2):** enemy shoots a penalty. Our goalie defends on our goal line. All other robots stay behind the ball (in own half).
 
 **Implementation:**
 - **Goalie (robot 0):** Dynamically tracks ball y-coordinate on `OWN_GOAL_LINE_X` (−4.5). Target = (−4.5, `ball_y`). Uses `_handle_penalty_defend()`.

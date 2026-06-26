@@ -464,11 +464,11 @@ def _opponent_ball_carrier(
     snap: Snapshot,
     tree: DefenderTree,
 ) -> RobotState | None:
-    if not snap.opponent_robots:
+    if not snap.enemy_robots:
         return None
 
     carrier = min(
-        snap.opponent_robots,
+        snap.enemy_robots,
         key=lambda r: distance(r.position, snap.ball_position),
     )
     opponent_dist = distance(carrier.position, snap.ball_position)
@@ -508,7 +508,7 @@ def _dangerous_receiver(
     config: DefenderPositioningConfig,
 ) -> RobotState | None:
     candidates = [
-        r for r in snap.opponent_robots
+        r for r in snap.enemy_robots
         if r.robot_id != carrier.robot_id
     ]
     if not candidates:

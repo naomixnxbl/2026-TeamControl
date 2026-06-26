@@ -5,7 +5,7 @@ TeamCache polls `wm` lazily and caches `goal_x` derivatives so robot
 loops don't repeat the same `wm.us_positive()` try/except every tick.
 """
 
-from TeamControl.robot.constants import HALF_LEN
+from TeamControl.world.field_config import FIELD_LENGTH_MM
 
 # How many ticks between forced refreshes of team flags.
 REFRESH_EVERY = 30
@@ -46,9 +46,10 @@ class TeamCache:
 
     def goal_x(self, is_yellow):
         """Defending-goal x for a given team color, given current side."""
+        half_len = FIELD_LENGTH_MM / 2.0
         if is_yellow:
-            return -HALF_LEN if self._us_positive else HALF_LEN
-        return HALF_LEN if self._us_positive else -HALF_LEN
+            return -half_len if self._us_positive else half_len
+        return half_len if self._us_positive else -half_len
 
     def their_goal_x(self, is_yellow):
         return -self.goal_x(is_yellow)

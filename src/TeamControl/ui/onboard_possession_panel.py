@@ -349,8 +349,12 @@ class OnboardPossessionPanel(QWidget):
         if snap is None:
             return poses
         for r in snap.yellow:
+            if r is None:
+                continue
             poses[(True, r.id)] = (r.x, r.y, r.o)
         for r in snap.blue:
+            if r is None:
+                continue
             poses[(False, r.id)] = (r.x, r.y, r.o)
         return poses
 

@@ -34,7 +34,7 @@ def _snapshot(
         ball_position=ball,
         ball_velocity=(0.0, 0.0),
         own_robots=own,
-        opponent_robots=opponents,
+        enemy_robots=opponents,
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 

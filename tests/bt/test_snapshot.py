@@ -65,7 +65,7 @@ def make_snapshot(**overrides):
         ball_position=(0.0, 0.0),
         ball_velocity=(0.0, 0.0),
         own_robots=[RobotState(robot_id=i, position=(float(i), 0.0), orientation=0.0) for i in range(6)],
-        opponent_robots=[RobotState(robot_id=i, position=(float(-i), 0.0), orientation=0.0) for i in range(6)],
+        enemy_robots=[RobotState(robot_id=i, position=(float(-i), 0.0), orientation=0.0) for i in range(6)],
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
     defaults.update(overrides)
@@ -86,9 +86,9 @@ class TestSnapshot:
         assert len(snap.own_robots) == 6
         assert isinstance(snap.own_robots[0], RobotState)
 
-    def test_opponent_robots_stored(self):
+    def test_enemy_robots_stored(self):
         snap = make_snapshot()
-        assert len(snap.opponent_robots) == 6
+        assert len(snap.enemy_robots) == 6
 
     def test_referee_state_stored(self):
         snap = make_snapshot()
@@ -115,9 +115,9 @@ class TestSnapshot:
         assert dataclasses.is_dataclass(Snapshot)
 
     def test_empty_robot_lists_allowed(self):
-        snap = make_snapshot(own_robots=[], opponent_robots=[])
+        snap = make_snapshot(own_robots=[], enemy_robots=[])
         assert len(snap.own_robots) == 0
-        assert len(snap.opponent_robots) == 0
+        assert len(snap.enemy_robots) == 0
 
     def test_snapshot_equality(self):
         snap_a = make_snapshot(ball_position=(1.0, 2.0))

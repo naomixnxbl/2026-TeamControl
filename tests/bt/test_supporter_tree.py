@@ -63,20 +63,20 @@ _GOALIE_POS = (-4.0, 0.0)
 def make_snapshot(
     ball_pos: tuple[float, float] = (0.0, 0.0),
     own_robots: list[RobotState] | None = None,
-    opponent_robots: list[RobotState] | None = None,
+    enemy_robots: list[RobotState] | None = None,
 ) -> Snapshot:
     if own_robots is None:
         own_robots = [
             RobotState(robot_id=GOALIE_ID, position=_GOALIE_POS, orientation=0.0),
             RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
         ]
-    if opponent_robots is None:
-        opponent_robots = []
+    if enemy_robots is None:
+        enemy_robots = []
     return Snapshot(
         ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        opponent_robots=opponent_robots,
+        enemy_robots=enemy_robots,
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 
@@ -361,7 +361,7 @@ class TestFindOpenTeammate:
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
                 RobotState(robot_id=_ATTACKER_ID, position=(2.0, 2.0), orientation=0.0),
             ],
-            opponent_robots=[
+            enemy_robots=[
                 RobotState(robot_id=10, position=(2.1, 2.0), orientation=0.0),
             ],
         )
@@ -383,7 +383,7 @@ class TestFindOpenTeammate:
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID_B, position=(2.0, 2.0), orientation=0.0),
             ],
-            opponent_robots=[
+            enemy_robots=[
                 RobotState(robot_id=10, position=(2.1, 2.0), orientation=0.0),
             ],
         )
@@ -617,7 +617,7 @@ class TestRepositionToSpace:
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID_B, position=(3.0, 0.0), orientation=0.0),
             ],
-            opponent_robots=[
+            enemy_robots=[
                 RobotState(robot_id=10, position=(-2.0, 0.0), orientation=0.0),
             ],
         )
@@ -734,7 +734,7 @@ class TestPhaseIntegration:
                 RobotState(robot_id=_SUPPORTER_ID, position=(-3.5, 0.0), orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID_B, position=(-3.5, 0.1), orientation=-math.pi / 2),
             ],
-            opponent_robots=[
+            enemy_robots=[
                 RobotState(robot_id=11, position=(-3.5, 0.05), orientation=0.0),
             ],
         )
@@ -752,7 +752,7 @@ class TestPhaseIntegration:
                 RobotState(robot_id=_SUPPORTER_ID, position=(0.0, 0.0), orientation=0.0),
                 RobotState(robot_id=_SUPPORTER_ID_B, position=(0.0, 0.1), orientation=-math.pi / 2),
             ],
-            opponent_robots=[
+            enemy_robots=[
                 RobotState(robot_id=10, position=(0.1, 0.0), orientation=0.0),
             ],
         )

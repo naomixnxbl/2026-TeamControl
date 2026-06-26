@@ -12,17 +12,20 @@ import math
 
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.world.transform_cords import world2robot
-from TeamControl.robot.ball_nav import clamp, move_toward
+from TeamControl.robot.ball_nav import clamp, clamp_for_role, move_toward
 from TeamControl.cache import TickCache
 from TeamControl.robot.constants import (
-    FIELD_LENGTH, HALF_LEN, HALF_WID,
-    GOAL_WIDTH, GOAL_HW,
-    PENALTY_DEPTH, PENALTY_HW,
-    MAX_ADVANCE,
     SAVE_SPEED, POSITION_SPEED, CLEAR_SPEED,
     MAX_W, FACE_BALL_GAIN,
     SHOT_SPEED, KICK_DIST,
     LOOP_RATE, FRAME_INTERVAL,
+)
+from TeamControl.world.field_config import (
+    FIELD_LENGTH_MM,
+    FIELD_WIDTH_MM,
+    GOAL_HALF_WIDTH_MM,
+    DEFENCE_X_MM,
+    DEFENCE_Y_MM,
 )
 
 # ── Tuning ───────────────────────────────────────────────────────
@@ -33,13 +36,20 @@ CLEAR_KICK_SPD = 0.25       # speed when actually kicking
 
 
 def _clamp_to_box(x, y, goal_x):
-    """Keep position inside the penalty box."""
+    """Keep position inside the penalty box.
+
+    x-depth uses the shared clamp_for_role rule (same one
+    RobotMotionController/Movement.py use) -- goal_x is passed explicitly
+    since this file derives its own goal line from the live field length
+    each tick, same source clamp_for_role falls back to anyway.
+    y-width is goalie-specific (penalty box is wider than max-advance's
+    depth alone implies) and stays local.
+    """
     margin = 60
-    if goal_x > 0:
-        x = clamp(x, goal_x - PENALTY_DEPTH + margin, goal_x - margin)
-    else:
-        x = clamp(x, goal_x + margin, goal_x + PENALTY_DEPTH - margin)
-    y = clamp(y, -PENALTY_HW + margin, PENALTY_HW - margin)
+    x, _ = clamp_for_role((x, y), is_goalie=True, margin=margin,
+                          own_goal_positive_side=goal_x > 0, own_goal_x=goal_x)
+    penalty_hw = float(DEFENCE_Y_MM)
+    y = clamp(y, -penalty_hw + margin, penalty_hw - margin)
     return x, y
 
 
@@ -66,7 +76,12 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         is_positive = cache.team.us_positive
 
         sign = 1 if is_positive else -1
-        goal_x = sign * (FIELD_LENGTH / 2)
+        half_len = FIELD_LENGTH_MM / 2.0
+        goal_x = sign * half_len
+        goal_hw = float(GOAL_HALF_WIDTH_MM)
+        penalty_depth = float(DEFENCE_X_MM)
+        penalty_hw = float(DEFENCE_Y_MM)
+        max_advance = float(DEFENCE_X_MM) - 50.0
 
         # ── Ball velocity (cached; recomputed only on new frame) ──
         bvx, bvy, bspeed = cache.ball.velocity
@@ -75,8 +90,8 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
         rel_ball = world2robot(rpos, ball)
         d_ball = math.hypot(rel_ball[0], rel_ball[1])
         ball_dist_from_goal = abs(ball[0] - goal_x)
-        ball_in_box = (ball_dist_from_goal < PENALTY_DEPTH
-                       and abs(ball[1]) < PENALTY_HW)
+        ball_in_box = (ball_dist_from_goal < penalty_depth
+                       and abs(ball[1]) < penalty_hw)
 
         kick, dribble = 0, 0
 
@@ -91,9 +106,9 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
             t_cross = (goal_x - ball[0]) / bvx
             if 0 < t_cross < 2.0:
                 pred_y_raw = ball[1] + bvy * t_cross
-                if abs(pred_y_raw) < GOAL_HW + 250:
+                if abs(pred_y_raw) < goal_hw + 250:
                     shot_incoming = True
-                    pred_y = clamp(pred_y_raw, -GOAL_HW, GOAL_HW)
+                    pred_y = clamp(pred_y_raw, -goal_hw, goal_hw)
 
         if shot_incoming:
             # Sprint to the predicted crossing point
@@ -109,7 +124,7 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
             if d_ball < KICK_DIST and rel_ball[0] > 0:
                 # Close enough — kick toward sideline
                 outward = -1.0 if goal_x > 0 else 1.0
-                side_y = HALF_WID if ball[1] > 0 else -HALF_WID
+                side_y = FIELD_WIDTH_MM / 2.0 if ball[1] > 0 else -FIELD_WIDTH_MM / 2.0
                 clear_pt = (ball[0] + outward * 1500, side_y)
                 rel_clear = world2robot(rpos, clear_pt)
                 ang_clear = math.atan2(rel_clear[1], rel_clear[0])
@@ -136,11 +151,11 @@ def run_goalie(is_running, dispatch_q, wm, goalie_id, is_yellow):
 
             if dist > 1:
                 # Advance more when ball is closer
-                ratio = 1.0 - clamp(ball_dist_from_goal / (FIELD_LENGTH * 0.5), 0, 1)
-                advance = ratio * MAX_ADVANCE
+                ratio = 1.0 - clamp(ball_dist_from_goal / half_len, 0, 1)
+                advance = ratio * max_advance
                 tx = goal_x + (dx / dist) * advance
                 ty = (dy / dist) * advance
-                ty = clamp(ty, -(GOAL_HW + 150), GOAL_HW + 150)
+                ty = clamp(ty, -(goal_hw + 150), goal_hw + 150)
             else:
                 tx, ty = goal_x, 0.0
 

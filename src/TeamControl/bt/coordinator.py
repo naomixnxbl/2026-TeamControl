@@ -338,7 +338,7 @@ class Coordinator:
             # Carry opp kickoff positioning into RUNNING — works through HALTED.
             prior = self._pre_halt_phase
             self._opp_kickoff_carry = (
-                prior == GamePhase.OPP_KICKOFF
+                prior == GamePhase.ENEMY_KICKOFF
                 and phase == GamePhase.RUNNING
             )
             # Carry penalty shoot into RUNNING until kicker fires.
@@ -381,7 +381,7 @@ class Coordinator:
             self._handle_prepare_kickoff(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
-        if phase == GamePhase.OPP_KICKOFF:
+        if phase == GamePhase.ENEMY_KICKOFF:
             self._handle_opp_kickoff(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
@@ -393,7 +393,7 @@ class Coordinator:
             self._handle_free_kick(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
-        if phase == GamePhase.OPP_FREE_KICK:
+        if phase == GamePhase.ENEMY_FREE_KICK:
             self._handle_opp_free_kick(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
