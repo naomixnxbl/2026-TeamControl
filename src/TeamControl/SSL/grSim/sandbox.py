@@ -68,7 +68,7 @@ def main():
     bt = Process(
         target=run_bt_v2_process,
         args=(is_running, wm, dispatcher_q),
-        kwargs={"config_file": config_file},
+        kwargs={"config_file": config_file, "verbose": True},
         name="BT",
     )
     dispatcher = Process(

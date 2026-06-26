@@ -34,7 +34,6 @@ from TeamControl.robot.navigator import run_navigator, WAYPOINTS_A, WAYPOINTS_B
 from TeamControl.robot.voronoi_navigator import run_voronoi_navigator
 from TeamControl.robot.voronoi_game_navigator import run_voronoi_game_navigator
 from TeamControl.robot.voronoi_pd_test_navigator import run_pd_planner_test
-from TeamControl.robot.team import run_team
 from TeamControl.robot.coop import run_coop
 from TeamControl.bt.run_bt_v2_process import run_bt_v2_process
 
@@ -492,18 +491,25 @@ class SimEngine(QObject):
                                              grsim_addr=preset.grSim_addr),
                                  daemon=True))
         elif mode == "6v6":
-            procs.append(Process(target=run_team,
-                                 args=(ev, dq, wm, True, our_id),
-                                 daemon=True))
-            procs.append(Process(target=run_team,
-                                 args=(ev, dq, wm, False, enemy_id),
-                                 daemon=True))
+            procs.append(Process(
+                target=run_bt_v2_process,
+                args=(ev, wm, dq),
+                kwargs=dict(is_yellow=True, bt_state_q=self._bt_state_q),
+                daemon=True,
+            ))
+            procs.append(Process(
+                target=run_bt_v2_process,
+                args=(ev, wm, dq),
+                kwargs=dict(is_yellow=False, bt_state_q=self._bt_state_q),
+                daemon=True,
+            ))
+            self.log_message.emit("[engine] 6v6 BT mode — yellow + blue via Coordinator")
 
         if mode == "btv2":
             procs.append(Process(
                 target=run_bt_v2_process,
                 args=(ev, wm, dq),
-                kwargs=dict(is_yellow=preset.us_yellow, bt_state_q=self._bt_state_q),
+                kwargs=dict(is_yellow=preset.us_yellow, bt_state_q=self._bt_state_q, verbose=True),
                 daemon=True,
             ))
             team = "yellow" if preset.us_yellow else "blue"
@@ -520,6 +526,7 @@ class SimEngine(QObject):
                     is_yellow=preset.us_yellow,
                     robot_ids=[our_id],
                     bt_state_q=self._bt_state_q,
+                    verbose=True,
                 ),
                 daemon=True,
             ))

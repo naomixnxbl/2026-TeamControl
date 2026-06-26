@@ -66,8 +66,8 @@ class _BtLogger:
         log_dir.mkdir(parents=True, exist_ok=True)
         self._robot_files: dict[int, "TextIO"] = {}
         for rid in robot_ids:
-            self._robot_files[rid] = open(log_dir / f"robot_{rid}.log", "a", buffering=1)
-        self._proc_file = open(log_dir / "coordinator.log", "a", buffering=1)
+            self._robot_files[rid] = open(log_dir / f"robot_{rid}.log", "a", buffering=1, encoding="utf-8")
+        self._proc_file = open(log_dir / "coordinator.log", "a", buffering=1, encoding="utf-8")
 
     def _ts(self) -> str:
         return datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -132,6 +132,17 @@ def _pack_bt_state(tag, tick, phase, snapshot, robot_ids, coordinator, is_yellow
     }
 
 
+def _fmt_intent(intent) -> str:
+    """Compact one-liner for an intent, e.g. 'Move→(0.25,0.00)' or 'Kick→(-2.0,0.0)'."""
+    if intent is None:
+        return "None"
+    kind = type(intent).__name__.replace("Intent", "")
+    if hasattr(intent, "target_pos") and intent.target_pos is not None:
+        x, y = intent.target_pos
+        return f"{kind}→({x:.2f},{y:.2f})"
+    return kind
+
+
 def run_bt_v2_process(
     is_running: Event,
     wm: WorldModel,
@@ -142,6 +153,7 @@ def run_bt_v2_process(
     tick_period: float = TICK_PERIOD,
     config_file: str = "ipconfig.yaml",
     bt_state_q: "Queue | None" = None,
+    verbose: bool = False,
 ) -> None:
     """Tick the v2 (TurtleRabbitBT) coordinator in a child process.
 
@@ -181,6 +193,7 @@ def run_bt_v2_process(
 
     last_phase = None
     tick_count = 0
+    _last_printed: dict = {}  # rid -> (intent_type, target_1dp)
 
     try:
         while is_running.is_set():
@@ -195,12 +208,38 @@ def run_bt_v2_process(
                 if last_phase is None:
                     logger.proc(f"{tag} initial phase: {phase}")
                 else:
-                    logger.proc(f"{tag} phase changed: {last_phase} → {phase}")
+                    logger.proc(f"{tag} phase changed: {last_phase} -> {phase}")
+                if verbose:
+                    bx, by = snapshot.ball_position
+                    print(f"{tag} t={tick_count} phase -> {phase.value} ball=({bx:.2f},{by:.2f})", flush=True)
+                _last_printed.clear()
                 last_phase = phase
 
             coordinator.tick(snapshot, robot_ids)
 
             tick_count += 1
+
+            if verbose:
+                bx, by = snapshot.ball_position
+                robot_map = {r.robot_id: r for r in snapshot.own_robots}
+                changed = []
+                for rid in robot_ids:
+                    bb = coordinator.blackboards.get(rid)
+                    r = robot_map.get(rid)
+                    intent = bb.current_intent if bb else None
+                    key = (
+                        type(intent).__name__,
+                        tuple(round(v, 1) for v in intent.target_pos)
+                        if intent and hasattr(intent, "target_pos") and intent.target_pos else None,
+                    )
+                    if _last_printed.get(rid) != key:
+                        _last_printed[rid] = key
+                        pos = f"({r.position[0]:.2f},{r.position[1]:.2f})" if r else "?"
+                        role = bb.current_role.value if bb else "?"
+                        changed.append(f"  R{rid}[{role}] {pos} {_fmt_intent(intent)}")
+                if changed:
+                    print(f"{tag} t={tick_count} {phase.value} ball=({bx:.2f},{by:.2f})", flush=True)
+                    print("\n".join(changed), flush=True)
 
             if bt_state_q is not None and tick_count % 30 == 0:
                 try:
