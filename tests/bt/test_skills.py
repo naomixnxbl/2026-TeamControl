@@ -163,28 +163,40 @@ class TestKickAtArrivalMode:
 
 class TestKickAtOrientation:
     def test_orientation_points_at_target_right(self):
-        """Robot at origin, kick target at (5, 0) → orientation ≈ 0."""
+        """Ball at (1, 0), kick target at (5, 0) gives orientation 0."""
         snap = _make_snapshot(robot_pos=(0.0, 0.0))
         result = kick_at(snap, robot_id=0, target_pos=(5.0, 0.0))
         assert result.target_orientation == pytest.approx(0.0, abs=1e-6)
 
     def test_orientation_points_at_target_up(self):
-        """Robot at origin, kick target at (0, 5) → orientation ≈ π/2."""
+        """Orientation follows the ball-to-target line, not robot-to-target."""
         snap = _make_snapshot(robot_pos=(0.0, 0.0))
         result = kick_at(snap, robot_id=0, target_pos=(0.0, 5.0))
-        assert result.target_orientation == pytest.approx(math.pi / 2, abs=1e-6)
+        expected = math.atan2(
+            5.0 - snap.ball_position[1],
+            0.0 - snap.ball_position[0],
+        )
+        assert result.target_orientation == pytest.approx(expected, abs=1e-6)
 
     def test_orientation_points_at_target_diagonal(self):
-        """Robot at origin, kick target at (3, 3) → orientation ≈ π/4."""
+        """Diagonal aim is also measured from the ball."""
         snap = _make_snapshot(robot_pos=(0.0, 0.0))
         result = kick_at(snap, robot_id=0, target_pos=(3.0, 3.0))
-        assert result.target_orientation == pytest.approx(math.pi / 4, abs=1e-6)
+        expected = math.atan2(
+            3.0 - snap.ball_position[1],
+            3.0 - snap.ball_position[0],
+        )
+        assert result.target_orientation == pytest.approx(expected, abs=1e-6)
 
     def test_orientation_handles_offset_robot(self):
-        """Works correctly when robot is not at origin."""
+        """Robot position does not change ball-to-target kick direction."""
         snap = _make_snapshot(robot_pos=(2.0, 2.0))
         result = kick_at(snap, robot_id=0, target_pos=(2.0, 7.0))
-        assert result.target_orientation == pytest.approx(math.pi / 2, abs=1e-6)
+        expected = math.atan2(
+            7.0 - snap.ball_position[1],
+            2.0 - snap.ball_position[0],
+        )
+        assert result.target_orientation == pytest.approx(expected, abs=1e-6)
 
 
 class TestKickAtVelocity:

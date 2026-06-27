@@ -19,6 +19,7 @@ from TeamControl.bt.contracts.blackboard import RoleType
 
 
 _ROLE_LOOKUP = {r.name.lower(): r for r in RoleType}
+_TEAM_LOOKUP = {"yellow": True, "blue": False}
 _DEFAULT_MOVEMENT_SAFETY = {
     "keep_robots_in_bounds": True,
     "keep_goalie_in_goal_box": True,
@@ -81,6 +82,16 @@ def _parse_movement_safety(raw: dict | None) -> dict[str, bool | float]:
     return out
 
 
+def _parse_controlled_team(raw: object, config_filename: str) -> str:
+    team = str(raw).strip().lower()
+    if team not in _TEAM_LOOKUP:
+        raise ValueError(
+            f"controlled_team must be 'yellow' or 'blue' in {config_filename}; "
+            f"got {raw!r}"
+        )
+    return team
+
+
 class BTSimConfig:
     """In-memory view of a BT-vs-BT simulation yaml config."""
 
@@ -89,6 +100,7 @@ class BTSimConfig:
         path = Path(__file__).resolve().parent / config_filename
         with open(path, "r") as f:
             raw = yaml.load(f, Loader)
+        self._raw_config = raw
 
         self.yellow_ids: list[int] = [int(x) for x in raw["yellow"]["robot_ids"]]
         self.blue_ids: list[int] = [int(x) for x in raw["blue"]["robot_ids"]]
@@ -123,6 +135,21 @@ class Sim3v3Config(BTSimConfig):
 
     def __init__(self, config_filename: str = "sim_3v3.yaml") -> None:
         super().__init__(config_filename)
+
+
+class Btv2Config(BTSimConfig):
+    """Single-team GUI ``btv2`` config."""
+
+    def __init__(self, config_filename: str = "btv2.yaml") -> None:
+        super().__init__(config_filename)
+        self.controlled_team: str = _parse_controlled_team(
+            self._raw_config.get("controlled_team", "yellow"),
+            config_filename,
+        )
+        self.controlled_is_yellow: bool = _TEAM_LOOKUP[self.controlled_team]
+        self.controlled_robot_ids: list[int] = (
+            self.yellow_ids if self.controlled_is_yellow else self.blue_ids
+        )
 
 
 if __name__ == "__main__":

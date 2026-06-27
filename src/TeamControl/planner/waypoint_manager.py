@@ -545,7 +545,10 @@ def _offset_to_inflated_circle(
     if dist <= 1e-6:
         dx, dy, dist = 1.0, 0.0, 1.0
 
-    radius = _inflated_obstacle_radius(obstacle, clearance_mm, reach_mm) + 5.0
+    radius = max(
+        _inflated_obstacle_radius(obstacle, clearance_mm, reach_mm),
+        _safety_clearance_radius(obstacle, clearance_mm),
+    ) + 5.0
     x_min, x_max, y_min, y_max = float(FIELD_X_MIN), float(FIELD_X_MAX), float(FIELD_Y_MIN), float(FIELD_Y_MAX)
     m = VORONOI_FIELD_TARGET_MARGIN_MM
     return (

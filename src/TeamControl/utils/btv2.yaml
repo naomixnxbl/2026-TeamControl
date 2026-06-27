@@ -1,0 +1,66 @@
+# Single-team BT v2 config - consumed by the "btv2" UI mode.
+#
+# This mode controls exactly one team. It uses the current behavior trees,
+# role assignment, heuristic role swap, movement safety, and bt_tuning.yaml
+# behavior weights without starting an opponent BT process.
+
+# Which team the UI btv2 mode controls. Valid values: yellow or blue.
+# Change this to blue when you want btv2 to drive the blue team instead.
+controlled_team: yellow
+
+# Robot shell IDs available to each side. btv2 only starts the team selected
+# by controlled_team; the other list is kept so switching teams is one YAML edit.
+yellow:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+blue:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+
+# Per-robot role assignment for the controlled team.
+# Valid roles: goalie, defender, supporter, attacker.
+# Dynamic role swapping can temporarily override non-goalie roles when enabled.
+roles:
+  0: goalie
+  1: attacker
+  2: supporter
+  3: supporter
+  4: supporter
+  5: supporter
+
+# Dynamic role swapping toggle. False keeps the static roles above.
+# The weights/limits are loaded from bt_tuning.yaml.
+heuristic_role_swap: True
+
+# Runtime movement safety toggles.
+# These are final guard rails applied after the behavior trees choose targets.
+# FOR THE REAL MATCH, KEEP THESE ALL TRUE
+movement_safety:
+  # Clamp robot movement/dribble targets inside the playable field.
+  keep_robots_in_bounds: true
+
+  # Clamp the goalie movement target inside our goalie box.
+  keep_goalie_in_goal_box: true
+
+  # Keep every non-goalie out of our goalie box.
+  keep_non_goalies_out_of_goalie_box: true
+
+  # Prevent our robots from touching the ball in the opponent defense area.
+  avoid_ball_touch_in_opponent_defense_area: true
+
+  # Field and goalie-box dimensions in metres.
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+
+  # Extra distance outside protected goalie-box boundaries.
+  goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+
+  # Defense-area touch protection buffers.
+  defense_area_ball_touch_margin: 0.18
+  defense_area_dribble_kick_margin: 0.30
+
+# Tick period in seconds for the BT process (100 Hz = 0.01).
+tick_period: 0.01

@@ -40,9 +40,9 @@ from TeamControl.bt.tactics.rule_following import (
 )
 
 # ---------------------------------------------------------------------------
-# Role assignment — fixed by robot ID
+# Role assignment, fixed by robot ID unless heuristic role swapping is enabled.
 # ---------------------------------------------------------------------------
-# index 0 → GOALIE, 1-5 → ATTACKER
+# index 0 -> GOALIE, 1 -> ATTACKER, 2-5 -> SUPPORTER
 ROLE_ASSIGNMENT: dict[int, RoleType] = {
     0: RoleType.GOALIE,
     1: RoleType.ATTACKER, # this should be the attacking tree

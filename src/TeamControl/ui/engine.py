@@ -37,7 +37,7 @@ from TeamControl.robot.voronoi_pd_test_navigator import run_pd_planner_test
 from TeamControl.robot.team import run_team
 from TeamControl.robot.coop import run_coop
 from TeamControl.bt.run_bt_v2_process import run_bt_v2_process
-from TeamControl.utils.sim_config import Sim3v3Config, Sim6v6Config
+from TeamControl.utils.sim_config import Btv2Config, Sim3v3Config, Sim6v6Config
 
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
@@ -503,15 +503,27 @@ class SimEngine(QObject):
                                  daemon=True))
 
         if mode == "btv2":
+            sim = Btv2Config()
+            roles = {rid: role.name for rid, role in sim.roles.items()}
             procs.append(Process(
                 target=run_bt_v2_process,
                 args=(ev, wm, dq),
-                kwargs=dict(is_yellow=preset.us_yellow, bt_state_q=self._bt_state_q),
+                kwargs=dict(
+                    is_yellow=sim.controlled_is_yellow,
+                    robot_ids=sim.controlled_robot_ids,
+                    role_assignment=sim.roles,
+                    heuristic_role_swap=sim.heuristic_role_swap,
+                    movement_safety=sim.movement_safety,
+                    tick_period=sim.tick_period,
+                    bt_state_q=self._bt_state_q,
+                ),
                 daemon=True,
+                name=f"btv2_{sim.controlled_team}",
             ))
-            team = "yellow" if preset.us_yellow else "blue"
             self.log_message.emit(
-                f"[engine] BT v2 mode — {team} team, robots 0-5 via Coordinator"
+                f"[engine] BT v2 mode - {sim.controlled_team} team only, "
+                f"robots={sim.controlled_robot_ids} roles={roles} "
+                f"heuristic_role_swap={sim.heuristic_role_swap}"
             )
             return procs
 

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from TeamControl.bt.contracts.blackboard import RoleType
-from TeamControl.utils.sim_config import BTSimConfig, Sim3v3Config, Sim6v6Config
+from TeamControl.utils.sim_config import (
+    Btv2Config,
+    BTSimConfig,
+    Sim3v3Config,
+    Sim6v6Config,
+)
 
 
 def test_sim_6v6_config_still_loads_default_file() -> None:
@@ -33,3 +38,16 @@ def test_generic_bt_sim_config_can_load_3v3_file() -> None:
 
     assert config.yellow_ids == [0, 1, 2]
     assert config.roles[0] == RoleType.GOALIE
+
+
+def test_sim_btv2_config_controls_one_team_with_heuristics() -> None:
+    config = Btv2Config()
+
+    assert config.controlled_team == "yellow"
+    assert config.controlled_is_yellow is True
+    assert config.controlled_robot_ids == config.yellow_ids
+    assert config.yellow_ids == [0, 1, 2, 3, 4, 5]
+    assert config.blue_ids == [0, 1, 2, 3, 4, 5]
+    assert config.roles[1] == RoleType.ATTACKER
+    assert config.heuristic_role_swap is True
+    assert config.movement_safety["keep_robots_in_bounds"] is True
