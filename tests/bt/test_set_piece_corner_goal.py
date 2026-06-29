@@ -113,6 +113,14 @@ def test_classification_mirrors_for_us_positive_true():
     assert coord._classify_free_kick(_snapshot((4.0, 1.0)), enemy=False) == GamePhase.GOAL_KICK
 
 
+def test_enemy_classification_mirrors_for_us_positive_true():
+    # us_positive=True: own goal +4.5, opp goal -4.5. Enemy attacking our goal
+    # means the ball sits near +4.5; enemy restarting deep means near -4.5.
+    coord = _coord(us_positive=True)
+    assert coord._classify_free_kick(_snapshot((4.0, 1.0)), enemy=True) == GamePhase.ENEMY_CORNER_KICK
+    assert coord._classify_free_kick(_snapshot((-4.0, 1.0)), enemy=True) == GamePhase.ENEMY_GOAL_KICK
+
+
 # ---------------------------------------------------------------------------
 # Dispatch + positioning through tick()
 # ---------------------------------------------------------------------------
