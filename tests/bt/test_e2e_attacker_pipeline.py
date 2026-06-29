@@ -1,29 +1,17 @@
-"""End-to-end Attacker pipeline tests — R010.
+"""End-to-end attacker pipeline tests for the current supporter-overhaul tree.
 
-Validates the full decision pipeline:
+These tests intentionally describe the working tree shape we are keeping:
 
-    Snapshot  →  AttackerTree  →  RobotBlackboard.current_intent
+    Snapshot -> AttackerTree -> RobotBlackboard.current_intent
 
-Three canonical scenarios from R010:
-
-    1. Ball out of range      → IntentMove toward ball position
-    2. Ball in range, no supporter → IntentDribble (HoldPossession)
-    3. Ball in range, supporter available → IntentPass
-
-Note on R010 "IntentKick" wording
-----------------------------------
-R010 states "no supporters available → IntentKick".  The tree topology (R005)
-places HoldPossession (writes IntentDribble) *before* ShootAtGoal (writes
-IntentKick) in PassPlaySelector.  HoldPossession always returns SUCCESS, so
-ShootAtGoal is never reached in v1.  These tests reflect actual behaviour;
-the spec wording should be read as "the last-resort fallback is IntentKick"
-rather than "no-supporter always gives IntentKick".
-
-No network, simulator, or real hardware is required.
+The attacker now chases only useful loose balls, waits high when the ball is
+in our own half, dribbles while settling possession, shoots only after a short
+settle period, and pass-dribbles before releasing a pass.
 """
 from __future__ import annotations
 
-import pytest
+import inspect
+import math
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
 from TeamControl.bt.contracts.intent import (
@@ -33,41 +21,44 @@ from TeamControl.bt.contracts.intent import (
     IntentPass,
 )
 from TeamControl.bt.contracts.snapshot import GamePhase, RefereeState, RobotState, Snapshot
-from TeamControl.bt.trees.attacker import AttackerTree, BALL_IN_RANGE_THRESHOLD
-
-# ---------------------------------------------------------------------------
-# Field constants
-# ---------------------------------------------------------------------------
-
-_ATTACKER_ID = 5       # robot_id that receives ATTACKER role (index 5)
-_SUPPORTER_ID = 3      # robot_id in SUPPORTER_ROLE_IDS
-
-_BALL_NEAR: tuple[float, float] = (0.2, 0.0)   # well inside BALL_IN_RANGE_THRESHOLD
-_BALL_FAR: tuple[float, float] = (2.0, 0.0)    # clearly outside threshold
-_ATTACKER_AT_ORIGIN: tuple[float, float] = (0.0, 0.0)
+from TeamControl.bt.trees.attacker import AttackerTree, SHOT_SETTLE_TICKS
 
 
-# ---------------------------------------------------------------------------
-# Snapshot factory
-# ---------------------------------------------------------------------------
+_ATTACKER_ID = 1
+_TEAMMATE_ID = 2
+_ATTACK_GOAL = (4.5, 0.0)
+
 
 def _make_snapshot(
+    *,
     ball_pos: tuple[float, float],
     attacker_pos: tuple[float, float],
-    include_supporter: bool,
+    attacker_orientation: float = 0.0,
+    teammates: list[tuple[int, tuple[float, float]]] | None = None,
+    enemies: list[tuple[int, tuple[float, float]]] | None = None,
 ) -> Snapshot:
-    own_robots: list[RobotState] = [
-        RobotState(robot_id=_ATTACKER_ID, position=attacker_pos, orientation=0.0),
-    ]
-    if include_supporter:
-        own_robots.append(
-            RobotState(robot_id=_SUPPORTER_ID, position=(1.5, 1.0), orientation=0.0)
+    own_robots = [
+        RobotState(
+            robot_id=_ATTACKER_ID,
+            position=attacker_pos,
+            orientation=attacker_orientation,
         )
+    ]
+    for robot_id, position in teammates or []:
+        own_robots.append(
+            RobotState(robot_id=robot_id, position=position, orientation=0.0)
+        )
+
+    enemy_robots = [
+        RobotState(robot_id=robot_id, position=position, orientation=0.0)
+        for robot_id, position in enemies or []
+    ]
+
     return Snapshot(
         ball_position=ball_pos,
         ball_velocity=(0.0, 0.0),
         own_robots=own_robots,
-        enemy_robots=[],
+        enemy_robots=enemy_robots,
         referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
     )
 
@@ -76,213 +67,163 @@ def _make_blackboard() -> RobotBlackboard:
     return RobotBlackboard(robot_id=_ATTACKER_ID, current_role=RoleType.ATTACKER)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _tick(tree: AttackerTree, snapshot: Snapshot) -> RobotBlackboard:
-    """Inject snapshot, tick tree, return the populated blackboard."""
     bb = _make_blackboard()
     tree.set_snapshot(snapshot)
     tree.tick(bb)
     return bb
 
 
-# ---------------------------------------------------------------------------
-# R010 scenario 1: ball out of range → IntentMove toward ball
-# ---------------------------------------------------------------------------
+def test_enemy_half_loose_ball_is_chased() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(
+        ball_pos=(2.0, 0.0),
+        attacker_pos=(0.0, -1.0),
+    )
 
-class TestBallOutOfRange:
-    """Pipeline produces IntentMove(ball_pos) when attacker is far from the ball."""
+    bb = _tick(tree, snapshot)
 
-    def setup_method(self) -> None:
-        self.tree = AttackerTree()
-        self.snapshot = _make_snapshot(
-            ball_pos=_BALL_FAR,
-            attacker_pos=_ATTACKER_AT_ORIGIN,
-            include_supporter=False,
-        )
-
-    def test_produces_intent_move(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert isinstance(bb.current_intent, IntentMove)
-
-    def test_intent_move_targets_ball_position(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert isinstance(bb.current_intent, IntentMove)
-        assert bb.current_intent.target_pos == _BALL_FAR
-
-    def test_no_robot_command_fields(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        intent = bb.current_intent
-        for field in ("vx", "vy", "vtheta", "kick", "dribbler"):
-            assert not hasattr(intent, field), f"RobotCommand field '{field}' found on intent"
-
-    def test_blackboard_holds_intent_after_tick(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert bb.current_intent is not None
-
-    def test_ball_is_actually_out_of_range(self) -> None:
-        import math
-        dist = math.hypot(_BALL_FAR[0] - _ATTACKER_AT_ORIGIN[0],
-                          _BALL_FAR[1] - _ATTACKER_AT_ORIGIN[1])
-        assert dist > BALL_IN_RANGE_THRESHOLD
+    assert isinstance(bb.current_intent, IntentMove)
+    assert bb.current_intent.target_pos == snapshot.ball_position
+    assert bb.current_intent.target_orientation == math.atan2(1.0, 2.0)
+    assert bb.intent_source == "ChaseBall"
 
 
-# ---------------------------------------------------------------------------
-# R010 scenario 2: ball in range, no supporters → IntentDribble
-# ---------------------------------------------------------------------------
+def test_own_half_loose_ball_makes_attacker_wait_high() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(
+        ball_pos=(-1.0, 0.5),
+        attacker_pos=(2.0, 0.0),
+    )
 
-class TestBallInRangeNoSupporter:
-    """Pipeline produces IntentDribble (HoldPossession) when ball is close
-    but no supporter is in the snapshot.
+    bb = _tick(tree, snapshot)
 
-    The tree topology (R005) has HoldPossession before ShootAtGoal in the
-    Selector, so HoldPossession fires first and always succeeds. IntentKick
-    (ShootAtGoal) is never reached in v1 — see module docstring.
-    """
-
-    def setup_method(self) -> None:
-        self.tree = AttackerTree()
-        self.snapshot = _make_snapshot(
-            ball_pos=_BALL_NEAR,
-            attacker_pos=_ATTACKER_AT_ORIGIN,
-            include_supporter=False,
-        )
-
-    def test_produces_intent_dribble(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert isinstance(bb.current_intent, IntentDribble)
-
-    def test_not_intent_move(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert not isinstance(bb.current_intent, IntentMove)
-
-    def test_not_intent_pass(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert not isinstance(bb.current_intent, IntentPass)
-
-    def test_no_robot_command_fields(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        intent = bb.current_intent
-        for field in ("vx", "vy", "vtheta", "kick", "dribbler"):
-            assert not hasattr(intent, field)
-
-    def test_blackboard_holds_intent_after_tick(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert bb.current_intent is not None
-
-    def test_ball_is_actually_in_range(self) -> None:
-        import math
-        dist = math.hypot(_BALL_NEAR[0] - _ATTACKER_AT_ORIGIN[0],
-                          _BALL_NEAR[1] - _ATTACKER_AT_ORIGIN[1])
-        assert dist <= BALL_IN_RANGE_THRESHOLD
+    assert isinstance(bb.current_intent, IntentMove)
+    assert bb.current_intent.target_pos == (tree.behavior_config.wait_x, 0.5)
+    assert bb.intent_source == "WaitNearGoal"
 
 
-# ---------------------------------------------------------------------------
-# R010 scenario 3: ball in range, supporter available → IntentPass
-# ---------------------------------------------------------------------------
+def test_fresh_possession_dribbles_toward_goal_before_shooting() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(
+        ball_pos=(3.08, 0.0),
+        attacker_pos=(3.0, 0.0),
+        attacker_orientation=0.0,
+    )
 
-class TestBallInRangeWithSupporter:
-    """Pipeline produces IntentPass when ball is close and a supporter exists."""
+    bb = _tick(tree, snapshot)
 
-    def setup_method(self) -> None:
-        self.tree = AttackerTree()
-        self.snapshot = _make_snapshot(
-            ball_pos=_BALL_NEAR,
-            attacker_pos=_ATTACKER_AT_ORIGIN,
-            include_supporter=True,
-        )
-
-    def test_produces_intent_pass(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert isinstance(bb.current_intent, IntentPass)
-
-    def test_intent_pass_targets_supporter(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert isinstance(bb.current_intent, IntentPass)
-        assert bb.current_intent.target_robot_id == _SUPPORTER_ID
-
-    def test_not_intent_dribble(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert not isinstance(bb.current_intent, IntentDribble)
-
-    def test_not_intent_move(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert not isinstance(bb.current_intent, IntentMove)
-
-    def test_no_robot_command_fields(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        intent = bb.current_intent
-        for field in ("vx", "vy", "vtheta", "kick", "dribbler"):
-            assert not hasattr(intent, field)
-
-    def test_blackboard_holds_intent_after_tick(self) -> None:
-        bb = _tick(self.tree, self.snapshot)
-        assert bb.current_intent is not None
+    assert isinstance(bb.current_intent, IntentDribble)
+    assert bb.current_intent.target_pos == _ATTACK_GOAL
+    assert bb.intent_source == "HoldPossession"
 
 
-# ---------------------------------------------------------------------------
-# Pipeline isolation invariants (R010 — no network, no hardware)
-# ---------------------------------------------------------------------------
+def test_settled_clear_possession_shoots_at_goal() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(
+        ball_pos=(3.68, 0.0),
+        attacker_pos=(3.6, 0.0),
+        attacker_orientation=0.0,
+    )
 
-class TestPipelineInvariants:
-    """Cross-scenario checks: no RobotCommand leakage, no external deps."""
+    bb = None
+    for _ in range(SHOT_SETTLE_TICKS):
+        bb = _tick(tree, snapshot)
 
-    def test_no_robot_command_in_attacker_source(self) -> None:
-        import inspect
-        import TeamControl.bt.trees.attacker as mod
-        src_text = inspect.getsource(mod)
-        assert "RobotCommand" not in src_text
+    assert bb is not None
+    assert isinstance(bb.current_intent, IntentKick)
+    assert bb.current_intent.target_pos == _ATTACK_GOAL
+    assert bb.intent_source == "ShootAtGoal"
 
-    def test_tree_is_reusable_across_ticks(self) -> None:
-        """Same AttackerTree instance can be ticked with different snapshots."""
-        tree = AttackerTree()
 
-        snap_far = _make_snapshot(_BALL_FAR, _ATTACKER_AT_ORIGIN, False)
-        bb1 = _tick(tree, snap_far)
-        assert isinstance(bb1.current_intent, IntentMove)
+def test_blocked_or_pressured_attacker_dribbles_before_passing() -> None:
+    tree = AttackerTree(us_positive=False)
+    teammate_pos = (3.7, 1.0)
+    snapshot = _make_snapshot(
+        ball_pos=(3.08, 0.0),
+        attacker_pos=(3.0, 0.0),
+        attacker_orientation=0.0,
+        teammates=[(_TEAMMATE_ID, teammate_pos)],
+        enemies=[(8, (3.0, -0.45))],
+    )
 
-        snap_near_with_supporter = _make_snapshot(_BALL_NEAR, _ATTACKER_AT_ORIGIN, True)
-        bb2 = _tick(tree, snap_near_with_supporter)
-        assert isinstance(bb2.current_intent, IntentPass)
+    bb = _tick(tree, snapshot)
 
-    def test_independent_blackboards_per_tick(self) -> None:
-        """Two ticks on different blackboards do not share state."""
-        tree = AttackerTree()
-        snap = _make_snapshot(_BALL_FAR, _ATTACKER_AT_ORIGIN, False)
+    assert isinstance(bb.current_intent, IntentDribble)
+    assert bb.current_intent.target_pos == teammate_pos
+    assert bb.intent_source == "DribbleTowardPassTarget"
 
-        bb_a = _make_blackboard()
-        tree.set_snapshot(snap)
-        tree.tick(bb_a)
 
-        bb_b = _make_blackboard()
-        tree.set_snapshot(snap)
-        tree.tick(bb_b)
+def test_aligned_pressured_attacker_passes_to_open_teammate() -> None:
+    tree = AttackerTree(us_positive=False)
+    attacker_pos = (3.0, 0.0)
+    teammate_pos = (3.7, 1.0)
+    target_angle = math.atan2(
+        teammate_pos[1] - attacker_pos[1],
+        teammate_pos[0] - attacker_pos[0],
+    )
+    ball_pos = (
+        attacker_pos[0] + math.cos(target_angle) * 0.08,
+        attacker_pos[1] + math.sin(target_angle) * 0.08,
+    )
+    snapshot = _make_snapshot(
+        ball_pos=ball_pos,
+        attacker_pos=attacker_pos,
+        attacker_orientation=target_angle,
+        teammates=[(_TEAMMATE_ID, teammate_pos)],
+        enemies=[(8, (3.0, -0.45))],
+    )
 
-        assert bb_a.current_intent == bb_b.current_intent
-        assert bb_a is not bb_b
+    bb = _tick(tree, snapshot)
 
-    def test_snapshot_not_mutated_by_tick(self) -> None:
-        """Ticking the tree must not modify the Snapshot."""
-        tree = AttackerTree()
-        snap = _make_snapshot(_BALL_FAR, _ATTACKER_AT_ORIGIN, False)
-        original_ball_pos = snap.ball_position
-        original_robot_count = len(snap.own_robots)
+    assert isinstance(bb.current_intent, IntentPass)
+    assert bb.current_intent.target_robot_id == _TEAMMATE_ID
+    assert bb.current_intent.target_pos == teammate_pos
+    assert bb.intent_source == "PassToOpenTeammate"
 
-        _tick(tree, snap)
 
-        assert snap.ball_position == original_ball_pos
-        assert len(snap.own_robots) == original_robot_count
+def test_tree_is_reusable_across_snapshots() -> None:
+    tree = AttackerTree(us_positive=False)
 
-    def test_intent_produced_on_every_tick(self) -> None:
-        """Each tick produces a non-None intent regardless of scenario."""
-        tree = AttackerTree()
-        scenarios = [
-            _make_snapshot(_BALL_FAR, _ATTACKER_AT_ORIGIN, False),
-            _make_snapshot(_BALL_NEAR, _ATTACKER_AT_ORIGIN, False),
-            _make_snapshot(_BALL_NEAR, _ATTACKER_AT_ORIGIN, True),
-        ]
-        for snap in scenarios:
-            bb = _tick(tree, snap)
-            assert bb.current_intent is not None, f"No intent produced for snap: {snap.ball_position}"
+    first = _tick(
+        tree,
+        _make_snapshot(ball_pos=(2.0, 0.0), attacker_pos=(0.0, 0.0)),
+    )
+    second = _tick(
+        tree,
+        _make_snapshot(ball_pos=(-1.0, 0.0), attacker_pos=(2.0, 0.0)),
+    )
+
+    assert isinstance(first.current_intent, IntentMove)
+    assert first.intent_source == "ChaseBall"
+    assert isinstance(second.current_intent, IntentMove)
+    assert second.intent_source == "WaitNearGoal"
+
+
+def test_snapshot_is_not_mutated_by_tick() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(ball_pos=(2.0, 0.0), attacker_pos=(0.0, 0.0))
+    original_ball = snapshot.ball_position
+    original_robots = tuple(snapshot.own_robots)
+
+    _tick(tree, snapshot)
+
+    assert snapshot.ball_position == original_ball
+    assert tuple(snapshot.own_robots) == original_robots
+
+
+def test_attacker_source_does_not_emit_robot_commands() -> None:
+    import TeamControl.bt.trees.attacker as mod
+
+    source = inspect.getsource(mod)
+    assert "RobotCommand" not in source
+
+
+def test_intents_do_not_contain_robot_command_fields() -> None:
+    tree = AttackerTree(us_positive=False)
+    snapshot = _make_snapshot(ball_pos=(2.0, 0.0), attacker_pos=(0.0, 0.0))
+
+    bb = _tick(tree, snapshot)
+
+    for field in ("vx", "vy", "vtheta", "kick", "dribbler"):
+        assert not hasattr(bb.current_intent, field)

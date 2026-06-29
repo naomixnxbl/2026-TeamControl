@@ -50,7 +50,7 @@ def test_planner_api_keeps_pressing_possessed_target_in_precision_mode():
     assert output.endpoint_was_adjusted is True
     assert output.endpoint_precision_mode is True
     assert output.waypoints == ()
-    assert output.active_target_pose == (-255.0, 0.0, 0.0)
+    assert output.active_target_pose == (-275.0, 0.0, 0.0)
 
 
 def test_planner_api_checks_safety_and_reach_clearance_for_target():
@@ -66,9 +66,9 @@ def test_planner_api_checks_safety_and_reach_clearance_for_target():
         ),
     )
 
-    outside = api.check_target_clearance((180.0, 0.0), obstacles)
-    safety_only = api.check_target_clearance((150.0, 0.0), obstacles)
-    close_reach = api.check_target_clearance((130.0, 0.0), obstacles)
+    outside = api.check_target_clearance((220.0, 0.0), obstacles)
+    safety_only = api.check_target_clearance((190.0, 0.0), obstacles)
+    close_reach = api.check_target_clearance((150.0, 0.0), obstacles)
 
     assert outside.in_safety_clearance is False
     assert outside.in_reach_clearance is False
@@ -80,5 +80,5 @@ def test_planner_api_checks_safety_and_reach_clearance_for_target():
     assert close_reach.in_safety_clearance is True
     assert close_reach.in_reach_clearance is True
     assert close_reach.nearest_obstacle_key == (False, 1)
-    assert close_reach.safety_clearance_radius_mm == 170.0
-    assert close_reach.reach_clearance_radius_mm == 140.0
+    assert close_reach.safety_clearance_radius_mm == 210.0
+    assert close_reach.reach_clearance_radius_mm == 160.0

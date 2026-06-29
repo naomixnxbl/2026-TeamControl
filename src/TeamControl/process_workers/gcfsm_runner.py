@@ -62,7 +62,7 @@ class GCfsm (BaseWorker):
             # check if the timestamp is before
             if new_ref_msg.packet_timestamp < self.last_ref_msg.packet_timestamp:
                 return
-        
+
         # otherwise :
         self.last_ref_msg = new_ref_msg
         # check team color if this changes, basically resets everything
@@ -74,10 +74,7 @@ class GCfsm (BaseWorker):
         self.forward_gc_status(new_ref_msg)
         # check for game event : ball placement location (for now)
         self.check_game_events(new_ref_msg)
-        
-    
-            
-    
+
     def check_cards(self,new_ref_msg:RefereeMessage):
         update_numbers = False
         if self.us_yellow is None or new_ref_msg.yellow is None or new_ref_msg.blue is None:
@@ -210,8 +207,13 @@ class GCfsm (BaseWorker):
             state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is True else GameState.ENEMY_BALL_PLACEMENT
         elif command == Command.BALL_PLACEMENT_BLUE:
             state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is False else GameState.ENEMY_BALL_PLACEMENT
+
         elif command == Command.FORCE_START:
             state = GameState.RUNNING
+        elif command in {Command.DIRECT_FREE_YELLOW, Command.INDIRECT_FREE_YELLOW}:
+            state = GameState.OUR_FREE_KICK if self.us_yellow is True else GameState.ENEMY_FREE_KICK
+        elif command in {Command.DIRECT_FREE_BLUE, Command.INDIRECT_FREE_BLUE}:
+            state = GameState.OUR_FREE_KICK if self.us_yellow is False else GameState.ENEMY_FREE_KICK
         elif command == Command.NORMAL_START:
             if self.current_command == Command.PREPARE_KICKOFF_YELLOW:
                 state = GameState.OUR_KICKOFF if self.us_yellow is True else GameState.ENEMY_KICKOFF

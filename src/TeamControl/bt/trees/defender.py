@@ -23,24 +23,115 @@ Design notes
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 import math
+from pathlib import Path
 import py_trees
+import yaml
+
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentKick, IntentMove
-from TeamControl.bt.contracts.snapshot import Snapshot
-from TeamControl.world.field_config import FIELD_LENGTH_MM
+from TeamControl.bt.contracts.snapshot import RobotState, Snapshot
+from TeamControl.bt.tactics.line_of_sight import (
+    Point,
+    distance,
+    face_angle,
+    line_of_sight_clear,
+)
 
-_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
+BT_TUNING_FILENAME = "bt_tuning.yaml"
+LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 # -----------------------------------------------------------------------
 # Tuneable constants
 # -----------------------------------------------------------------------
 
-DEFEND_ZONE_POSITION: tuple[float, float] = (-_HALF_LEN_M * (2.0 / 3.0), 0.0)  # 2/3 into own half
-CLOSE_ENOUGH_THRESHOLD: float = 0.6                                               # metres to ball to challenge
-CLEAR_DIRECTION: tuple[float, float] = (_HALF_LEN_M, 0.0)                        # kick toward enemy's half
-DEFENDER_ROLE_ID: int = 1                                                          # defender robot ID
+DEFEND_ZONE_POSITION: tuple[float, float] = (-3.0, 0.0)   # own half centre
+CLOSE_ENOUGH_THRESHOLD: float = 0.6                         # metres to ball to challenge
+CLEAR_DIRECTION: tuple[float, float] = (4.5, 0.0)           # kick toward opponent's half
+DEFENDER_ROLE_ID: int = 1                                    # defender robot ID
+GOALIE_ID: int = 0
+FIELD_HALF_X: float = 4.5
+FIELD_HALF_Y: float = 3.0
+FIELD_MARGIN: float = 0.2
+SHOT_BLOCK_FRACTION_FROM_GOAL: float = 0.55
+PASS_BLOCK_FRACTION_FROM_CARRIER: float = 0.42
+PASS_LANE_CLEARANCE: float = 0.18
+OPPONENT_POSSESSION_MARGIN_RATIO: float = 0.03
+DEFENDER_TEAMMATE_MIN_GAP: float = 0.45
+DEFENDER_TEAMMATE_MAX_NUDGE: float = 0.45
+
+
+@dataclass(frozen=True)
+class DefenderPositioningConfig:
+    """Configurable defender lane-positioning values."""
+
+    shot_block_fraction_from_goal: float = SHOT_BLOCK_FRACTION_FROM_GOAL
+    pass_block_fraction_from_carrier: float = PASS_BLOCK_FRACTION_FROM_CARRIER
+    pass_lane_clearance: float = PASS_LANE_CLEARANCE
+    opponent_possession_margin_ratio: float = OPPONENT_POSSESSION_MARGIN_RATIO
+    teammate_min_gap: float = DEFENDER_TEAMMATE_MIN_GAP
+    teammate_max_nudge: float = DEFENDER_TEAMMATE_MAX_NUDGE
+
+
+def load_defender_positioning_config(
+    config_filename: str | Path = BT_TUNING_FILENAME,
+) -> DefenderPositioningConfig:
+    """Load defender-positioning config from yaml, preserving defaults."""
+
+    path = _resolve_utils_config_path(config_filename)
+
+    if not path.exists():
+        return DefenderPositioningConfig()
+
+    with open(path, "r") as f:
+        raw = yaml.load(f, Loader) or {}
+    if not isinstance(raw, Mapping):
+        return DefenderPositioningConfig()
+
+    section = _nested_mapping(raw, ("behavior_tree", "defender", "positioning"))
+    if section is None:
+        section = raw.get("defender_positioning")
+    if not isinstance(section, Mapping):
+        return DefenderPositioningConfig()
+
+    defaults = DefenderPositioningConfig()
+    values: dict[str, float] = {}
+    for item in fields(DefenderPositioningConfig):
+        if item.name in section:
+            values[item.name] = float(section[item.name])
+        else:
+            values[item.name] = getattr(defaults, item.name)
+    return DefenderPositioningConfig(**values)
+
+
+def _resolve_utils_config_path(config_filename: str | Path) -> Path:
+    path = Path(config_filename)
+    if path.is_absolute():
+        return path
+
+    utils_dir = Path(__file__).resolve().parents[2] / "utils"
+    path = utils_dir / path
+    if path.exists() or path.name != BT_TUNING_FILENAME:
+        return path
+
+    legacy_path = utils_dir / LEGACY_HEURISTIC_WEIGHT_FILENAME
+    return legacy_path if legacy_path.exists() else path
+
+
+def _nested_mapping(raw: Mapping, keys: tuple[str, ...]) -> Mapping | None:
+    current: object = raw
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, Mapping) else None
 
 
 # -----------------------------------------------------------------------
@@ -79,11 +170,11 @@ class LookAtBall(py_trees.behaviour.Behaviour):
 
 
 class InDefendingZone(py_trees.behaviour.Behaviour):
-    """Hold current position facing the ball when defender is in its own half.
+    """Hold shape or block a lane when defender is in its own half.
 
-    If x < 0 (in zone): write IntentMove(target=current_pos, orientation=look_angle)
-    so the defender stops in place but stays oriented toward the ball, and
-    return SUCCESS to short-circuit the selector.
+    If an opponent is controlling/contesting the ball, write an IntentMove to
+    block the shot lane or a dangerous pass lane. Otherwise hold current
+    position facing the ball.
     If x >= 0 (out of zone): return FAILURE so GoToDefendZone runs next.
     """
 
@@ -109,16 +200,13 @@ class InDefendingZone(py_trees.behaviour.Behaviour):
             else robot.position[0] < 0.0
         )
         if in_zone:
-            bb.current_intent = IntentMove(
-                target_pos=robot.position,
-                target_orientation=self._tree.look_angle,
-            )
+            _write_defensive_position_intent(self._tree, bb, robot)
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
 
 class GoToDefendZone(py_trees.behaviour.Behaviour):
-    """Write IntentMove toward the defend zone and return SUCCESS.
+    """Write IntentMove toward the tactical lane or defend zone and return SUCCESS.
 
     Returning SUCCESS allows the parent Selector (DefendZoneFallback) to
     succeed, which lets the root Sequence proceed to ChallengeSequence.
@@ -129,14 +217,16 @@ class GoToDefendZone(py_trees.behaviour.Behaviour):
         self._tree = tree_ref
 
     def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
         bb = self._tree._blackboard_ref[0]
-        if bb is None:
+        if snap is None or bb is None:
             return py_trees.common.Status.FAILURE
 
-        bb.current_intent = IntentMove(
-            target_pos=self._tree.defend_zone_position,
-            target_orientation=self._tree.look_angle,
-        )
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        _write_defensive_position_intent(self._tree, bb, robot)
         return py_trees.common.Status.SUCCESS
 
 
@@ -179,6 +269,7 @@ class ClearBall(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         bb.current_intent = IntentKick(target_pos=self._tree.clear_direction)
+        bb.intent_source = "ClearBall"
         return py_trees.common.Status.SUCCESS
 
 
@@ -197,7 +288,12 @@ class DefenderTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self, us_positive: bool = True) -> None:
+    def __init__(
+        self,
+        us_positive: bool = True,
+        positioning_config: DefenderPositioningConfig | None = None,
+        positioning_config_file: str = BT_TUNING_FILENAME,
+    ) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
@@ -207,13 +303,18 @@ class DefenderTree:
         # in case a movement node runs before LookAtBall (shouldn't happen
         # given the sequence order, but defensive).
         self.look_angle: float = 0.0
+        self.positioning_config = (
+            positioning_config
+            if positioning_config is not None
+            else load_defender_positioning_config(positioning_config_file)
+        )
         # Mirror side-dependent constants onto the half we're actually
         # defending. Module constants assume us_positive=True (own goal at
         # negative x). When we attack the negative half instead, negate x so
-        # the defender parks in OUR half and clears toward the enemy goal.
+        # the defender parks in OUR half and clears toward the OPPONENT goal.
         self.us_positive = us_positive
         # Convention: us_positive=True means we are on +x; own half is +x,
-        # enemy goal is at -x. The module constants are authored for the
+        # opp goal is at -x. The module constants are authored for the
         # us_positive=False case, so negate x when us_positive=True.
         self.defend_zone_position: tuple[float, float] = (
             (-DEFEND_ZONE_POSITION[0], DEFEND_ZONE_POSITION[1]) if us_positive
@@ -222,6 +323,10 @@ class DefenderTree:
         self.clear_direction: tuple[float, float] = (
             (-CLEAR_DIRECTION[0], CLEAR_DIRECTION[1]) if us_positive
             else CLEAR_DIRECTION
+        )
+        self.own_goal_position: tuple[float, float] = (
+            (FIELD_HALF_X, 0.0) if us_positive
+            else (-FIELD_HALF_X, 0.0)
         )
         self.root = self._build_tree()
 
@@ -277,8 +382,245 @@ class DefenderTree:
 # Helpers
 # -----------------------------------------------------------------------
 
-def _find_robot(snap: Snapshot, robot_id: int):
+def _find_robot(snap: Snapshot, robot_id: int) -> RobotState | None:
     for r in snap.own_robots:
         if r.robot_id == robot_id:
             return r
     return None
+
+
+def _write_defensive_position_intent(
+    tree: DefenderTree,
+    bb: RobotBlackboard,
+    robot: RobotState,
+) -> None:
+    snap = tree._snapshot
+    if snap is None:
+        return
+
+    carrier = _opponent_ball_carrier(snap, tree)
+    if carrier is None:
+        target, source = _fallback_defend_target(tree, robot)
+        target = _space_from_teammates(
+            target,
+            snap,
+            robot,
+            tree.us_positive,
+            tree.positioning_config,
+        )
+        bb.current_intent = IntentMove(
+            target_pos=target,
+            target_orientation=tree.look_angle,
+        )
+        bb.intent_source = source
+        return
+
+    if _defensive_rank(snap, robot.robot_id, tree.own_goal_position) == 0:
+        target = _shot_block_target(
+            carrier.position,
+            tree.own_goal_position,
+            tree.positioning_config.shot_block_fraction_from_goal,
+        )
+        source = "BlockShotLane"
+    else:
+        receiver = _dangerous_receiver(
+            snap,
+            carrier,
+            tree.own_goal_position,
+            robot.robot_id,
+            tree.positioning_config,
+        )
+        if receiver is None:
+            target = _shot_block_target(
+                carrier.position,
+                tree.own_goal_position,
+                tree.positioning_config.shot_block_fraction_from_goal,
+            )
+            source = "BlockShotLane"
+        else:
+            target = _pass_block_target(
+                carrier.position,
+                receiver.position,
+                tree.positioning_config.pass_block_fraction_from_carrier,
+            )
+            source = "BlockPassLane"
+
+    target = _clamp_defensive_target(target, tree.us_positive)
+    target = _space_from_teammates(
+        target,
+        snap,
+        robot,
+        tree.us_positive,
+        tree.positioning_config,
+    )
+    bb.current_intent = IntentMove(
+        target_pos=target,
+        target_orientation=face_angle(robot.position, carrier.position),
+    )
+    bb.intent_source = source
+
+
+def _opponent_ball_carrier(
+    snap: Snapshot,
+    tree: DefenderTree,
+) -> RobotState | None:
+    if not snap.enemy_robots:
+        return None
+
+    carrier = min(
+        snap.enemy_robots,
+        key=lambda r: distance(r.position, snap.ball_position),
+    )
+    opponent_dist = distance(carrier.position, snap.ball_position)
+    own_dist = min(
+        (distance(r.position, snap.ball_position) for r in snap.own_robots),
+        default=math.inf,
+    )
+    possession_margin = (
+        _field_scale(tree)
+        * tree.positioning_config.opponent_possession_margin_ratio
+    )
+    if opponent_dist <= own_dist + possession_margin:
+        return carrier
+    return None
+
+
+def _defensive_rank(
+    snap: Snapshot,
+    robot_id: int,
+    own_goal: Point,
+) -> int | None:
+    candidates = sorted(
+        (r for r in snap.own_robots if r.robot_id != GOALIE_ID),
+        key=lambda r: (distance(r.position, own_goal), r.robot_id),
+    )
+    for index, candidate in enumerate(candidates):
+        if candidate.robot_id == robot_id:
+            return index
+    return None
+
+
+def _dangerous_receiver(
+    snap: Snapshot,
+    carrier: RobotState,
+    own_goal: Point,
+    self_robot_id: int,
+    config: DefenderPositioningConfig,
+) -> RobotState | None:
+    candidates = [
+        r for r in snap.enemy_robots
+        if r.robot_id != carrier.robot_id
+    ]
+    if not candidates:
+        return None
+
+    blockers = [
+        r for r in snap.own_robots
+        if r.robot_id != self_robot_id
+    ]
+
+    def receiver_score(receiver: RobotState) -> tuple[int, float, float, int]:
+        lane_open = line_of_sight_clear(
+            carrier.position,
+            receiver.position,
+            blockers,
+            clearance=config.pass_lane_clearance,
+        )
+        return (
+            0 if lane_open else 1,
+            distance(receiver.position, own_goal),
+            distance(carrier.position, receiver.position),
+            receiver.robot_id,
+        )
+
+    return min(candidates, key=receiver_score)
+
+
+def _fallback_defend_target(
+    tree: DefenderTree,
+    robot: RobotState,
+) -> tuple[Point, str]:
+    if _is_in_own_half(robot.position, tree.us_positive):
+        return robot.position, "HoldDefendZone"
+    return tree.defend_zone_position, "GoToDefendZone"
+
+
+def _shot_block_target(carrier: Point, own_goal: Point, fraction: float) -> Point:
+    return _interpolate(own_goal, carrier, fraction)
+
+
+def _pass_block_target(carrier: Point, receiver: Point, fraction: float) -> Point:
+    return _interpolate(carrier, receiver, fraction)
+
+
+def _space_from_teammates(
+    target: Point,
+    snap: Snapshot,
+    robot: RobotState,
+    us_positive: bool,
+    config: DefenderPositioningConfig,
+) -> Point:
+    push_x = 0.0
+    push_y = 0.0
+
+    for teammate in snap.own_robots:
+        if teammate.robot_id == robot.robot_id:
+            continue
+
+        dx = target[0] - teammate.position[0]
+        dy = target[1] - teammate.position[1]
+        dist = math.hypot(dx, dy)
+        if dist >= config.teammate_min_gap:
+            continue
+
+        if dist < 1e-9:
+            angle = robot.robot_id * 2.399963229728653
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+            dist = 1.0
+
+        strength = config.teammate_min_gap - dist
+        push_x += (dx / dist) * strength
+        push_y += (dy / dist) * strength
+
+    push_mag = math.hypot(push_x, push_y)
+    if push_mag < 1e-9:
+        return target
+
+    if push_mag > config.teammate_max_nudge:
+        scale = config.teammate_max_nudge / push_mag
+        push_x *= scale
+        push_y *= scale
+
+    return _clamp_defensive_target(
+        (target[0] + push_x, target[1] + push_y),
+        us_positive,
+    )
+
+
+def _interpolate(start: Point, end: Point, fraction: float) -> Point:
+    return (
+        start[0] + ((end[0] - start[0]) * fraction),
+        start[1] + ((end[1] - start[1]) * fraction),
+    )
+
+
+def _clamp_defensive_target(target: Point, us_positive: bool) -> Point:
+    x = max(-FIELD_HALF_X + FIELD_MARGIN, min(FIELD_HALF_X - FIELD_MARGIN, target[0]))
+    y = max(-FIELD_HALF_Y + FIELD_MARGIN, min(FIELD_HALF_Y - FIELD_MARGIN, target[1]))
+
+    # Defenders hold the defensive half. If a pass lane extends into the
+    # attacking half, meet it near midfield instead of abandoning shape.
+    if us_positive:
+        x = max(0.0, x)
+    else:
+        x = min(0.0, x)
+    return (x, y)
+
+
+def _is_in_own_half(point: Point, us_positive: bool) -> bool:
+    return point[0] > 0.0 if us_positive else point[0] < 0.0
+
+
+def _field_scale(tree: DefenderTree) -> float:
+    return max(distance(tree.own_goal_position, tree.clear_direction), 1.0)

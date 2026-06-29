@@ -1,0 +1,384 @@
+# Behaviour-tree tuning for TeamControl.
+#
+# This file intentionally contains two different kinds of tuning:
+# - role_swap: heuristics that decide which robot becomes attacker/supporter/defender.
+# - behavior_tree: variables used inside a specific role tree after roles are assigned.
+#
+# Most role_swap score inputs are normalized per tick against the current robots
+# on the field. That means those are relative weights, not metre thresholds.
+# A higher role_swap weight makes that feature matter more when choosing roles.
+#
+# The values checked into this file are the default state. Behavior-tree loaders
+# fall back to the same values when a behavior_tree key is missing.
+
+role_swap:
+  # Practical tuning rule:
+  # - If robots chase the ball too much, lower attacker.ball_close and pressure
+  #   weights, or raise supporter.spacing / defender weights.
+  # - If robots are too passive, raise attacker.ball_close,
+  #   attacker.opponent_has_ball_pressure, or attacker.loose_ball_pressure.
+  # - If roles flicker too often, raise stability.current_role_bias,
+  #   stability.cooldown_bias, or stability.minimum_swap_interval.
+
+  role_targets:
+    # Number of robots that should be assigned ATTACKER.
+    # Keep this at 1 unless you intentionally want multiple ball-chasers.
+    attackers: 1
+
+    # Minimum defenders kept behind the attack. This is the "always protect us"
+    # count before pressure rules add another defender.
+    min_defenders: 1
+
+    # Maximum defenders allowed. With 6v6, 2 is usually enough; higher values can
+    # make the team sit too deep and stop supporting attacks.
+    max_defenders: 2
+
+    # Minimum supporters preserved for spacing/passing structure.
+    min_supporters: 1
+
+  context:
+    # Line-of-sight clearance, as a fraction of field scale.
+    # Higher = shot/pass lanes are considered blocked more easily.
+    # Lower = robots are more optimistic about narrow lanes.
+    goal_sight_clearance_field_scale: 0.02
+
+    # Width of the virtual lane used to decide if a robot is between the ball and
+    # a goal. Higher makes defender/attacker lane checks less strict.
+    lane_width_field_scale: 0.04
+
+    # Radius used for opponent-pressure scoring.
+    # Higher makes opponents count as "pressure" from farther away.
+    pressure_radius_field_scale: 0.12
+
+    # Radius used to decide whether a robot is close enough to count as holding
+    # the ball. If neither team is inside this radius, the ball is treated as
+    # loose and attacker.loose_ball_pressure can fire.
+    # Higher = ball is considered possessed more often.
+    # Lower = ball is considered loose more often.
+    possession_radius_field_scale: 0.06
+
+  stability:
+    # Soft bias toward keeping the current role after the cooldown has expired.
+    # Higher = less role churn, but slower reaction to opportunities.
+    current_role_bias: 0.08
+
+    # Stronger soft bias while inside the cooldown window.
+    # This is not a hard lock. A robot can still swap if another role scores much
+    # better, but this makes rapid back-and-forth swaps less likely.
+    cooldown_bias: 0.16
+
+    # Seconds before role switching loses the cooldown bias and falls back to
+    # current_role_bias. Raise if roles flicker; lower if robots react too slowly.
+    minimum_swap_interval: 1.0
+
+  defender_stability:
+    # Minimum time a robot should usually stay defender after becoming defender.
+    # This prevents the defensive anchor from being replaced every few ticks.
+    # It is still allowed to leave early if it is clearly the best pressing robot.
+    min_hold_seconds: 3.0
+
+    # Extra defender score for robots that are already defenders after the hold
+    # window. Higher = defenders remain defenders unless another robot is clearly
+    # better. Lower = defenders rotate more freely.
+    stay_bias: 0.25
+
+    # Extra defender score during min_hold_seconds. This should usually be higher
+    # than stay_bias because it dampens the first few seconds after a role swap.
+    cooldown_bias: 0.40
+
+    # How much better another robot must be at defending before it can replace
+    # the current defender after the hold window.
+    # Higher = defenders are harder to replace.
+    release_margin: 0.12
+
+    # Allows a current defender to leave defense and become attacker only when
+    # its attacker score beats the best non-defender attacker candidate by this
+    # margin. Higher = defenders almost never press; lower = defenders can step
+    # up more often when they are clearly closest to the ball.
+    allow_attacker_release_margin: 0.18
+
+  defender_count:
+    # Allow an extra defender when the opponent is judged to have possession.
+    # Helps protect against counters, but can reduce attacking support.
+    add_second_when_opponent_has_ball: true
+
+    # Allow an extra defender when the ball is in our half even if possession is
+    # unclear. Helps when the ball is loose near our goal.
+    add_second_when_ball_in_our_half: true
+
+    # Only add the extra defender if there are at least this many non-attacker
+    # candidates available after assigning attackers. Prevents tiny teams from
+    # becoming all-defense.
+    minimum_candidates_after_attackers: 3
+
+  attacker:
+    # Rewards being closer to the ball than teammates.
+    # Higher = more aggressive ball chasing.
+    ball_close: 0.40
+
+    # Rewards being in a good approach position to attack the ball toward goal,
+    # including being behind the ball relative to the target goal.
+    approach_quality: 0.20
+
+    # Rewards already facing the ball. Higher makes robots that need less turning
+    # more likely to become attacker.
+    angle_score: 0.14
+
+    # Rewards being closer to the opponent goal.
+    # Higher = attacker selection favors forward robots.
+    opponent_goal_close: 0.12
+
+    # Rewards a clear ball-to-goal line of sight.
+    # Higher = robots are more likely to attack only when the shot lane is open.
+    goal_sight: 0.08
+
+    # Rewards being under less opponent pressure.
+    # Higher = avoids choosing attackers who are already crowded.
+    pressure_escape: 0.04
+
+    # Small boost when our team appears to possess the ball.
+    # Higher = current possession pushes harder toward attacking.
+    own_has_ball: 0.02
+
+    # Extra attacker score for the closest robot when the opponent has the ball.
+    # This creates one pressing robot without making every supporter chase.
+    # Higher = one robot challenges opponent possession more aggressively.
+    opponent_has_ball_pressure: 0.12
+
+    # Extra attacker score for the closest robot when neither team clearly has
+    # the ball. Higher = one robot claims loose balls more aggressively.
+    loose_ball_pressure: 0.10
+
+  defender:
+    # Rewards being closer to our own goal.
+    # Higher = defenders are selected from robots already deeper/home-side.
+    own_goal_close: 0.28
+
+    # Rewards being closer to the ball.
+    # Higher = defenders are more likely to step up toward the ball.
+    ball_close: 0.22
+
+    # Rewards being between the ball and our own goal.
+    # Higher = defenders prefer blocking the direct danger lane.
+    own_lane: 0.24
+
+    # Team-wide danger score based on how close the ball is to our goal.
+    # Higher = more defensive urgency when the ball moves toward us.
+    ball_danger: 0.16
+
+    # Rewards being under less opponent pressure.
+    # Higher = avoids assigning defenders who are trapped/crowded.
+    pressure_escape: 0.06
+
+    # Small defender boost when the opponent has the ball.
+    # Higher = defenders react more strongly to opponent possession.
+    opponent_has_ball: 0.04
+
+  supporter:
+    # Rewards being spaced away from teammates.
+    # Higher = supporters spread out more instead of clustering.
+    spacing: 0.30
+
+    # Rewards being closer to the opponent goal.
+    # Higher = supporters take more advanced attacking support positions.
+    opponent_goal_close: 0.20
+
+    # Rewards being under less opponent pressure.
+    # Higher = supporters prefer open receiving positions.
+    pressure_escape: 0.16
+
+    # Rewards clear ball-to-goal line of sight.
+    # Higher = supporters favor useful attacking lanes.
+    goal_sight: 0.14
+
+    # Rewards not being too close to the ball.
+    # Higher = supporters avoid crowding the attacker.
+    not_crowding_ball: 0.10
+
+    # Rewards being between the ball and opponent goal.
+    # Higher = supporters prefer forward passing/shot-support lanes.
+    forward_lane: 0.08
+
+    # Small boost when our team appears to possess the ball.
+    # Higher = supporters become more attacking during our possession.
+    own_has_ball: 0.02
+
+behavior_tree:
+  attacker:
+    # Default: 0.8. Legacy ball-range threshold used by the older pass branch.
+    # Higher = treats the ball as reachable from farther away.
+    ball_in_range_threshold: 0.8
+
+    # Default: [3, 4]. Legacy supporter robot IDs used by the older supporter
+    # availability/pass branch.
+    supporter_role_ids: [3, 4]
+
+    # Default: 0.11. Centre-to-centre distance for claiming ball possession.
+    # Higher = easier to claim possession; lower = stricter dribbler contact.
+    possession_dist: 0.11
+
+    # Default: 0.3 radians. Ball must be this close to the robot's front
+    # heading before possession is accepted.
+    possession_heading_tol: 0.3
+
+    # Default: 0.20. Width of the shot-blocking corridor from ball to goal.
+    # Higher = more shots count as blocked.
+    shot_corridor_radius: 0.20
+
+    # Default: 0.4 radians. Robot must face goal within this error to shoot.
+    # Higher = shoots with looser alignment; lower = waits for better aim.
+    shot_heading_tol: 0.4
+
+    # Default: 30 ticks. Continuous possession required before shooting.
+    # Higher = less instant shooting after receiving; lower = shoots sooner.
+    shot_settle_ticks: 30
+
+    # Default: 0.2. Max speed for non-closest attackers chasing the ball.
+    # Lower = less crowding; higher = more aggressive secondary chasing.
+    chase_slow_speed: 0.2
+
+    # Default: 2.0 metres. Max distance to goal where a clear shot is allowed.
+    # Higher = attempts longer shots; lower = carries/passes closer first.
+    shoot_dist_threshold: 2.0
+
+    # Default: 3.5 metres. X position used by WaitNearGoal before the opponent
+    # defense box, mirrored per team side.
+    wait_x: 3.5
+
+    # Default: 3.0 metres. Clamp for WaitNearGoal lateral movement.
+    wait_y_limit: 3.0
+
+    # Default: 0.08. Minimum pass distance as a fraction of field scale.
+    # Higher = ignores short passes.
+    pass_min_distance_frac: 0.08
+
+    # Default: 0.06. Amount of backward pass progress allowed by field scale.
+    # Higher = more backward/safety passes are considered.
+    pass_backward_allowance_frac: 0.06
+
+    # Default: 0.05. Receiver is rejected if an opponent is closer than this
+    # fraction of field scale.
+    pass_marked_distance_frac: 0.05
+
+    # Default: 0.08. Opponent pressure radius used when deciding to look for a
+    # pass instead of carrying/shooting.
+    pass_pressure_radius_frac: 0.08
+
+    # Default: 0.02. Pass lane clearance as a fraction of field scale.
+    # Higher = pass lanes are considered blocked more easily.
+    pass_lane_clearance_frac: 0.02
+
+    # Default: 0.2 radians. Attacker must face the pass target within this error
+    # before firing the pass.
+    pass_orient_tol: 0.2
+
+    # Default: 0.45. Weight for receiver openness in pass target scoring.
+    pass_openness_weight: 0.45
+
+    # Default: 0.25. Weight for forward progress in pass target scoring.
+    pass_forward_score_weight: 0.25
+
+    # Default: 0.20. Weight for being near the ideal pass distance.
+    pass_distance_score_weight: 0.20
+
+    # Default: 0.10. Weight for receiver closeness to the opponent goal.
+    pass_goal_proximity_weight: 0.10
+
+    # Default: 0.35. Field-scale divisor used to normalize forward pass score.
+    pass_forward_scale_frac: 0.35
+
+    # Default: 0.22. Ideal pass distance as a fraction of field scale.
+    pass_ideal_distance_frac: 0.22
+
+    # Default: 0.25. Distance-score falloff window as a fraction of field scale.
+    pass_distance_window_frac: 0.25
+
+  supporter:
+    # Default: 0.11. Centre-to-centre distance for claiming ball possession.
+    possession_dist: 0.11
+
+    # Default: 0.3 radians. Ball must be near the front of the robot to count as
+    # possession unless the supporter has already committed to a pass.
+    possession_heading_tol: 0.3
+
+    # Default: 2.0 metres. Supporter shoots instead of dribbling if this close
+    # to the opponent goal.
+    shoot_dist_threshold: 2.0
+
+    # Default: 0.5. Minimum teammate score required before passing.
+    # Higher = fewer passes; lower = passes to more contested teammates.
+    marked_threshold: 0.5
+
+    # Default: 1. The attacker robot ID receives a pass-target scoring bonus.
+    attacker_id: 1
+
+    # Default: 1.5. Multiplier for choosing the attacker as a pass target.
+    # Higher = supporters prefer feeding the attacker.
+    attacker_pass_bonus: 1.5
+
+    # Default: 1.2. Scales how much being closer to goal improves pass score.
+    goal_proximity_weight: 1.2
+
+    # Default: 10.82. Approximate maximum field distance used for normalizing
+    # supporter pass target scoring.
+    max_field_dist: 10.82
+
+    # Default: 0.5 metres. Spacing between grid points for repositioning.
+    # Lower = finer search but more computation; higher = coarser positions.
+    grid_step: 0.5
+
+    # Default: -1.0. Minimum x for supporter repositioning, mirrored by side.
+    reposition_x_min: -1.0
+
+    # Default: 4.0. Maximum x for supporter repositioning, mirrored by side.
+    reposition_x_max: 4.0
+
+    # Default: -2.5. Minimum y for supporter repositioning.
+    reposition_y_min: -2.5
+
+    # Default: 2.5. Maximum y for supporter repositioning.
+    reposition_y_max: 2.5
+
+    # Default: 0.2 radians. Supporter must face the pass target within this
+    # error before firing the pass.
+    pass_orient_tol: 0.2
+
+    # Default: 100 ticks. How long a receiver holds for a pass signal before
+    # giving up and returning to normal supporter behavior.
+    pass_signal_timeout_ticks: 100
+
+  defender:
+    positioning:
+      # Primary defender shot-block point on the line from our goal to the
+      # opponent ball holder. Higher moves the defender closer to the ball
+      # holder while still blocking the goal LOS. Lower parks closer to our goal.
+      # 0.30 = conservative/deep, 0.45 = more proactive, 0.60 = very aggressive.
+      # Default: 0.55.
+      shot_block_fraction_from_goal: 0.55
+
+      # Secondary defender pass-block point on the line from the ball holder to
+      # the dangerous receiver. Lower keeps the defender closer to the ball
+      # holder; higher moves closer to the receiver.
+      # 0.42 is proactive pressure while still sitting directly in the pass lane.
+      # Default: 0.42.
+      pass_block_fraction_from_carrier: 0.42
+
+      # Clearance used when checking whether a pass lane is blocked.
+      # Higher = pass lanes count as blocked more easily.
+      # Default: 0.18.
+      pass_lane_clearance: 0.18
+
+      # Field-scale margin used to decide if the opponent is close enough to the
+      # ball to be treated as the ball holder for defender positioning.
+      # Higher = defenders react to likely opponent control earlier.
+      # Default: 0.03.
+      opponent_possession_margin_ratio: 0.03
+
+      # Minimum friendly spacing applied to defender targets. This nudges
+      # defender targets apart without changing the LOS-blocking lane.
+      # Default: 0.45.
+      teammate_min_gap: 0.45
+
+      # Maximum distance a defender target can be nudged for teammate spacing.
+      # Default: 0.45.
+      teammate_max_nudge: 0.45

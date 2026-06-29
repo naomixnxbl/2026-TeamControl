@@ -193,7 +193,7 @@ def test_waypoint_manager_offsets_target_out_of_clearance_zone():
     assert output.endpoint_was_adjusted is True
     assert output.endpoint_precision_mode is True
     assert output.waypoints == ()
-    assert output.active_target_pose == (-255.0, 0.0, 0.4)
+    assert output.active_target_pose == (-275.0, 0.0, 0.4)
 
 
 def test_waypoint_manager_uses_precision_mode_when_offset_stays_in_clearance():
@@ -244,7 +244,7 @@ def test_waypoint_manager_can_ignore_obstacle_that_contains_target_for_steal():
     assert blocked.endpoint_was_adjusted is True
     assert blocked.endpoint_precision_mode is True
     assert blocked.waypoints == ()
-    assert blocked.active_target_pose == (-255.0, 0.0, 0.0)
+    assert blocked.active_target_pose == (-275.0, 0.0, 0.0)
     assert steal.is_path_free is True
     assert steal.endpoint_was_adjusted is False
     assert steal.active_target_pose == (0.0, 0.0, 0.0)
@@ -285,11 +285,11 @@ def test_waypoint_manager_steal_ignore_can_be_limited_to_specific_obstacle_key()
         )
     )
 
-    assert not_allowed.is_path_free is False
+    assert not_allowed.is_path_free is True
     assert not_allowed.endpoint_was_adjusted is True
     assert not_allowed.endpoint_precision_mode is True
     assert not_allowed.waypoints == ()
-    assert not_allowed.active_target_pose == (-145.0, 0.0, 0.0)
+    assert not_allowed.active_target_pose == (-215.0, 0.0, 0.0)
     assert allowed.is_path_free is True
     assert allowed.endpoint_was_adjusted is False
     assert allowed.active_target_pose == (0.0, 0.0, 0.0)

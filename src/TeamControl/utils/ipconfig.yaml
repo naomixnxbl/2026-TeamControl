@@ -1,73 +1,73 @@
 yellow:
   A:
-    ip: 192.168.0.73 # enter your IP (127.0.0.1) or the actual robot interface
+    ip: 127.0.0.1 # enter your IP (127.0.0.1) or the actual robot interface
     port: 50514
     grSimID: 0
     shellID: 0
     has_chip_kick: false
   B:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 1
     shellID: 1
     has_chip_kick: false
   C:
-    ip:  192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 2
     shellID: 2
     has_chip_kick: false
   D:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 3
     shellID: 3
     has_chip_kick: false
   E:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 4
     shellID: 4
     has_chip_kick: false
   F:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 5
     shellID: 5
     has_chip_kick: false
 blue:
   A:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 12345
     grSimID: 0
     shellID: 0
     has_chip_kick: false
   B:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 1
     shellID: 1
     has_chip_kick: false
   C:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 2
     shellID: 2
     has_chip_kick: false
   D:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 3
     shellID: 3
     has_chip_kick: false
   E:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 4
     shellID: 4
     has_chip_kick: false
   F:
-    ip: 192.168.0.73
+    ip: 127.0.0.1
     port: 50514
     grSimID: 5
     shellID: 5
@@ -80,7 +80,7 @@ grSim:
   port: 20011
 vision:
   multicast-group: 224.5.23.2
-  port: 10006
+  port: 10020
 gc:
   multicast-group: 224.5.23.1
   port: 10003

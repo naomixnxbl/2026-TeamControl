@@ -1,45 +1,32 @@
 """Attacker behaviour tree — R005.
 
-Topology (current):
+Topology:
 
     AttackingSelector (Selector, memory=False)
-    ├── ShootSequence   (HasBallControl → HasClearShot → ShootAtGoal)
-    ├── DribbleSequence (HasBallControl → HoldPossession[IntentDribble])
-    └── ChaseBall       (IntentMove(ball_position))
+    ├── PossessionSequence (Sequence)
+    │   ├── HasBallControl
+    │   └── PossessionAction (Selector)
+    │       ├── ShootSequence (HasClearShot → ShootAtGoal)
+    │       └── HoldPossession (dribble toward goal — the default)
+    ├── WaitSequence (Sequence)
+    │   ├── IsBallInOwnHalf
+    │   └── WaitNearGoal (camp in front of enemy goal, face ball)
+    └── ChaseBall (ball in enemy half; slow speed if not closest)
 
-The tree asks two predicates each tick:
-    Q1: HasBallControl — is the ball within POSSESSION_DIST AND in front
-                         of the kicker (heading aligned within
-                         POSSESSION_HEADING_TOL)?
-    Q2: HasClearShot   — is the ball→goal line free of enemies?
-And acts on the answers:
-    no possession             → ChaseBall
-    possession + clear shot   → ShootAtGoal (IntentKick to goal)
-    possession + blocked shot → HoldPossession (dribble toward goal)
-
-The original pass branch (PassOrPlaySequence) and the (now-unused)
-IsBallInRangeOrMove node are kept in the source as commented references
-for future re-enablement once a real "passing" play is added.
+Priority:
+    possession → dribble toward goal (default), shoot only if clear AND close
+    no possession + ball in own half → wait near enemy goal
+    no possession + ball in enemy half → chase ball
 
 Known bugs / areas for improvement
 -----------------------------------
-1. **POSSESSION_DIST oscillation** — ``POSSESSION_DIST`` (0.13 m) is too
+1. **POSSESSION_DIST oscillation** — ``POSSESSION_DIST`` (0.122 m) is too
    tight. The robot flickers between possession and no-possession on
-   consecutive ticks, causing it to alternate between orienting toward goal
-   and re-chasing the ball. Fix: add hysteresis (separate acquire/lose
-   thresholds) and tune ``POSSESSION_DIST`` empirically on the physical
-   robot. See ``docs/future.md §0.1``.
+   consecutive ticks. Fix: add hysteresis (separate acquire/lose thresholds).
+   See ``docs/future.md §0.1``.
 
-2. **Over-eager kicking** — ``HasClearShot`` fires ``IntentKick`` whenever
-   the shot corridor is geometrically clear, ignoring distance and angle to
-   goal. The robot should prefer dribbling into a better position and only
-   shoot when shot quality (distance + cone width) exceeds a threshold.
-   See ``docs/future.md §0.2``.
-
-3. **No field boundary enforcement** — target positions in ``ChaseBall``
+2. **No field boundary enforcement** — target positions in ``ChaseBall``
    and ``HoldPossession`` are not clamped to the legal field rectangle.
-   The robot can be directed outside the sidelines when the ball rolls out
-   of play. Add a shared ``clamp_to_field(pos, margin=0.1)`` utility.
    See ``docs/future.md §0.3``.
 
 Design notes
@@ -54,33 +41,40 @@ Design notes
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 import math
+from pathlib import Path
 import py_trees
+import yaml
+
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard
 from TeamControl.bt.contracts.intent import IntentDribble, IntentKick, IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import Snapshot
-from TeamControl.bt.param_store import params
-from TeamControl.world.field_config import FIELD_LENGTH_MM
+from TeamControl.bt.tactics.line_of_sight import line_of_sight_clear
 
-_HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
+BT_TUNING_FILENAME = "bt_tuning.yaml"
+LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 # -----------------------------------------------------------------------
-# Tuneable constants — these are module-level DEFAULTS only.
-# At runtime, nodes call params.get("attacker.*", <default>) so that the
-# dashboard param editor can change values without a restart.
+# Tuneable constants
 # -----------------------------------------------------------------------
 
 BALL_IN_RANGE_THRESHOLD: float = 0.8   # metres — legacy chase threshold (unused by new tree)
 SUPPORTER_ROLE_IDS: tuple[int, ...] = (3, 4)  # robot IDs with SUPPORTER role
-GOAL_POSITION: tuple[float, float] = (_HALF_LEN_M, 0.0)   # enemy goal centre
+GOAL_POSITION: tuple[float, float] = (4.5, 0.0)   # opponent goal centre
 
 # Distance at which we consider the ball to be in the dribbler (we "have" it).
 # SSL robot diameter ~0.18 m, ball ~0.043 m → centre-to-centre ~0.11 m when
 # touching. 0.15 m gives a small margin so the predicate doesn't flicker.
 
 ##   note: This is really a threshold value for the robot turn bug   ##
-POSSESSION_DIST: float = 0.122
+POSSESSION_DIST: float = 0.11 # 0.11 is the sweet spot!!!!
 
 # Maximum angular error between the robot's heading and the direction to the
 # ball before we say we "have" the ball. The kicker plate is on the front of
@@ -89,11 +83,121 @@ POSSESSION_DIST: float = 0.122
 # roughly in front but not perfectly centred.
 POSSESSION_HEADING_TOL: float = 0.3   # radians (~17 degrees)
 
-# Half-width of the shooting corridor: an enemy within this perpendicular
+# Half-width of the shooting corridor: an opponent within this perpendicular
 # distance of the ball→goal line segment is considered to be blocking the shot.
-# Robot radius is ~0.09 m, so 0.20 m means an enemy within ~one body length
+# Robot radius is ~0.09 m, so 0.20 m means an opponent within ~one body length
 # of the line counts as a block.
 SHOT_CORRIDOR_RADIUS: float = 0.20
+SHOT_HEADING_TOL: float = 0.4
+SHOT_SETTLE_TICKS: int = 30
+
+GOALIE_ID: int = 0
+CHASE_SLOW_SPEED: float = 0.2
+SHOOT_DIST_THRESHOLD: float = 2.0
+
+PENALTY_BOX_DEPTH: float = 1.0
+FIELD_HALF_X: float = 4.5
+FIELD_HALF_Y: float = 3.0
+WAIT_X: float = FIELD_HALF_X - PENALTY_BOX_DEPTH
+PASS_MIN_DISTANCE_FRAC: float = 0.08
+PASS_BACKWARD_ALLOWANCE_FRAC: float = 0.06
+PASS_MARKED_DISTANCE_FRAC: float = 0.05
+PASS_PRESSURE_RADIUS_FRAC: float = 0.08
+PASS_LANE_CLEARANCE_FRAC: float = 0.02
+PASS_ORIENT_TOL: float = 0.2
+
+
+@dataclass(frozen=True)
+class AttackerBehaviorConfig:
+    """Configurable attacker tree values."""
+
+    ball_in_range_threshold: float = BALL_IN_RANGE_THRESHOLD
+    supporter_role_ids: tuple[int, ...] = SUPPORTER_ROLE_IDS
+    possession_dist: float = POSSESSION_DIST
+    possession_heading_tol: float = POSSESSION_HEADING_TOL
+    shot_corridor_radius: float = SHOT_CORRIDOR_RADIUS
+    shot_heading_tol: float = SHOT_HEADING_TOL
+    shot_settle_ticks: int = SHOT_SETTLE_TICKS
+    chase_slow_speed: float = CHASE_SLOW_SPEED
+    shoot_dist_threshold: float = SHOOT_DIST_THRESHOLD
+    wait_x: float = WAIT_X
+    wait_y_limit: float = FIELD_HALF_Y
+    pass_min_distance_frac: float = PASS_MIN_DISTANCE_FRAC
+    pass_backward_allowance_frac: float = PASS_BACKWARD_ALLOWANCE_FRAC
+    pass_marked_distance_frac: float = PASS_MARKED_DISTANCE_FRAC
+    pass_pressure_radius_frac: float = PASS_PRESSURE_RADIUS_FRAC
+    pass_lane_clearance_frac: float = PASS_LANE_CLEARANCE_FRAC
+    pass_orient_tol: float = PASS_ORIENT_TOL
+    pass_openness_weight: float = 0.45
+    pass_forward_score_weight: float = 0.25
+    pass_distance_score_weight: float = 0.20
+    pass_goal_proximity_weight: float = 0.10
+    pass_forward_scale_frac: float = 0.35
+    pass_ideal_distance_frac: float = 0.22
+    pass_distance_window_frac: float = 0.25
+
+
+def load_attacker_behavior_config(
+    config_filename: str | Path = BT_TUNING_FILENAME,
+) -> AttackerBehaviorConfig:
+    """Load attacker behavior config from yaml, preserving defaults."""
+
+    path = _resolve_utils_config_path(config_filename)
+
+    if not path.exists():
+        return AttackerBehaviorConfig()
+
+    with open(path, "r") as f:
+        raw = yaml.load(f, Loader) or {}
+    if not isinstance(raw, Mapping):
+        return AttackerBehaviorConfig()
+
+    section = _nested_mapping(raw, ("behavior_tree", "attacker"))
+    if section is None:
+        section = raw.get("attacker_behavior")
+    if not isinstance(section, Mapping):
+        return AttackerBehaviorConfig()
+
+    defaults = AttackerBehaviorConfig()
+    values = {}
+    for item in fields(AttackerBehaviorConfig):
+        default = getattr(defaults, item.name)
+        if item.name in section:
+            values[item.name] = _coerce_config_value(section[item.name], default)
+        else:
+            values[item.name] = default
+    return AttackerBehaviorConfig(**values)
+
+
+def _coerce_config_value(value, default):
+    if isinstance(default, tuple):
+        return tuple(int(item) for item in value)
+    if isinstance(default, int):
+        return int(value)
+    return float(value)
+
+
+def _resolve_utils_config_path(config_filename: str | Path) -> Path:
+    path = Path(config_filename)
+    if path.is_absolute():
+        return path
+
+    utils_dir = Path(__file__).resolve().parents[2] / "utils"
+    path = utils_dir / path
+    if path.exists() or path.name != BT_TUNING_FILENAME:
+        return path
+
+    legacy_path = utils_dir / LEGACY_HEURISTIC_WEIGHT_FILENAME
+    return legacy_path if legacy_path.exists() else path
+
+
+def _nested_mapping(raw: Mapping, keys: tuple[str, ...]) -> Mapping | None:
+    current: object = raw
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current if isinstance(current, Mapping) else None
 
 
 # -----------------------------------------------------------------------
@@ -128,25 +232,53 @@ class HasBallControl(py_trees.behaviour.Behaviour):
         dx = snap.ball_position[0] - robot.position[0]
         dy = snap.ball_position[1] - robot.position[1]
         dist = math.hypot(dx, dy)
-        if dist > params.get("attacker.possession_dist", POSSESSION_DIST):
+        config = self._tree.behavior_config
+        if dist > config.possession_dist:
+            self._tree._possession_ticks_by_robot[bb.robot_id] = 0
+            self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
             return py_trees.common.Status.FAILURE
 
         # Heading: ball must be in front of the kicker.
         angle_to_ball = math.atan2(dy, dx)
         err = (angle_to_ball - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(err) > params.get("attacker.possession_heading_tol", POSSESSION_HEADING_TOL):
+        if abs(err) > config.possession_heading_tol:
+            self._tree._possession_ticks_by_robot[bb.robot_id] = 0
+            self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
             return py_trees.common.Status.FAILURE
 
+        last_tick = self._tree._possession_last_tick_by_robot.get(bb.robot_id)
+        ticks = self._tree._possession_ticks_by_robot.get(bb.robot_id, 0)
+        if last_tick != self._tree._tick_index - 1:
+            ticks = 0
+        self._tree._possession_ticks_by_robot[bb.robot_id] = ticks + 1
+        self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
         return py_trees.common.Status.SUCCESS
 
 
-class HasClearShot(py_trees.behaviour.Behaviour):
-    """Succeed when no enemy obstructs the line from the ball to the goal.
+class HasSettledPossession(py_trees.behaviour.Behaviour):
+    """Succeed only after brief continuous ball control."""
 
-    For each enemy, compute the perpendicular distance from their position
-    to the ball→goal line segment. If every enemy is farther than
-    ``SHOT_CORRIDOR_RADIUS`` from the segment, the shot is considered clear.
-    Empty enemy list → trivially clear.
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("HasSettledPossession")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        bb = self._tree._blackboard_ref[0]
+        if bb is None:
+            return py_trees.common.Status.FAILURE
+        ticks = self._tree._possession_ticks_by_robot.get(bb.robot_id, 0)
+        if ticks >= self._tree.behavior_config.shot_settle_ticks:
+            return py_trees.common.Status.SUCCESS
+        return py_trees.common.Status.FAILURE
+
+
+class HasClearShot(py_trees.behaviour.Behaviour):
+    """Succeed when shooting is safe: clear corridor, close enough, and facing goal.
+
+    Three checks:
+      1. No opponent within ``SHOT_CORRIDOR_RADIUS`` of the ball→goal line.
+      2. Robot is within ``SHOOT_DIST_THRESHOLD`` of the goal.
+      3. Robot is facing the goal within ``SHOT_HEADING_TOL``.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -155,15 +287,38 @@ class HasClearShot(py_trees.behaviour.Behaviour):
 
     def update(self) -> py_trees.common.Status:
         snap = self._tree._snapshot
-        if snap is None:
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        goal = self._tree.goal_position
+
+        dist_to_goal = math.hypot(
+            robot.position[0] - goal[0], robot.position[1] - goal[1]
+        )
+        config = self._tree.behavior_config
+        if dist_to_goal > config.shoot_dist_threshold:
+            return py_trees.common.Status.FAILURE
+
+        angle_to_goal = math.atan2(
+            goal[1] - robot.position[1], goal[0] - robot.position[0]
+        )
+        heading_err = (angle_to_goal - robot.orientation + math.pi) % (2 * math.pi) - math.pi
+        if abs(heading_err) > config.shot_heading_tol:
             return py_trees.common.Status.FAILURE
 
         ball = snap.ball_position
-        goal = self._tree.goal_position
-        corridor = params.get("attacker.shot_corridor_radius", SHOT_CORRIDOR_RADIUS)
-        for enemy in snap.enemy_robots:
-            if _point_to_segment_dist(enemy.position, ball, goal) <= corridor:
+        for opp in snap.enemy_robots:
+            if (
+                _point_to_segment_dist(opp.position, ball, goal)
+                <= config.shot_corridor_radius
+            ):
                 return py_trees.common.Status.FAILURE
+
         return py_trees.common.Status.SUCCESS
 
 
@@ -194,12 +349,28 @@ class ChaseBall(py_trees.behaviour.Behaviour):
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
         )
+        speed = None
+        if not self._is_closest_to_ball(snap, robot, bb.robot_id):
+            speed = self._tree.behavior_config.chase_slow_speed
         bb.current_intent = IntentMove(
             target_pos=snap.ball_position,
             target_orientation=angle_to_ball,
+            max_speed=speed,
         )
         bb.intent_source = "ChaseBall"
         return py_trees.common.Status.SUCCESS
+
+    @staticmethod
+    def _is_closest_to_ball(snap: Snapshot, robot, my_id: int) -> bool:
+        bx, by = snap.ball_position
+        my_dist = math.hypot(robot.position[0] - bx, robot.position[1] - by)
+        for r in snap.own_robots:
+            if r.robot_id == GOALIE_ID or r.robot_id == my_id:
+                continue
+            d = math.hypot(r.position[0] - bx, r.position[1] - by)
+            if d < my_dist or (d == my_dist and r.robot_id < my_id):
+                return False
+        return True
 
 
 class IsBallInRangeOrMove(py_trees.behaviour.Behaviour):
@@ -228,7 +399,7 @@ class IsBallInRangeOrMove(py_trees.behaviour.Behaviour):
             snap.ball_position[0] - robot.position[0],
             snap.ball_position[1] - robot.position[1],
         )
-        if dist <= BALL_IN_RANGE_THRESHOLD:
+        if dist <= self._tree.behavior_config.ball_in_range_threshold:
             return py_trees.common.Status.SUCCESS
 
         # Ball out of range — write move intent and signal failure so the
@@ -253,7 +424,7 @@ class IsSupporterAvailable(py_trees.behaviour.Behaviour):
         if snap is None:
             return py_trees.common.Status.FAILURE
         for robot in snap.own_robots:
-            if robot.robot_id in SUPPORTER_ROLE_IDS:
+            if robot.robot_id in self._tree.behavior_config.supporter_role_ids:
                 return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -271,7 +442,7 @@ class PassToSupporter(py_trees.behaviour.Behaviour):
         if snap is None or bb is None:
             return py_trees.common.Status.FAILURE
         for robot in snap.own_robots:
-            if robot.robot_id in SUPPORTER_ROLE_IDS:
+            if robot.robot_id in self._tree.behavior_config.supporter_role_ids:
                 bb.current_intent = IntentPass(
                     target_robot_id=robot.robot_id,
                     target_pos=robot.position,
@@ -279,6 +450,124 @@ class PassToSupporter(py_trees.behaviour.Behaviour):
                 bb.intent_source = "PassToSupporter"
                 return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
+
+
+class ShouldLookForPass(py_trees.behaviour.Behaviour):
+    """Succeed when shooting confidence is low enough to consider a pass."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("ShouldLookForPass")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        goal = self._tree.goal_position
+        field_scale = _field_scale(snap, goal)
+        pressure_radius = field_scale * self._tree.behavior_config.pass_pressure_radius_frac
+        under_pressure = (
+            _nearest_opponent_distance(snap, robot.position) <= pressure_radius
+        )
+        shot_blocked = _goal_lane_blocked(
+            snap,
+            goal,
+            self._tree.behavior_config,
+        )
+
+        if shot_blocked or under_pressure:
+            return py_trees.common.Status.SUCCESS
+        return py_trees.common.Status.FAILURE
+
+
+class FindOpenPassTarget(py_trees.behaviour.Behaviour):
+    """Pick a teammate with a clear lane and enough space to receive."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("FindOpenPassTarget")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        target_id, target_pos = _find_best_pass_target(
+            snap,
+            bb.robot_id,
+            self._tree.goal_position,
+            self._tree.behavior_config,
+        )
+        if target_id is None or target_pos is None:
+            return py_trees.common.Status.FAILURE
+
+        self._tree._pass_target_id = target_id
+        self._tree._pass_target_pos = target_pos
+        return py_trees.common.Status.SUCCESS
+
+
+class DribbleTowardPassTarget(py_trees.behaviour.Behaviour):
+    """Hold the ball while turning toward the selected pass target."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("DribbleTowardPassTarget")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        if self._tree._pass_target_pos is None:
+            return py_trees.common.Status.FAILURE
+
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        tx, ty = self._tree._pass_target_pos
+        angle_to_target = math.atan2(
+            ty - robot.position[1],
+            tx - robot.position[0],
+        )
+        err = (
+            angle_to_target - robot.orientation + math.pi
+        ) % (2 * math.pi) - math.pi
+        if abs(err) <= self._tree.behavior_config.pass_orient_tol:
+            return py_trees.common.Status.SUCCESS
+
+        bb.current_intent = IntentDribble(target_pos=self._tree._pass_target_pos)
+        bb.intent_source = "DribbleTowardPassTarget"
+        return py_trees.common.Status.RUNNING
+
+
+class PassToOpenTeammate(py_trees.behaviour.Behaviour):
+    """Write IntentPass to the target selected by FindOpenPassTarget."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("PassToOpenTeammate")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        bb = self._tree._blackboard_ref[0]
+        if bb is None:
+            return py_trees.common.Status.FAILURE
+        if self._tree._pass_target_id is None or self._tree._pass_target_pos is None:
+            return py_trees.common.Status.FAILURE
+
+        bb.current_intent = IntentPass(
+            target_robot_id=self._tree._pass_target_id,
+            target_pos=self._tree._pass_target_pos,
+        )
+        bb.intent_source = "PassToOpenTeammate"
+        return py_trees.common.Status.SUCCESS
 
 
 class HoldPossession(py_trees.behaviour.Behaviour):
@@ -297,8 +586,87 @@ class HoldPossession(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.SUCCESS
 
 
+class IsCloseToGoal(py_trees.behaviour.Behaviour):
+    """Succeed only if the robot is within SHOOT_DIST_THRESHOLD of the goal."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("IsCloseToGoal")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        goal = self._tree.goal_position
+        dist = math.hypot(robot.position[0] - goal[0], robot.position[1] - goal[1])
+        if dist > self._tree.behavior_config.shoot_dist_threshold:
+            return py_trees.common.Status.FAILURE
+        return py_trees.common.Status.SUCCESS
+
+
+class IsBallInOwnHalf(py_trees.behaviour.Behaviour):
+    """Succeed when the ball is in our own half of the field."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("IsBallInOwnHalf")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        if snap is None:
+            return py_trees.common.Status.FAILURE
+        bx = snap.ball_position[0]
+        if self._tree.us_positive:
+            return py_trees.common.Status.SUCCESS if bx > 0 else py_trees.common.Status.FAILURE
+        else:
+            return py_trees.common.Status.SUCCESS if bx < 0 else py_trees.common.Status.FAILURE
+
+
+class WaitNearGoal(py_trees.behaviour.Behaviour):
+    """Hold position in front of the opponent penalty box, facing the ball.
+
+    The wait position sits at the penalty box edge (WAIT_X from centre),
+    tracking the ball's y position so the attacker shifts laterally.
+    Clamped to the opponent's half (between half line and penalty box).
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("WaitNearGoal")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        wait_x = (
+            -self._tree.behavior_config.wait_x
+            if self._tree.us_positive
+            else self._tree.behavior_config.wait_x
+        )
+        wait_y_limit = self._tree.behavior_config.wait_y_limit
+        wait_y = max(-wait_y_limit, min(wait_y_limit, snap.ball_position[1]))
+        angle_to_ball = math.atan2(
+            snap.ball_position[1] - robot.position[1],
+            snap.ball_position[0] - robot.position[0],
+        )
+        bb.current_intent = IntentMove(
+            target_pos=(wait_x, wait_y),
+            target_orientation=angle_to_ball,
+        )
+        bb.intent_source = "WaitNearGoal"
+        return py_trees.common.Status.SUCCESS
+
+
 class ShootAtGoal(py_trees.behaviour.Behaviour):
-    """Write IntentKick toward goal as the last-resort fallback."""
+    """Write IntentKick toward goal."""
 
     def __init__(self, tree_ref: AttackerTree) -> None:
         super().__init__("ShootAtGoal")
@@ -328,19 +696,34 @@ class AttackerTree:
         intent = blackboard.current_intent
     """
 
-    def __init__(self, us_positive: bool = True) -> None:
+    def __init__(
+        self,
+        us_positive: bool = True,
+        behavior_config: AttackerBehaviorConfig | None = None,
+        behavior_config_file: str = BT_TUNING_FILENAME,
+    ) -> None:
         self._snapshot: Snapshot | None = None
         # Shared mutable ref — nodes read the current blackboard without
         # being reconstructed each tick.
         self._blackboard_ref: list = [None]
-        # Convention: us_positive=True means we are on +x, so the enemy
-        # goal is at -x. GOAL_POSITION = (4.5, 0) is the un-mirrored "enemy
+        self.behavior_config = (
+            behavior_config
+            if behavior_config is not None
+            else load_attacker_behavior_config(behavior_config_file)
+        )
+        # Convention: us_positive=True means we are on +x, so the opponent
+        # goal is at -x. GOAL_POSITION = (4.5, 0) is the un-mirrored "opp
         # goal" used when us_positive=False; negate x when us_positive=True.
         self.us_positive = us_positive
         self.goal_position: tuple[float, float] = (
             (-GOAL_POSITION[0], GOAL_POSITION[1]) if us_positive
             else GOAL_POSITION
         )
+        self._pass_target_id: int | None = None
+        self._pass_target_pos: tuple[float, float] | None = None
+        self._tick_index: int = 0
+        self._possession_ticks_by_robot: dict[int, int] = {}
+        self._possession_last_tick_by_robot: dict[int, int] = {}
         self.root = self._build_tree()
 
     # ------------------------------------------------------------------
@@ -356,62 +739,75 @@ class AttackerTree:
         produced for this tick.
         """
         self._blackboard_ref[0] = blackboard
+        self._pass_target_id = None
+        self._pass_target_pos = None
+        self._tick_index += 1
         self.root.tick_once()
 
     # ------------------------------------------------------------------
 
     def _build_tree(self) -> py_trees.composites.Selector:
-        # New topology — asks two questions and acts on the answers:
-        #   Q1: do I have ball control?
-        #   Q2: if yes, is the shot clear?
-        #
         # AttackingSelector (Selector)
-        # ├── ShootSequence  : HasBallControl → HasClearShot → ShootAtGoal
-        # ├── DribbleSequence: HasBallControl → HoldPossession
-        # └── ChaseBall      : IntentMove(ball) — no possession yet
-        #
-        # Selector with memory=False re-evaluates every tick. As soon as we
-        # have possession AND a clean shot, ShootSequence wins. If we lose
-        # the ball, we fall straight to ChaseBall the next tick.
+        # ├── PossessionSequence (Sequence)
+        # │   ├── HasBallControl
+        # │   └── PossessionAction (Selector)
+        # │       ├── ShootSequence (HasClearShot → IsCloseToGoal → ShootAtGoal)
+        # │       └── HoldPossession (dribble toward goal — the default)
+        # ├── WaitSequence (Sequence)
+        # │   ├── IsBallInOwnHalf
+        # │   └── WaitNearGoal
+        # └── ChaseBall (ball in enemy half; closest-check speed logic)
 
-        # ShootSequence — fires only with possession and clear line to goal.
         shoot_seq = py_trees.composites.Sequence(
             name="ShootSequence", memory=False
         )
         shoot_seq.add_children([
-            HasBallControl(self),
+            HasSettledPossession(self),
             HasClearShot(self),
             ShootAtGoal(self),
         ])
 
-        # DribbleSequence — possession but no clear shot: carry toward goal.
-        dribble_seq = py_trees.composites.Sequence(
-            name="DribbleSequence", memory=False
+        pass_seq = py_trees.composites.Sequence(
+            name="PassSequence", memory=False
         )
-        dribble_seq.add_children([
-            HasBallControl(self),
+        pass_seq.add_children([
+            ShouldLookForPass(self),
+            FindOpenPassTarget(self),
+            DribbleTowardPassTarget(self),
+            PassToOpenTeammate(self),
+        ])
+
+        possession_action = py_trees.composites.Selector(
+            name="PossessionAction", memory=False
+        )
+        possession_action.add_children([
+            shoot_seq,
+            pass_seq,
             HoldPossession(self),
         ])
 
-        # PassOrPlaySequence — TEMPORARILY DISABLED (was causing an
-        # oscillation around BALL_IN_RANGE_THRESHOLD). Re-enable when ready
-        # to use real pass logic gated by HasBallControl.
-        # pass_or_play = py_trees.composites.Sequence(
-        #      name="PassOrPlaySequence", memory=False
-        # )
-        # pass_or_play.add_children([
-        #     IsSupporterAvailable(self),
-        #     PassToSupporter(self),
-        # ])
+        possession_seq = py_trees.composites.Sequence(
+            name="PossessionSequence", memory=False
+        )
+        possession_seq.add_children([
+            HasBallControl(self),
+            possession_action,
+        ])
 
-        # Root: AttackingSelector
+        wait_seq = py_trees.composites.Sequence(
+            name="WaitSequence", memory=False
+        )
+        wait_seq.add_children([
+            IsBallInOwnHalf(self),
+            WaitNearGoal(self),
+        ])
+
         root = py_trees.composites.Selector(
             name="AttackingSelector", memory=False
         )
         root.add_children([
-            shoot_seq,
-            # pass_or_play,
-            dribble_seq,
+            possession_seq,
+            wait_seq,
             ChaseBall(self),
         ])
         return root
@@ -426,6 +822,141 @@ def _find_robot(snap: Snapshot, robot_id: int):
         if r.robot_id == robot_id:
             return r
     return None
+
+
+def _find_best_pass_target(
+    snap: Snapshot,
+    passer_id: int,
+    goal: tuple[float, float],
+    config: AttackerBehaviorConfig,
+) -> tuple[int | None, tuple[float, float] | None]:
+    passer = _find_robot(snap, passer_id)
+    if passer is None:
+        return None, None
+
+    field_scale = _field_scale(snap, goal)
+    attack_sign = 1.0 if goal[0] >= snap.ball_position[0] else -1.0
+    min_pass_distance = field_scale * config.pass_min_distance_frac
+    backward_allowance = field_scale * config.pass_backward_allowance_frac
+    marked_distance = field_scale * config.pass_marked_distance_frac
+    lane_clearance = field_scale * config.pass_lane_clearance_frac
+
+    best_id: int | None = None
+    best_pos: tuple[float, float] | None = None
+    best_score = -math.inf
+
+    for teammate in snap.own_robots:
+        if teammate.robot_id in (GOALIE_ID, passer_id):
+            continue
+
+        pass_distance = math.hypot(
+            teammate.position[0] - snap.ball_position[0],
+            teammate.position[1] - snap.ball_position[1],
+        )
+        if pass_distance < min_pass_distance:
+            continue
+
+        forward_progress = (
+            teammate.position[0] - snap.ball_position[0]
+        ) * attack_sign
+        if forward_progress < -backward_allowance:
+            continue
+
+        nearest_opp = _nearest_opponent_distance(snap, teammate.position)
+        if nearest_opp < marked_distance:
+            continue
+
+        obstacles = list(snap.enemy_robots)
+        obstacles.extend(
+            robot
+            for robot in snap.own_robots
+            if robot.robot_id not in (passer_id, teammate.robot_id)
+        )
+        if not line_of_sight_clear(
+            snap.ball_position,
+            teammate.position,
+            obstacles,
+            clearance=lane_clearance,
+        ):
+            continue
+
+        openness = 1.0 if math.isinf(nearest_opp) else _clamp(nearest_opp / field_scale)
+        forward_score = _clamp(
+            (forward_progress + backward_allowance)
+            / (field_scale * config.pass_forward_scale_frac)
+        )
+        ideal_pass_distance = field_scale * config.pass_ideal_distance_frac
+        distance_score = 1.0 - _clamp(
+            abs(pass_distance - ideal_pass_distance)
+            / (field_scale * config.pass_distance_window_frac)
+        )
+        goal_proximity = 1.0 - _clamp(
+            math.hypot(
+                teammate.position[0] - goal[0],
+                teammate.position[1] - goal[1],
+            )
+            / field_scale
+        )
+
+        score = (
+            config.pass_openness_weight * openness
+            + config.pass_forward_score_weight * forward_score
+            + config.pass_distance_score_weight * distance_score
+            + config.pass_goal_proximity_weight * goal_proximity
+        )
+        if score > best_score:
+            best_score = score
+            best_id = teammate.robot_id
+            best_pos = teammate.position
+
+    return best_id, best_pos
+
+
+def _goal_lane_blocked(
+    snap: Snapshot,
+    goal: tuple[float, float],
+    config: AttackerBehaviorConfig,
+) -> bool:
+    field_scale = _field_scale(snap, goal)
+    clearance = max(
+        config.shot_corridor_radius,
+        field_scale * config.pass_lane_clearance_frac,
+    )
+    return any(
+        _point_to_segment_dist(opp.position, snap.ball_position, goal) <= clearance
+        for opp in snap.enemy_robots
+    )
+
+
+def _nearest_opponent_distance(
+    snap: Snapshot,
+    position: tuple[float, float],
+) -> float:
+    if not snap.enemy_robots:
+        return math.inf
+    return min(
+        math.hypot(position[0] - opp.position[0], position[1] - opp.position[1])
+        for opp in snap.enemy_robots
+    )
+
+
+def _field_scale(snap: Snapshot, goal: tuple[float, float]) -> float:
+    points = [snap.ball_position, goal]
+    points.extend(robot.position for robot in snap.own_robots)
+    points.extend(robot.position for robot in snap.enemy_robots)
+
+    max_dist = math.hypot(FIELD_HALF_X * 2.0, FIELD_HALF_Y * 2.0)
+    for i, point_a in enumerate(points):
+        for point_b in points[i + 1:]:
+            max_dist = max(
+                max_dist,
+                math.hypot(point_a[0] - point_b[0], point_a[1] - point_b[1]),
+            )
+    return max(max_dist, 1.0)
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
 
 
 def _point_to_segment_dist(

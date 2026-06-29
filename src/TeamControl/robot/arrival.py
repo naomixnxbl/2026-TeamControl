@@ -11,4 +11,4 @@ def is_close(target_xy: tuple, current_xy: tuple, threshold: float = 50.0) -> bo
 def is_facing_direction(target_theta: float, current_theta: float, threshold: float = 0.05) -> bool:
     """Return True if the shortest angular difference between two angles is under threshold (radians)."""
     diff = (target_theta - current_theta + math.pi) % (2 * math.pi) - math.pi
-    return abs(diff) < threshold
+    return abs(diff) < threshold and not math.isclose(abs(diff), threshold, rel_tol=0.0, abs_tol=1e-12)

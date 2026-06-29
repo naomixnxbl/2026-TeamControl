@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(.venv/Scripts/python -m pytest tests/bt/test_supporter_tree.py -v)"
+    ]
+  }
+}
