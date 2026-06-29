@@ -35,6 +35,7 @@ from TeamControl.ui.log_panel import LogPanel
 from TeamControl.ui.map_canvas import MapCanvas, MapDebugWidget
 from TeamControl.ui.onboard_possession_panel import OnboardPossessionPanel
 from TeamControl.ui.settings_page import SettingsPage
+from TeamControl.ui.skill_lab_page import SkillLabPage
 from TeamControl.ui.test_panel import TestPanel
 from TeamControl.ui.theme import ACCENT, DANGER, QSS, SUCCESS, TEXT, TEXT_DIM, WARNING
 
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         self._log_panel = LogPanel()
         self._map_debug = MapDebugWidget()
         self._onboard_panel = OnboardPossessionPanel(engine=self._engine)
+        self._skill_lab = SkillLabPage(engine=self._engine, field=self._field)
 
         # ── Central tabs ──────────────────────────────────────────
         self._tabs = QTabWidget()
@@ -85,6 +87,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._settings, "  Settings  ")
         self._tabs.addTab(self._log_panel, "  Console  ")
         self._tabs.addTab(self._test_panel, "  Hardware Test  ")
+        self._tabs.addTab(self._skill_lab, "  Skill Lab  ")
         self._tabs.addTab(self._dispatch_panel, "  Dispatcher  ")
         self._tabs.addTab(self._onboard_panel, "  Onboard Possession  ")
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -314,6 +317,9 @@ class MainWindow(QMainWindow):
         self._place_robot_from_dashboard(robot_id, is_yellow, x_mm, y_mm, 0.0)
 
     def _go_to_point_from_field(self, x_mm, y_mm):
+        if self._tabs.currentWidget() is self._skill_lab:
+            self._skill_lab.set_target_point(x_mm, y_mm)
+            return
         if self._dashboard_block_reason("Go to point"):
             return
         self._test_panel.go_to_point(x_mm, y_mm)
@@ -324,6 +330,9 @@ class MainWindow(QMainWindow):
         self._test_panel.field_action(action_name)
 
     def _select_robot_from_field(self, is_yellow: bool, robot_id: int):
+        if self._tabs.currentWidget() is self._skill_lab:
+            self._skill_lab.select_robot(is_yellow, robot_id)
+            return
         if self._dashboard_block_reason("Robot control selection"):
             return
         self._test_panel.select_robot(is_yellow, robot_id)
@@ -395,6 +404,7 @@ class MainWindow(QMainWindow):
         self._dashboard.set_engine_running(False)
         self._settings.set_engine_running(False)
         self._dispatch_panel.set_running(False)
+        self._skill_lab.stop_skill()
 
     def _on_frame(self, snap):
         self._dashboard.update_frame(snap)
@@ -407,6 +417,7 @@ class MainWindow(QMainWindow):
     # ── Cleanup ──────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        self._skill_lab.stop_skill()
         if self._engine.is_running:
             self._engine.stop()
         event.accept()
