@@ -6,17 +6,14 @@ Topology:
     ├── PossessionSequence (Sequence)
     │   ├── HasBallControl
     │   └── PossessionAction (Selector)
-    │       ├── ShootSequence (HasClearShot → ShootAtGoal)
+    │       ├── ShootSequence (HasSettledPossession → HasClearShot → ShootAtGoal)
+    │       ├── PassSequence  (ShouldLookForPass → FindOpenPassTarget → …)
     │       └── HoldPossession (dribble toward goal — the default)
-    ├── WaitSequence (Sequence)
-    │   ├── IsBallInOwnHalf
-    │   └── WaitNearGoal (camp in front of enemy goal, face ball)
-    └── ChaseBall (ball in enemy half; slow speed if not closest)
+    └── ChaseBall (always chase; throttles speed if not closest)
 
 Priority:
-    possession → dribble toward goal (default), shoot only if clear AND close
-    no possession + ball in own half → wait near enemy goal
-    no possession + ball in enemy half → chase ball
+    possession → shoot if settled+clear, pass if blocked/under pressure, else dribble
+    no possession → chase ball (throttled to CHASE_SLOW_SPEED if another robot is closer)
 
 Known bugs / areas for improvement
 -----------------------------------
@@ -751,12 +748,20 @@ class AttackerTree:
         # ├── PossessionSequence (Sequence)
         # │   ├── HasBallControl
         # │   └── PossessionAction (Selector)
-        # │       ├── ShootSequence (HasClearShot → IsCloseToGoal → ShootAtGoal)
+        # │       ├── ShootSequence (HasSettledPossession → HasClearShot → ShootAtGoal)
+        # │       ├── PassSequence  (ShouldLookForPass → FindOpenPassTarget → …)
         # │       └── HoldPossession (dribble toward goal — the default)
-        # ├── WaitSequence (Sequence)
-        # │   ├── IsBallInOwnHalf
-        # │   └── WaitNearGoal
-        # └── ChaseBall (ball in enemy half; closest-check speed logic)
+        # └── ChaseBall (always chase; throttles to CHASE_SLOW_SPEED if not closest)
+        #
+        # NOTE: WaitNearGoal / IsBallInOwnHalf branch was removed.
+        # When it was active, heuristic role-swap created a feedback loop:
+        # the robot nearest the ball would be promoted to ATTACKER, immediately
+        # U-turn toward the opponent half (WaitNearGoal), stop being closest,
+        # lose the role, and the next-nearest robot repeated the cycle — robots
+        # endlessly took turns approaching the ball without ever picking it up.
+        # Removing the branch makes the attacker chase regardless of which half
+        # the ball is in; ChaseBall's closest-robot check already throttles
+        # non-primary chasers so the team doesn't crowd the ball.
 
         shoot_seq = py_trees.composites.Sequence(
             name="ShootSequence", memory=False
@@ -794,20 +799,11 @@ class AttackerTree:
             possession_action,
         ])
 
-        wait_seq = py_trees.composites.Sequence(
-            name="WaitSequence", memory=False
-        )
-        wait_seq.add_children([
-            IsBallInOwnHalf(self),
-            WaitNearGoal(self),
-        ])
-
         root = py_trees.composites.Selector(
             name="AttackingSelector", memory=False
         )
         root.add_children([
             possession_seq,
-            wait_seq,
             ChaseBall(self),
         ])
         return root

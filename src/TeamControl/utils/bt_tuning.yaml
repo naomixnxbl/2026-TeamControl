@@ -205,14 +205,6 @@ role_swap:
 
 behavior_tree:
   attacker:
-    # Default: 0.8. Legacy ball-range threshold used by the older pass branch.
-    # Higher = treats the ball as reachable from farther away.
-    ball_in_range_threshold: 0.8
-
-    # Default: [3, 4]. Legacy supporter robot IDs used by the older supporter
-    # availability/pass branch.
-    supporter_role_ids: [3, 4]
-
     # Default: 0.11. Centre-to-centre distance for claiming ball possession.
     # Higher = easier to claim possession; lower = stricter dribbler contact.
     possession_dist: 0.11
@@ -233,20 +225,13 @@ behavior_tree:
     # Higher = less instant shooting after receiving; lower = shoots sooner.
     shot_settle_ticks: 30
 
-    # Default: 0.2. Max speed for non-closest attackers chasing the ball.
-    # Lower = less crowding; higher = more aggressive secondary chasing.
+    # Default: 0.2 m/s. Max speed when chasing the ball but not the closest robot.
+    # Lower = less crowding around the ball; higher = more aggressive secondary pressure.
     chase_slow_speed: 0.2
 
     # Default: 2.0 metres. Max distance to goal where a clear shot is allowed.
     # Higher = attempts longer shots; lower = carries/passes closer first.
     shoot_dist_threshold: 2.0
-
-    # Default: 3.5 metres. X position used by WaitNearGoal before the opponent
-    # defense box, mirrored per team side.
-    wait_x: 3.5
-
-    # Default: 3.0 metres. Clamp for WaitNearGoal lateral movement.
-    wait_y_limit: 3.0
 
     # Default: 0.08. Minimum pass distance as a fraction of field scale.
     # Higher = ignores short passes.

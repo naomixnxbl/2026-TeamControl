@@ -74,6 +74,11 @@ OWN_GOAL_LINE_X: float = -4.5
 # Mirrored to (+1.5, 0) for us_positive=True.
 PENALTY_SPOT: tuple[float, float] = (-1.5, 0.0)
 
+# Derived field constants used inside handler methods.
+_GOAL_HW_M: float = 1.0   # goal half-width (goal mouth ±1 m from centre)
+_HALF_LEN_M: float = 4.5  # field half-length (x)
+_HALF_WID_M: float = 3.0  # field half-width  (y)
+
 # Home positions robots return to during STOPPED — spread across own half (negative-x for us_positive=False).
 # Mirrored in Coordinator.__init__ when us_positive=True.
 STOPPED_HOME_POSITIONS: dict[int, tuple[float, float]] = {
@@ -337,6 +342,7 @@ class Coordinator:
         self._penalty_defend_carry: bool = False
         self._penalty_defend_ball_ref: tuple[float, float] | None = None
         self._enemy_free_kick_ball_ref: tuple[float, float] | None = None
+        self._free_kick_kind: GamePhase | None = None
         self._last_phase: GamePhase | None = None
         self._pre_halt_phase: GamePhase | None = None  # phase before HALTED
         if us_positive:
@@ -384,6 +390,7 @@ class Coordinator:
             self._free_kick_kicker_hold = None
             self._free_kick_double_touch_cleared = False
             self._enemy_free_kick_ball_ref = None
+            self._free_kick_kind = None
             # Preserve kickoff state when GC skips straight from KICKOFF/PREPARE_KICKOFF
             # to RUNNING before the kicker has fired — we finish the kick in RUNNING.
             kickoff_carry = (
@@ -498,8 +505,8 @@ class Coordinator:
             return self._finalize_intents(snapshot, robot_ids)
 
         # RUNNING — finish enemy kickoff positioning if carry is active.
-        if self._enemy_kickoff_carry:
-            result = self._handle_enemy_kickoff(snapshot, robot_ids)
+        if self._opp_kickoff_carry:
+            result = self._handle_opp_kickoff(snapshot, robot_ids)
             # Clear carry once all robots are within 0.2m of their slots.
             all_at_slot = True
             for rid in robot_ids:
@@ -798,23 +805,12 @@ class Coordinator:
                     if not self._kickoff_has_kicked:
                         self._kickoff_has_kicked = True
                         self._kickoff_ball_ref = (bx, by)
-                    bb.current_intent = IntentKick(target_pos=self._enemy_goal)
+                    bb.current_intent = IntentKick(target_pos=self._opp_goal)
                 elif dist_to_approach < 0.15:
                     bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                 else:
                     bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
 
-            elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
-                target = (self._own_goal_line_x, max(-_GOAL_HW_M, min(_GOAL_HW_M, by)))
-                bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
-                if self._kickoff_kicker_ready:
-                    bb.current_intent = IntentKick(target_pos=self._opp_goal)
-                elif dist_to_approach < 0.10:
-                    bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
-                else:
-                    bb.current_intent = IntentMove(
-                        target_pos=(approach_x, by), target_orientation=None
-                    )
             elif self._is_goalie(robot_id):
                 by = snapshot.ball_position[1]
                 target = (self._own_goal_line_x, max(-1.0, min(1.0, by)))
@@ -1018,7 +1014,7 @@ class Coordinator:
                         if not self._free_kick_has_kicked:
                             self._free_kick_has_kicked = True
                             self._free_kick_ball_ref = (bx, by)  # ref from actual kick position
-                        bb.current_intent = IntentKick(target_pos=self._enemy_goal)
+                        bb.current_intent = IntentKick(target_pos=self._opp_goal)
                     elif dist_to_approach < 0.15:
                         bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                     else:
@@ -1427,7 +1423,7 @@ class Coordinator:
                     dist_to_approach = math.hypot(robot.position[0] - approach_x, robot.position[1] - by)
                     on_correct_side = (robot.position[0] - bx) * self._attack_sign < -0.05
                     if dist_to_ball < 0.15 and on_correct_side:
-                        bb.current_intent = IntentKick(target_pos=self._enemy_goal)
+                        bb.current_intent = IntentKick(target_pos=self._opp_goal)
                     elif dist_to_approach < 0.15:
                         bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                     else:

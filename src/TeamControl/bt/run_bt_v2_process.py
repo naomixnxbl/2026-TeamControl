@@ -251,9 +251,9 @@ def run_bt_v2_process(
             # Print whenever the game phase changes
             if phase != last_phase:
                 if last_phase is None:
-                    logger.proc(f"{tag} initial phase: {phase}")
+                    print(f"{tag} initial phase: {phase}", flush=True)
                 else:
-                    logger.proc(f"{tag} phase changed: {last_phase} -> {phase}")
+                    print(f"{tag} phase changed: {last_phase} -> {phase}", flush=True)
                 if verbose:
                     bx, by = snapshot.ball_position
                     print(f"{tag} t={tick_count} phase -> {phase.value} ball=({bx:.2f},{by:.2f})", flush=True)
