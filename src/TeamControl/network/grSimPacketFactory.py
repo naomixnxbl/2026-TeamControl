@@ -9,7 +9,7 @@ class grSimPacketFactory():
     ## responsibility of class : generate grSim packet with data provided
     
     # class constants : 
-    KICK_SPEED_X = 10.0
+    KICK_SPEED_X = 4.0
     KICK_SPEED_Z = 0.0 # chip kick
     
     
