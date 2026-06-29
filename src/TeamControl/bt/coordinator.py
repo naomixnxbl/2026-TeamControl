@@ -341,6 +341,7 @@ class Coordinator:
             if phase in (GamePhase.PREPARE_PENALTY, GamePhase.PENALTY_SHOOT):
                 self._penalty_shoot_carry = True
                 self._penalty_shoot_done = False
+                self._penalty_shoot_ball_ref = None  # fresh ref each penalty attempt
             elif phase == GamePhase.RUNNING and self._penalty_shoot_carry and not self._penalty_shoot_done:
                 pass  # keep carry active
             else:
@@ -458,6 +459,7 @@ class Coordinator:
             if kicker_bb is not None and isinstance(kicker_bb.current_intent, IntentKick):
                 self._penalty_shoot_done = True
                 self._penalty_shoot_carry = False
+                self._penalty_shoot_ball_ref = None  # clear so next penalty starts fresh
             return result
 
         return self._normal_tick(snapshot, robot_ids)
@@ -1011,13 +1013,14 @@ class Coordinator:
     def _handle_prepare_penalty_opp(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
         """PREPARE_PENALTY_OPP: position our robots before enemy shoots.
 
-        Goalie to own goal line. All others 1m behind ball (own-goal side).
-        Robots that need to cross the ball's x position are rerouted in y first
-        to avoid bumping the ball.
+        Goalie to own goal line. All others ≥1m behind ball (toward centre — away
+        from our goal, same side as the kicker's run-up).
         """
         bx, by = snapshot.ball_position
-        wait_x = bx - self._attack_sign * 1.1
-        spread_y = [0.0, -0.7, 0.7, -1.4]
+        # During enemy penalty, "behind the ball" means TOWARD centre, not toward our goal.
+        wait_x = bx + self._attack_sign * 1.1
+        # Cluster all non-goalie robots together on the positive-y side, lined up in a row.
+        cluster_y = [0.5, 1.0, 1.5, 2.0, 2.5]
         intents: list[Intent] = []
         slot = 0
         for robot_id in robot_ids:
@@ -1031,19 +1034,9 @@ class Coordinator:
                     target_pos=(self._own_goal_line_x, by_clamped), target_orientation=None
                 )
             else:
-                sy = spread_y[slot % len(spread_y)]
+                target_y = cluster_y[slot % len(cluster_y)]
                 slot += 1
-                final_target = (wait_x, by + sy)
-                # If robot must cross ball's x to reach wait_x, detour in y first.
-                needs_cross = (robot.position[0] - bx) * self._attack_sign > 0
-                clear_of_ball_y = abs(robot.position[1] - by) > 0.6
-                if needs_cross and not clear_of_ball_y:
-                    detour_y = by + (_HALF_WID_M if slot % 2 == 0 else -_HALF_WID_M)
-                    bb.current_intent = IntentMove(
-                        target_pos=(robot.position[0], detour_y), target_orientation=None
-                    )
-                else:
-                    bb.current_intent = IntentMove(target_pos=final_target, target_orientation=None)
+                bb.current_intent = IntentMove(target_pos=(wait_x, target_y), target_orientation=None)
             intents.append(bb.current_intent)
         return intents
 
@@ -1124,24 +1117,12 @@ class Coordinator:
                 by = max(-_GOAL_HW_M, min(_GOAL_HW_M, snapshot.ball_position[1]))
                 target = (self._own_goal_line_x, by)
             else:
-                # Non-goalie defenders: stay ≥1m behind the ball (own-goal side).
+                # Non-goalie defenders: ≥1m behind ball toward centre, clustered on +y side.
                 bx, by = snapshot.ball_position
-                wait_x = bx - self._attack_sign * 1.1
-                
-                # Safety clamp: ensure wait_x is actually on own-goal side of ball
-                # and doesn't drift past our goal line.
-                if self._attack_sign > 0:
-                    # Own goal at -x, attack toward +x. Ensure wait_x ≤ bx and ≥ goal line.
-                    wait_x = min(wait_x, bx - 1.0)
-                    wait_x = max(wait_x, self._own_goal_line_x + 0.3)
-                else:
-                    # Own goal at +x, attack toward -x. Ensure wait_x ≥ bx and ≤ goal line.
-                    wait_x = max(wait_x, bx + 1.0)
-                    wait_x = min(wait_x, self._own_goal_line_x - 0.3)
-                
-                spread_y = [0.0, -0.7, 0.7, -1.4, 1.4]
-                sy = spread_y[robot_id % len(spread_y)]
-                target = (wait_x, by + sy)
+                wait_x = bx + self._attack_sign * 1.1
+                cluster_y = [0.5, 1.0, 1.5, 2.0, 2.5]
+                sy = cluster_y[robot_id % len(cluster_y)]
+                target = (wait_x, sy)
             bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
             intents.append(bb.current_intent)
         return intents

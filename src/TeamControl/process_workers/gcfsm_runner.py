@@ -186,56 +186,50 @@ class GCfsm (BaseWorker):
             pos = (new_ref_msg.designated_position.x, new_ref_msg.designated_position.y)
             self.output_q.put_nowait((PacketType.BALL_PLACEMENT_POS, pos))
 
-    def update_state(self,command,stage):
-        if not isinstance(command,Command) or not isinstance(stage,Stage):
+    def update_state(self, command, stage):
+        if not isinstance(command, Command) or not isinstance(stage, Stage):
             return
-        if command == Command.STOP:
+
+        if command == Command.HALT:
+            state = GameState.HALTED
+        elif command == Command.STOP:
             state = GameState.STOPPED
-        # kick off
         elif command == Command.PREPARE_KICKOFF_YELLOW:
             state = GameState.OUR_PREPARE_KICKOFF if self.us_yellow is True else GameState.ENEMY_PREPARE_KICKOFF
         elif command == Command.PREPARE_KICKOFF_BLUE:
             state = GameState.OUR_PREPARE_KICKOFF if self.us_yellow is False else GameState.ENEMY_PREPARE_KICKOFF
-
-		# penalty
-        elif self.current_command == Command.PREPARE_PENALTY_YELLOW:
-            state = GameState.OUR_PREPARE_PENALTY if self.us_yellow is False else GameState.ENEMY_PREPARE_PENALTY
-        elif self.current_command == Command.PREPARE_PENALTY_BLUE:
-            state = GameState.OUR_PREPARE_PENALTY if self.us_yellow is False else GameState.ENEMY_PREPARE_PENALTY
-
-		# ball placement
-        elif command == Command.BALL_PLACEMENT_YELLOW:
-            state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is True else GameState.ENEMY_BALL_PLACEMENT
-        elif command == Command.BALL_PLACEMENT_BLUE:
-            state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is False else GameState.ENEMY_BALL_PLACEMENT
-
-
-        elif command == Command.FORCE_START:
-            state = GameState.RUNNING
         elif command == Command.PREPARE_PENALTY_YELLOW:
-            state = GameState.PREPARE_PENALTY if self.us_yellow is True else GameState.PREPARE_PENALTY_OPP
+            state = GameState.OUR_PREPARE_PENALTY if self.us_yellow is True else GameState.ENEMY_PREPARE_PENALTY
         elif command == Command.PREPARE_PENALTY_BLUE:
-            state = GameState.PREPARE_PENALTY if self.us_yellow is False else GameState.PREPARE_PENALTY_OPP
+            state = GameState.OUR_PREPARE_PENALTY if self.us_yellow is False else GameState.ENEMY_PREPARE_PENALTY
         elif command in {Command.DIRECT_FREE_YELLOW, Command.INDIRECT_FREE_YELLOW}:
             state = GameState.OUR_FREE_KICK if self.us_yellow is True else GameState.ENEMY_FREE_KICK
         elif command in {Command.DIRECT_FREE_BLUE, Command.INDIRECT_FREE_BLUE}:
             state = GameState.OUR_FREE_KICK if self.us_yellow is False else GameState.ENEMY_FREE_KICK
+        elif command == Command.BALL_PLACEMENT_YELLOW:
+            state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is True else GameState.ENEMY_BALL_PLACEMENT
+        elif command == Command.BALL_PLACEMENT_BLUE:
+            state = GameState.OUR_BALL_PLACEMENT if self.us_yellow is False else GameState.ENEMY_BALL_PLACEMENT
+        elif command == Command.FORCE_START:
+            state = GameState.RUNNING
         elif command == Command.NORMAL_START:
             if self.current_command == Command.PREPARE_KICKOFF_YELLOW:
                 state = GameState.OUR_KICKOFF if self.us_yellow is True else GameState.ENEMY_KICKOFF
             elif self.current_command == Command.PREPARE_KICKOFF_BLUE:
                 state = GameState.OUR_KICKOFF if self.us_yellow is False else GameState.ENEMY_KICKOFF
-            else :
+            elif self.current_command == Command.PREPARE_PENALTY_YELLOW:
+                state = GameState.OUR_PENALTY_SHOOTOUT if self.us_yellow is True else GameState.ENEMY_PENALTY_SHOOTOUT
+            elif self.current_command == Command.PREPARE_PENALTY_BLUE:
+                state = GameState.OUR_PENALTY_SHOOTOUT if self.us_yellow is False else GameState.ENEMY_PENALTY_SHOOTOUT
+            else:
                 state = GameState.RUNNING
-        elif command == Command.TIMEOUT_YELLOW:
-            state = GameState.HALTED
-        elif command == Command.TIMEOUT_BLUE:
+        elif command in {Command.TIMEOUT_YELLOW, Command.TIMEOUT_BLUE}:
             state = GameState.HALTED
         else:
-            state = GameState.HALTED
-            if stage == Stage.NORMAL_HALF_TIME or stage == Stage.EXTRA_HALF_TIME:
+            if stage in (Stage.NORMAL_HALF_TIME, Stage.EXTRA_HALF_TIME):
                 state = GameState.HALF_TIME
-
+            else:
+                state = GameState.HALTED
 
         if state != self.current_state:
             packet = (PacketType.NEW_STATE, state)
