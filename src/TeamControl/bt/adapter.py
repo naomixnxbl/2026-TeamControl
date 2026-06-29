@@ -26,7 +26,6 @@ keeps running while higher fidelity is added.
 from __future__ import annotations
 
 import math
-import time
 from typing import Iterable
 
 from TeamControl.bt.contracts.intent import (
@@ -52,7 +51,7 @@ from TeamControl.SSL.game_controller.common import GameState
 
 # Runtime world state comes in as raw SSL/grSim millimetres.
 _MM_TO_M = 0.001
-DRIBBLE_TIME_LIMIT_SECONDS = 3.0
+DRIBBLE_DISTANCE_LIMIT_M = 1.0  # SSL §8.4.2: robots may not dribble > 1 m continuously
 
 BALL_TARGET_EPSILON = 0.08
 BALL_APPROACH_STOP_DISTANCE = 0.35
@@ -416,31 +415,52 @@ def _kick_motion_target(
 
 
 class DribbleLimitTracker:
-    """Tracks continuous dribble time per robot.
+    """Tracks continuous dribble distance per robot to enforce SSL §8.4.2.
 
-    SSL rules cap continuous ball dribbling. This tracker only controls the
-    dribbler/spinner output; tactical choices such as kicking or passing after
-    the cap still belong in the behaviour trees.
+    A robot may not dribble the ball more than 1 metre without releasing it.
+    The limit is measured as straight-line displacement from the ball position
+    when dribbling began. Releasing the ball (kick, pass, or losing possession)
+    resets the counter.
     """
 
-    def __init__(self, max_dribble_seconds: float = DRIBBLE_TIME_LIMIT_SECONDS) -> None:
-        self.max_dribble_seconds = float(max_dribble_seconds)
-        self._dribble_started_at: dict[int, float] = {}
+    def __init__(self, max_dribble_distance_m: float = DRIBBLE_DISTANCE_LIMIT_M) -> None:
+        self.max_dribble_distance_m = float(max_dribble_distance_m)
+        self._dribble_start_pos: dict[int, tuple[float, float]] = {}
 
     def should_enable_dribbler(
         self,
         robot_id: int,
         wants_dribble: bool,
         *,
-        now: float | None = None,
+        ball_pos: tuple[float, float] | None = None,
     ) -> bool:
         if not wants_dribble:
-            self._dribble_started_at.pop(robot_id, None)
+            self._dribble_start_pos.pop(robot_id, None)
             return False
 
-        current_time = time.monotonic() if now is None else float(now)
-        started_at = self._dribble_started_at.setdefault(robot_id, current_time)
-        return current_time - started_at <= self.max_dribble_seconds
+        if ball_pos is None:
+            return True
+
+        if robot_id not in self._dribble_start_pos:
+            self._dribble_start_pos[robot_id] = ball_pos
+            return True
+
+        start = self._dribble_start_pos[robot_id]
+        dist = math.hypot(ball_pos[0] - start[0], ball_pos[1] - start[1])
+        return dist < self.max_dribble_distance_m
+
+
+def load_dribble_distance_limit(config_filename: str = "bt_tuning.yaml") -> float:
+    """Read rule_limits.dribble_distance_limit_m from bt_tuning.yaml."""
+    try:
+        import yaml as _yaml
+        from pathlib import Path as _Path
+        path = _Path(__file__).resolve().parents[1] / "utils" / config_filename
+        with open(path) as f:
+            raw = _yaml.safe_load(f) or {}
+        return float(raw.get("rule_limits", {}).get("dribble_distance_limit_m", DRIBBLE_DISTANCE_LIMIT_M))
+    except Exception:
+        return DRIBBLE_DISTANCE_LIMIT_M
 
 
 def intent_to_motion_target(
@@ -553,7 +573,6 @@ def dispatch_coordinator_output(
     dispatcher_q,
     run_time: float = 1.0,
     dribble_tracker: DribbleLimitTracker | None = None,
-    now: float | None = None,
 ) -> int:
     """Walk each robot's blackboard after a ``Coordinator.tick`` and emit a
     ``RobotCommand`` per non-empty intent.
@@ -568,21 +587,24 @@ def dispatch_coordinator_output(
         bb = coordinator.blackboards.get(rid)
         if bb is None or bb.current_intent is None:
             if dribble_tracker is not None:
-                dribble_tracker.should_enable_dribbler(rid, False, now=now)
+                dribble_tracker.should_enable_dribbler(rid, False, ball_pos=snapshot.ball_position)
             continue
-        wants_dribble = isinstance(bb.current_intent, IntentDribble)
+        intent = bb.current_intent
+        wants_dribble = isinstance(intent, IntentDribble)
         dribble_allowed = True
         if dribble_tracker is not None:
             dribble_allowed = dribble_tracker.should_enable_dribbler(
                 rid,
                 wants_dribble,
-                now=now,
+                ball_pos=snapshot.ball_position,
             )
-        cmd = intent_to_robot_command(bb.current_intent, rid, snapshot, is_yellow)
+        if wants_dribble and not dribble_allowed:
+            # SSL §8.4.2: 1-metre limit reached — force a kick toward the dribble
+            # target instead of continuing to carry.
+            intent = IntentKick(target_pos=intent.target_pos)
+        cmd = intent_to_robot_command(intent, rid, snapshot, is_yellow)
         if cmd is None:
             continue
-        if wants_dribble and not dribble_allowed:
-            cmd.dribble = 0
         if not dispatcher_q.full():
             dispatcher_q.put([cmd, run_time])
             sent += 1

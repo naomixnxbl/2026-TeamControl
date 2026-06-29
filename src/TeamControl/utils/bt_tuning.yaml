@@ -1,6 +1,7 @@
 # Behaviour-tree tuning for TeamControl.
 #
-# This file intentionally contains two different kinds of tuning:
+# This file intentionally contains three different kinds of tuning:
+# - rule_limits: fixed SSL rulebook limits loaded at process startup.
 # - role_swap: heuristics that decide which robot becomes attacker/supporter/defender.
 # - behavior_tree: variables used inside a specific role tree after roles are assigned.
 #
@@ -10,6 +11,12 @@
 #
 # The values checked into this file are the default state. Behavior-tree loaders
 # fall back to the same values when a behavior_tree key is missing.
+
+rule_limits:
+  # Default: 1.0 metres. SSL §8.4.2 maximum continuous dribble distance.
+  # Do not set above 1.0 — that violates the rule. Lower values add an extra
+  # safety margin if the referee tends to call tight dribble violations.
+  dribble_distance_limit_m: 1.0
 
 role_swap:
   # Practical tuning rule:
@@ -221,9 +228,9 @@ behavior_tree:
     # Higher = shoots with looser alignment; lower = waits for better aim.
     shot_heading_tol: 0.4
 
-    # Default: 30 ticks. Continuous possession required before shooting.
+    # Default: 15 ticks. Continuous possession required before shooting.
     # Higher = less instant shooting after receiving; lower = shoots sooner.
-    shot_settle_ticks: 30
+    shot_settle_ticks: 15
 
     # Default: 0.2 m/s. Max speed when chasing the ball but not the closest robot.
     # Lower = less crowding around the ball; higher = more aggressive secondary pressure.

@@ -20,6 +20,7 @@ from TeamControl.bt.adapter import (
     DribbleLimitTracker,
     build_snapshot_from_world_model,
     dispatch_coordinator_output,
+    load_dribble_distance_limit,
 )
 from TeamControl.bt.contracts.blackboard import RoleType
 from TeamControl.bt.contracts.snapshot import GamePhase
@@ -227,7 +228,7 @@ def run_bt_v2_process(
         heuristic_role_swap=heuristic_role_swap,
         movement_safety=movement_safety,
     )
-    dribble_tracker = DribbleLimitTracker()
+    dribble_tracker = DribbleLimitTracker(max_dribble_distance_m=load_dribble_distance_limit())
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
 
     tag = "[BT-YELLOW]" if is_yellow else "[BT-BLUE]"

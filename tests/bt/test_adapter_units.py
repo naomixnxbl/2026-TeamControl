@@ -128,65 +128,51 @@ def test_build_snapshot_filters_inactive_same_colour_robots_as_obstacles():
     }
 
 
-def test_dribble_tracker_allows_up_to_three_seconds():
-    tracker = DribbleLimitTracker(max_dribble_seconds=3.0)
+def test_dribble_tracker_allows_up_to_one_metre():
+    tracker = DribbleLimitTracker(max_dribble_distance_m=1.0)
 
-    assert tracker.should_enable_dribbler(1, True, now=10.0) is True
-    assert tracker.should_enable_dribbler(1, True, now=13.0) is True
-    assert tracker.should_enable_dribbler(1, True, now=13.01) is False
+    # First call records start position (0, 0)
+    assert tracker.should_enable_dribbler(1, True, ball_pos=(0.0, 0.0)) is True
+    # Still within 1 m
+    assert tracker.should_enable_dribbler(1, True, ball_pos=(0.5, 0.0)) is True
+    assert tracker.should_enable_dribbler(1, True, ball_pos=(0.999, 0.0)) is True
+    # At/beyond 1 m
+    assert tracker.should_enable_dribbler(1, True, ball_pos=(1.001, 0.0)) is False
 
 
-def test_dispatch_turns_dribbler_off_after_limit_and_resets():
-    snapshot = _bt_snapshot()
-    tracker = DribbleLimitTracker(max_dribble_seconds=3.0)
-    coordinator = _Coordinator(IntentDribble(target_pos=(1.0, 0.0)))
+def test_dispatch_forces_kick_after_limit_and_resets():
+    snapshot_start = _bt_snapshot(ball_pos=(0.0, 0.0))
+    tracker = DribbleLimitTracker(max_dribble_distance_m=1.0)
+    coordinator = _Coordinator(IntentDribble(target_pos=(4.5, 0.0)))
     queue = _Queue()
 
+    # First dispatch — records start position, dribble allowed
     dispatch_coordinator_output(
-        coordinator,
-        [1],
-        snapshot,
-        True,
-        queue,
-        dribble_tracker=tracker,
-        now=20.0,
+        coordinator, [1], snapshot_start, True, queue, dribble_tracker=tracker
     )
     assert queue.items[-1][0].dribble == 1
 
+    # Second dispatch after exceeding 1 m — limit fires, dribbler disabled
+    snapshot_over = _bt_snapshot(ball_pos=(1.01, 0.0))
     dispatch_coordinator_output(
-        coordinator,
-        [1],
-        snapshot,
-        True,
-        queue,
-        dribble_tracker=tracker,
-        now=23.01,
+        coordinator, [1], snapshot_over, True, queue, dribble_tracker=tracker
     )
     assert queue.items[-1][0].dribble == 0
 
+    # Non-dribble intent resets the tracker
     coordinator.blackboards[1].current_intent = IntentMove(
         target_pos=(0.0, 0.0),
         target_orientation=None,
     )
     dispatch_coordinator_output(
-        coordinator,
-        [1],
-        snapshot,
-        True,
-        queue,
-        dribble_tracker=tracker,
-        now=23.02,
+        coordinator, [1], snapshot_over, True, queue, dribble_tracker=tracker
     )
 
-    coordinator.blackboards[1].current_intent = IntentDribble(target_pos=(1.0, 0.0))
+    # New dribble from a fresh position — allowed again
+    coordinator.blackboards[1].current_intent = IntentDribble(target_pos=(4.5, 0.0))
+    snapshot_new = _bt_snapshot(ball_pos=(0.5, 0.0))
     dispatch_coordinator_output(
-        coordinator,
-        [1],
-        snapshot,
-        True,
-        queue,
-        dribble_tracker=tracker,
-        now=23.03,
+        coordinator, [1], snapshot_new, True, queue, dribble_tracker=tracker
     )
     assert queue.items[-1][0].dribble == 1
 
