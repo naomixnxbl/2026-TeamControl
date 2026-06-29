@@ -15,6 +15,7 @@ movement controller ``robot/goal.py`` and the legacy game roles already use.
 import importlib
 import json
 import math
+import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -474,6 +475,14 @@ class SkillLabPage(QWidget):
         if self._running:
             self._stop_skill()
         try:
+            # Reload every individual skill file first so the registry picks up changes.
+            skill_submods = [
+                name for name in list(sys.modules)
+                if name.startswith("TeamControl.skills.")
+                and name != "TeamControl.skills.skills"
+            ]
+            for name in skill_submods:
+                importlib.reload(sys.modules[name])
             import TeamControl.skills.skills as bmod
             importlib.reload(bmod)
             self._behaviours = list(bmod.BEHAVIOURS) + self._custom_skills
