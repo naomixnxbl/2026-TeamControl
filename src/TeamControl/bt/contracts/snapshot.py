@@ -23,6 +23,14 @@ class GamePhase(str, Enum):
     ENEMY_KICKOFF = "ENEMY_KICKOFF"          # enemy kickoff — all robots to own half
     FREE_KICK = "FREE_KICK"               # attacker takes free kick
     ENEMY_FREE_KICK = "ENEMY_FREE_KICK"       # enemy free kick — keep 0.5m from ball
+    # Corner / goal kick — SSL has no dedicated referee command for these; they
+    # are direct/indirect free kicks classified by where the ball left the field
+    # (§5.3). Near the opponent goal line ⇒ attacking "corner"; near our own goal
+    # line ⇒ defensive "goal kick".
+    CORNER_KICK = "CORNER_KICK"               # our free kick near opp goal line (attack)
+    GOAL_KICK = "GOAL_KICK"                   # our free kick near own goal line (clear)
+    ENEMY_CORNER_KICK = "ENEMY_CORNER_KICK"   # enemy free kick near our goal line (defend mouth)
+    ENEMY_GOAL_KICK = "ENEMY_GOAL_KICK"       # enemy free kick near their goal line (spread)
     BALL_PLACEMENT = "BALL_PLACEMENT"     # we place the ball
     PREPARE_PENALTY = "PREPARE_PENALTY"   # pre-kick: position robots before we shoot
     PREPARE_PENALTY_OPP = "PREPARE_PENALTY_OPP"  # pre-kick: position robots before enemy shoots

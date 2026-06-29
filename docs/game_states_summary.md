@@ -76,6 +76,27 @@ When `us_positive=False` (we attack toward negative-x), all fixed position maps 
 
 ---
 
+### CORNER_KICK / GOAL_KICK (free-kick refinements)
+**Rule (§5.3):** SSL has **no** dedicated "corner" or "goal kick" command. When the
+ball leaves over a goal line the GC awards a normal **direct/indirect free kick**
+to the other team (`DIRECT_FREE_*` / `INDIRECT_FREE_*`). The Coordinator refines a
+`FREE_KICK` / `ENEMY_FREE_KICK` into a corner/goal-kick variant purely by where the
+ball sits (within `FREE_KICK_GOAL_LINE_BAND` = 1.5 m of a goal line). The kind is
+**locked once per free-kick episode** so it cannot flap as the ball moves after the kick.
+
+| Classified phase | When | Behaviour |
+|---|---|---|
+| `CORNER_KICK` | our free kick near **opponent** goal line | kicker crosses to a central point in front of the opp goal; supporters take attacking box slots (≥1.3 m clear of the opp defense area); goalie holds own goal line |
+| `GOAL_KICK` | our free kick near **our own** goal line | kicker clears straight upfield (along ball-y, never across our goal mouth); supporters push to midfield outlet slots; goalie holds line |
+| `ENEMY_CORNER_KICK` | enemy free kick near **our** goal line | goalie tracks ball on the line; outfield robots pack a defensive screen across the goal mouth, each kept ≥ `STOP_BALL_CLEARANCE` from the ball |
+| `ENEMY_GOAL_KICK` | enemy free kick near **their** goal line | same as the generic `ENEMY_FREE_KICK` defensive spread (identical restart in SSL) |
+
+Classification lives in `Coordinator._classify_free_kick()`; handlers are
+`_handle_corner_kick` / `_handle_goal_kick` / `_handle_opp_corner_kick`. Verified
+live against the real SSL Game Controller (v3.21.1) + grSim.
+
+---
+
 ### BALL_PLACEMENT
 **Rule (§9):** One robot (the placer) must carry the ball to the `designated_position` reported by the GC. All other robots must keep ≥ 0.05 m from the ball and ≥ 0.05 m from the ball→target path. After the ball is placed the placer must move ≥ 0.5 m away.
 
