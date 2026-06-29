@@ -14,6 +14,10 @@ GamePhase from the Snapshot's RefereeState and may override behaviour:
     PREPARE_KICKOFF     → robots move to pre-kickoff positions
     KICKOFF             → attacker goes to ball at centre, others to support spots
     FREE_KICK           → attacker goes to ball, others hold positions
+    CORNER_KICK         → free kick near opp goal line: kicker crosses, supporters
+                          pack the box (a free kick refined by ball position; §5.3)
+    GOAL_KICK           → free kick near own goal line: kicker clears upfield,
+                          supporters push to midfield outlets
     BALL_PLACEMENT      → all robots keep STOP_BALL_CLEARANCE from ball
     PENALTY_SHOOT       → attacker to penalty spot, others behind ball line
     PENALTY_DEFEND      → goalie tracks ball on goal line, others hold
@@ -101,6 +105,51 @@ FREE_KICK_SUPPORT_OFFSETS: list[tuple[float, float]] = [
     (-0.8,  0.0),  # slot 2 — back centre
     (-0.8, -0.8),  # slot 3 — back left
     (-0.8,  0.8),  # slot 4 — back right
+]
+
+# ---------------------------------------------------------------------------
+# Corner / goal kick classification.
+# SSL emits only DIRECT_/INDIRECT_FREE — there is no "corner" or "goal kick"
+# command (§5.3). A free kick whose ball sits within FREE_KICK_GOAL_LINE_BAND
+# of a goal line is treated as a corner (near the *opponent* goal, attacking)
+# or a goal kick (near *our* goal, clearing). The kind is locked once per
+# free-kick episode so it can't flap as the ball moves after the kick.
+# ---------------------------------------------------------------------------
+FREE_KICK_GOAL_LINE_BAND: float = 1.5  # m from a goal line to count as corner/goal kick
+
+# Attacking box slots for OUR corner kick — (depth in front of opp goal, y).
+# depth is measured back from the opponent goal line toward midfield; kept ≥1.3m
+# so robots stay clear of the opponent defense area during the set piece (§8.4).
+CORNER_BOX_SLOTS: list[tuple[float, float]] = [
+    (1.4, -0.6),
+    (1.4,  0.6),
+    (1.6,  0.0),
+    (2.0, -1.4),
+    (2.0,  1.4),
+]
+# Where the corner taker aims — a dangerous central point in front of the goal.
+CORNER_KICK_TARGET_DEPTH: float = 1.4  # m in front of opp goal line
+
+# Outlet slots for OUR goal kick (defensive clear) — (depth up from own goal, y).
+GOAL_KICK_OUTLET_SLOTS: list[tuple[float, float]] = [
+    (3.0, -2.0),
+    (3.0,  2.0),
+    (2.0, -1.0),
+    (2.0,  1.0),
+    (4.0,  0.0),
+]
+# Where the goal-kick taker clears to — straight upfield from the ball, toward
+# the opponent half. Aiming along the ball's current y keeps the clearance from
+# ever crossing our own goal mouth.
+GOAL_KICK_CLEAR_DEPTH: float = 3.0   # m upfield from ball, toward opponent half
+
+# Defensive screen slots for an ENEMY corner kick — (depth in front of own goal, y).
+OPP_CORNER_DEFEND_SLOTS: list[tuple[float, float]] = [
+    (0.6,  0.0),   # central, just ahead of keeper
+    (0.6, -0.7),
+    (0.6,  0.7),
+    (1.0, -1.3),
+    (1.0,  1.3),
 ]
 
 # PREPARE_KICKOFF positions — all robots in own half (negative-x when us_positive=True).
@@ -270,6 +319,8 @@ class Coordinator:
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
+        # Corner / goal kick refinement, locked once per free-kick episode.
+        self._free_kick_kind: GamePhase | None = None
         self._kickoff_kicker_id: int | None = None
         self._kickoff_kicker_ready: bool = False
         self._kickoff_needs_slot: set[int] = set()  # robots that must reach their slot
@@ -321,6 +372,7 @@ class Coordinator:
             self._free_kick_kicker_id = None
             self._free_kick_support_slots = {}
             self._free_kick_kicker_ready = False
+            self._free_kick_kind = None
             # Preserve kickoff state when GC skips straight from KICKOFF/PREPARE_KICKOFF
             # to RUNNING before the kicker has fired — we finish the kick in RUNNING.
             kickoff_carry = (
@@ -390,11 +442,27 @@ class Coordinator:
             return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.FREE_KICK:
-            self._handle_free_kick(snapshot, robot_ids)
+            # Lock the corner/goal/plain classification once for the episode.
+            if self._free_kick_kind is None:
+                self._free_kick_kind = self._classify_free_kick(snapshot, enemy=False)
+            if self._free_kick_kind == GamePhase.CORNER_KICK:
+                self._handle_corner_kick(snapshot, robot_ids)
+            elif self._free_kick_kind == GamePhase.GOAL_KICK:
+                self._handle_goal_kick(snapshot, robot_ids)
+            else:
+                self._handle_free_kick(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.ENEMY_FREE_KICK:
-            self._handle_opp_free_kick(snapshot, robot_ids)
+            if self._free_kick_kind is None:
+                self._free_kick_kind = self._classify_free_kick(snapshot, enemy=True)
+            if self._free_kick_kind == GamePhase.ENEMY_CORNER_KICK:
+                self._handle_opp_corner_kick(snapshot, robot_ids)
+            else:
+                # ENEMY_GOAL_KICK and plain ENEMY_FREE_KICK share the defensive
+                # spread — in SSL they are the same restart, only the location
+                # differs, and the generic handler already keeps legal clearance.
+                self._handle_opp_free_kick(snapshot, robot_ids)
             return self._finalize_intents(snapshot, robot_ids)
 
         if phase == GamePhase.PREPARE_PENALTY:
@@ -888,6 +956,190 @@ class Coordinator:
                     target = (bx + (target[0] - bx) * scale, by + (target[1] - by) * scale)
 
             bb.current_intent = IntentMove(target_pos=target, target_orientation=None, max_speed=1.4)
+            intents.append(bb.current_intent)
+        return intents
+
+    # ------------------------------------------------------------------
+    # Corner / goal kick — refined free-kick variants (§5.3)
+    # ------------------------------------------------------------------
+
+    def _classify_free_kick(self, snapshot: Snapshot, enemy: bool) -> GamePhase:
+        """Classify a free kick into corner / goal kick / plain by ball location.
+
+        SSL awards only a direct/indirect free kick when the ball leaves over a
+        goal line; the *kind* depends on which goal line it sits near.
+
+        For OUR free kick:   near opp goal ⇒ CORNER_KICK, near our goal ⇒ GOAL_KICK.
+        For ENEMY free kick: near our goal ⇒ ENEMY_CORNER_KICK (they attack),
+                             near opp goal ⇒ ENEMY_GOAL_KICK (they restart deep).
+        Anything mid-field stays a plain (ENEMY_)FREE_KICK.
+        """
+        bx, _by = snapshot.ball_position
+        opp_goal_line_x = self._opp_goal[0]
+        own_goal_line_x = self._own_goal_line_x
+        near_opp = abs(bx - opp_goal_line_x) <= FREE_KICK_GOAL_LINE_BAND
+        near_own = abs(bx - own_goal_line_x) <= FREE_KICK_GOAL_LINE_BAND
+        if enemy:
+            if near_own:
+                return GamePhase.ENEMY_CORNER_KICK
+            if near_opp:
+                return GamePhase.ENEMY_GOAL_KICK
+            return GamePhase.ENEMY_FREE_KICK
+        if near_opp:
+            return GamePhase.CORNER_KICK
+        if near_own:
+            return GamePhase.GOAL_KICK
+        return GamePhase.FREE_KICK
+
+    def _lock_free_kick_kicker(self, snapshot: Snapshot, robot_ids: list[int]) -> None:
+        """Pick the closest non-goalie robot as the kicker (idempotent)."""
+        if self._free_kick_kicker_id is not None:
+            return
+        best_dist = float("inf")
+        for robot_id in robot_ids:
+            if self._is_goalie(robot_id):
+                continue
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            d = math.hypot(
+                robot.position[0] - snapshot.ball_position[0],
+                robot.position[1] - snapshot.ball_position[1],
+            )
+            if d < best_dist:
+                best_dist = d
+                self._free_kick_kicker_id = robot_id
+
+    def _kicker_take_kick(self, robot, bb, snapshot, kick_target) -> None:
+        """Drive the locked kicker behind the ball and fire toward *kick_target*.
+
+        Geometry is target-relative (approach from the side of the ball opposite
+        the target) so it works for any kick direction — corner crosses and goal
+        clearances included. The adapter's kick skill does the fine alignment;
+        ``self._free_kick_kicker_ready`` latches once the robot is in contact.
+        """
+        from TeamControl.bt.contracts.intent import IntentKick
+        bx, by = snapshot.ball_position
+        tx, ty = kick_target
+        dirx, diry = tx - bx, ty - by
+        dlen = math.hypot(dirx, diry) or 1.0
+        ux, uy = dirx / dlen, diry / dlen
+        approach = (bx - ux * 0.25, by - uy * 0.25)
+        dist_to_ball = math.hypot(robot.position[0] - bx, robot.position[1] - by)
+        dist_to_approach = math.hypot(
+            robot.position[0] - approach[0], robot.position[1] - approach[1]
+        )
+        behind_ball = (
+            (robot.position[0] - bx) * ux + (robot.position[1] - by) * uy
+        ) < -0.04
+        if dist_to_ball < 0.15 and behind_ball:
+            self._free_kick_kicker_ready = True
+        if self._free_kick_kicker_ready:
+            bb.current_intent = IntentKick(target_pos=kick_target)
+        elif dist_to_approach < 0.10:
+            bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
+        else:
+            bb.current_intent = IntentMove(target_pos=approach, target_orientation=None)
+
+    def _handle_corner_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """CORNER_KICK: our attacking free kick near the opponent goal line.
+
+        Kicker crosses the ball to a dangerous central point in front of the
+        opponent goal; supporters occupy box slots to follow up; goalie holds
+        the own goal line.
+        """
+        self._lock_free_kick_kicker(snapshot, robot_ids)
+        kicker_id = self._free_kick_kicker_id
+        opp_goal_x = self._opp_goal[0]
+        # Cross target: in front of the opponent goal, just outside its area.
+        kick_target = (opp_goal_x - self._attack_sign * CORNER_KICK_TARGET_DEPTH, 0.0)
+
+        intents: list[Intent] = []
+        slot = 0
+        for robot_id in robot_ids:
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            bb = self.blackboards[robot_id]
+            if robot_id == kicker_id:
+                self._kicker_take_kick(robot, bb, snapshot, kick_target)
+            elif self._is_goalie(robot_id):
+                by = max(-1.0, min(1.0, snapshot.ball_position[1]))
+                bb.current_intent = IntentMove(
+                    target_pos=(self._own_goal_line_x, by), target_orientation=None
+                )
+            else:
+                depth, sy = CORNER_BOX_SLOTS[slot % len(CORNER_BOX_SLOTS)]
+                slot += 1
+                target = (opp_goal_x - self._attack_sign * depth, sy)
+                bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
+            intents.append(bb.current_intent)
+        return intents
+
+    def _handle_goal_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """GOAL_KICK: our defensive free kick near our own goal line.
+
+        Kicker clears the ball upfield and wide of our goal; supporters push up
+        to outlet positions to receive; goalie holds the line.
+        """
+        self._lock_free_kick_kicker(snapshot, robot_ids)
+        kicker_id = self._free_kick_kicker_id
+        bx, by = snapshot.ball_position
+        own_goal_x = self._own_goal_line_x
+        # Clear straight upfield (toward the opponent half) along the ball's y.
+        kick_target = (bx + self._attack_sign * GOAL_KICK_CLEAR_DEPTH, by)
+
+        intents: list[Intent] = []
+        slot = 0
+        for robot_id in robot_ids:
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            bb = self.blackboards[robot_id]
+            if robot_id == kicker_id:
+                self._kicker_take_kick(robot, bb, snapshot, kick_target)
+            elif self._is_goalie(robot_id):
+                by_clamped = max(-1.0, min(1.0, snapshot.ball_position[1]))
+                bb.current_intent = IntentMove(
+                    target_pos=(own_goal_x, by_clamped), target_orientation=None
+                )
+            else:
+                depth, sy = GOAL_KICK_OUTLET_SLOTS[slot % len(GOAL_KICK_OUTLET_SLOTS)]
+                slot += 1
+                target = (own_goal_x + self._attack_sign * depth, sy)
+                bb.current_intent = IntentMove(target_pos=target, target_orientation=None)
+            intents.append(bb.current_intent)
+        return intents
+
+    def _handle_opp_corner_kick(self, snapshot: Snapshot, robot_ids: list[int]) -> list[Intent]:
+        """ENEMY_CORNER_KICK: opponent attacks near our goal line.
+
+        Goalie tracks the ball on the line; the rest pack a defensive screen
+        across the goal mouth between ball and goal, each kept ≥ STOP_BALL_CLEARANCE
+        from the ball so we never give away a defender-too-close foul (§5.4).
+        """
+        bx, by = snapshot.ball_position
+        own_goal_x = self._own_goal_line_x
+        intents: list[Intent] = []
+        slot = 0
+        for robot_id in robot_ids:
+            robot = _find_robot(snapshot, robot_id)
+            if robot is None:
+                continue
+            bb = self.blackboards[robot_id]
+            if self._is_goalie(robot_id):
+                by_clamped = max(-1.0, min(1.0, by))
+                target = (own_goal_x, by_clamped)
+            else:
+                depth, sy = OPP_CORNER_DEFEND_SLOTS[slot % len(OPP_CORNER_DEFEND_SLOTS)]
+                slot += 1
+                target = (own_goal_x + self._attack_sign * depth, sy)
+                # Never sit closer than the legal clearance to the ball.
+                if math.hypot(target[0] - bx, target[1] - by) < STOP_BALL_CLEARANCE:
+                    target = _nudge_away_from_ball(target, (bx, by), STOP_BALL_CLEARANCE)
+            bb.current_intent = IntentMove(
+                target_pos=target, target_orientation=None, max_speed=1.4
+            )
             intents.append(bb.current_intent)
         return intents
 
