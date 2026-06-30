@@ -679,7 +679,7 @@ class Coordinator:
 
         # RUNNING — finish enemy kickoff positioning if carry is active.
         if self._opp_kickoff_carry:
-            result = self._handle_opp_kickoff(snapshot, robot_ids)
+            self._handle_opp_kickoff(snapshot, robot_ids)
             # Clear carry once all robots are within 0.2m of their slots.
             all_at_slot = True
             for rid in robot_ids:
@@ -696,7 +696,7 @@ class Coordinator:
 
         # RUNNING — finish kickoff: approach, kick, then hold for double-touch rule.
         if self._kickoff_kicker_id is not None:
-            result = self._handle_kickoff(snapshot, robot_ids)
+            self._handle_kickoff(snapshot, robot_ids)
             # Only end carry once double-touch restriction is lifted (teammate touched ball
             # or ball moved enough that carry purpose is complete).
             if self._kickoff_double_touch_cleared:
@@ -729,17 +729,9 @@ class Coordinator:
                 self._handle_penalty_defend(snapshot, robot_ids)
                 return self._finalize_intents(snapshot, robot_ids)
 
-        # RUNNING — carry penalty shoot until kicker fires.
+        # RUNNING — carry penalty shoot until ball moves (grSim confirms kick).
         if self._penalty_shoot_carry and not self._penalty_shoot_done:
             self._handle_penalty_shoot(snapshot, robot_ids)
-            # Check if kicker just issued a kick intent.
-            from TeamControl.bt.contracts.intent import IntentKick
-            kicker_bb = self.blackboards.get(5)
-            if kicker_bb is not None and isinstance(kicker_bb.current_intent, IntentKick):
-                self._penalty_shoot_done = True
-                self._penalty_shoot_carry = False
-                self._penalty_shoot_ball_ref = None  # clear so next penalty starts fresh
-            return result
             return self._finalize_intents(snapshot, robot_ids)
 
         # Possession-driven dynamic role assignment. Three mutually-exclusive
@@ -1766,10 +1758,10 @@ class Coordinator:
                     dist_to_ball = math.hypot(robot.position[0] - bx, robot.position[1] - by)
                     dist_to_approach = math.hypot(robot.position[0] - approach_x, robot.position[1] - by)
                     on_correct_side = (robot.position[0] - bx) * self._attack_sign < -0.05
-                    if dist_to_ball < 0.15 and on_correct_side:
+                    if dist_to_ball <= 0.18 and on_correct_side:
                         bb.current_intent = IntentKick(target_pos=self._opp_goal)
                     elif dist_to_approach < 0.15:
-                        bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
+                        bb.current_intent = IntentMove(target_pos=(bx - 0.12 * self._attack_sign, by), target_orientation=None)
                     else:
                         bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
             elif self._is_goalie(robot_id):
