@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
@@ -195,6 +195,14 @@ PASS_RECEIVE_TIMEOUT_TICKS: int = 150  # give up waiting after ~1.5 s @100 Hz
 PASS_RECEIVE_DONE_DIST: float = 0.18   # receiver this close to ball = received
 PASS_RECEIVE_MEET_DIST: float = 1.0    # within this, step ONTO the ball to collect
 PASS_RECEIVE_SPEED_GAIN: float = 2.0   # brisk move to the reception point
+
+# --- team-wide spacing: stop our own robots clustering on each other ---------
+# A final positional nudge: any robot whose move target sits within
+# SPACING_MIN_GAP of where a teammate is going gets pushed apart. Applies to
+# every role each RUNNING tick (so the whole team spreads), EXCEPT the goalie
+# and the robot actually going for the ball (those are allowed to converge).
+SPACING_MIN_GAP: float = 0.55      # desired clear gap between teammates (m)
+SPACING_MAX_NUDGE: float = 0.50    # cap how far a single tick may push a target
 
 
 @dataclass(frozen=True)
@@ -781,7 +789,84 @@ class Coordinator:
         self._apply_pass_receive_sync(snapshot, robot_ids)
         self._apply_orbit_defender(snapshot, robot_ids)
         self._apply_clash_royale(snapshot, robot_ids)
+        # Final declutter: spread teammates whose move targets bunch together.
+        self._apply_teammate_spacing(snapshot, robot_ids)
         return self._finalize_intents(snapshot, robot_ids)
+
+    def _apply_teammate_spacing(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Push apart robots whose move targets cluster together.
+
+        Clustering happens when several robots' positioning targets land on top
+        of each other (the pile-ups seen in play). This is a team-agnostic final
+        guard: for each robot with an ``IntentMove`` target, repel that target
+        from where its teammates are going, capped per tick. The goalie and the
+        single robot going for the ball are exempt — they're allowed to converge
+        on their jobs. Active ball plays (kick / dribble / pass) are left alone.
+        """
+        present = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards and _find_robot(snapshot, rid) is not None
+        ]
+        if len(present) < 2:
+            return
+
+        ball = snapshot.ball_position
+        ball_chaser = min(
+            present,
+            key=lambda rid: math.hypot(
+                _find_robot(snapshot, rid).position[0] - ball[0],
+                _find_robot(snapshot, rid).position[1] - ball[1],
+            ),
+        )
+
+        # Where each robot is going: its move target, else its current position.
+        goto: dict[int, tuple[float, float]] = {}
+        for rid in present:
+            intent = self.blackboards[rid].current_intent
+            if isinstance(intent, IntentMove):
+                goto[rid] = intent.target_pos
+            else:
+                goto[rid] = _find_robot(snapshot, rid).position
+
+        # Compute nudges from the original targets (order-independent), then apply.
+        for rid in present:
+            if self._is_goalie(rid) or rid == ball_chaser:
+                continue
+            bb = self.blackboards[rid]
+            intent = bb.current_intent
+            if not isinstance(intent, IntentMove):
+                continue
+            tx, ty = goto[rid]
+            push_x = push_y = 0.0
+            for other in present:
+                if other == rid:
+                    continue
+                ox, oy = goto[other]
+                dx, dy = tx - ox, ty - oy
+                dist = math.hypot(dx, dy)
+                if dist >= SPACING_MIN_GAP:
+                    continue
+                if dist < 1e-9:
+                    # Exactly coincident — fan out deterministically by id.
+                    angle = rid * 2.399963229728653
+                    dx, dy, dist = math.cos(angle), math.sin(angle), 1.0
+                strength = SPACING_MIN_GAP - dist
+                push_x += (dx / dist) * strength
+                push_y += (dy / dist) * strength
+
+            mag = math.hypot(push_x, push_y)
+            if mag < 1e-9:
+                continue
+            if mag > SPACING_MAX_NUDGE:
+                scale = SPACING_MAX_NUDGE / mag
+                push_x *= scale
+                push_y *= scale
+            bb.current_intent = replace(
+                intent, target_pos=(tx + push_x, ty + push_y)
+            )
 
     def _apply_pass_receive_sync(
         self, snapshot: Snapshot, robot_ids: list[int]
