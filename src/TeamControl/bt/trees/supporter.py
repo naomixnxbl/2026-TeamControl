@@ -479,7 +479,15 @@ class IsPassTarget(py_trees.behaviour.Behaviour):
 
 
 class HoldForPass(py_trees.behaviour.Behaviour):
-    """Hold current position and face the ball, waiting for a pass to arrive."""
+    """Wait for a pass, then actively meet the ball.
+
+    Holds position facing the ball while the pass is still far away, but once
+    the ball is within ``RECEIVE_RADIUS`` the receiver steps onto it (facing it)
+    so a pass that lands a little short/wide is still collected on the dribbler
+    instead of trickling past a stationary robot.
+    """
+
+    RECEIVE_RADIUS: float = 1.2
 
     def __init__(self, tree_ref: SupporterTree) -> None:
         super().__init__("HoldForPass")
@@ -497,11 +505,21 @@ class HoldForPass(py_trees.behaviour.Behaviour):
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
         )
+        dist_to_ball = math.hypot(
+            snap.ball_position[0] - robot.position[0],
+            snap.ball_position[1] - robot.position[1],
+        )
+        if dist_to_ball <= self.RECEIVE_RADIUS:
+            # Step onto the incoming ball to secure it on the dribbler.
+            target = snap.ball_position
+            bb.intent_source = "ReceiveMeetBall"
+        else:
+            target = robot.position
+            bb.intent_source = "HoldForPass"
         bb.current_intent = IntentMove(
-            target_pos=robot.position,
+            target_pos=target,
             target_orientation=angle_to_ball,
         )
-        bb.intent_source = "HoldForPass"
         return py_trees.common.Status.SUCCESS
 
 

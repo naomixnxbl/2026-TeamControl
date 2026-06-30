@@ -31,8 +31,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
-from TeamControl.bt.contracts.intent import Intent, IntentMove
+from TeamControl.bt.contracts.intent import Intent, IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
+from TeamControl.bt.tactics.line_of_sight import line_of_sight_clear
 from TeamControl.bt.tactics.heuristic_role_swap import (
     RoleHeuristicWeights,
     assign_roles_heuristically,
@@ -150,6 +151,10 @@ MARK_DANGER_ZONE_FRAC: float = 0.85
 # instead oppress only the real threats on our side, prioritising the shot zone.
 # 0.50 = the halfway line (progress 0.0 = our goal, 1.0 = their goal).
 MARK_DEFENSIVE_ZONE_FRAC: float = 0.50
+# Opponents bunched within this of an already-marked man are treated as one
+# cluster: a single marker covers the group and the rest zone-cover (spread out)
+# instead of all converging — stops our robots clustering when theirs do.
+MARK_CLUSTER_RADIUS: float = 0.55
 _FIELD_LEN_M: float = 9.0  # Div B field length (x spans -4.5..+4.5)
 
 # --- clash_royale: free a ball wedged between clashing robots ---------------
@@ -164,6 +169,22 @@ CLASH_MAX_TICKS: int = 40          # stop jiggling after this many ticks (give u
 CLASH_HALF_PERIOD: int = 5         # ticks per oscillation half-cycle (in/out)
 CLASH_RETREAT: float = 0.35        # retreat distance (m) away from the ball
 CLASH_SHOVE: float = 0.12          # shove distance (m) past the ball
+# When we control the wedged ball, pass out instead of jiggling.
+CLASH_POSSESS_DIST: float = 0.16   # within this of ball = we may control it
+CLASH_POSSESS_HEADING: float = 0.6 # ball must be within this heading error of front
+CLASH_ESCAPE_MARK_DIST: float = 0.4    # escape target must be this clear of any opp
+CLASH_ESCAPE_LANE_CLEARANCE: float = 0.15  # pass-lane clearance for the escape
+
+# --- orbit defender: confuse the striker, then tackle a frozen ball ---------
+# The "extra" defender added while the opponent attacks our half sits beside the
+# primary defender (slightly up-pitch) and shuffles laterally in parallel to
+# disguise which lane is covered. If the ball freezes long enough it pounces.
+ORBIT_FORWARD: float = 0.35        # up-pitch offset from the primary defender (m)
+ORBIT_LATERAL: float = 0.40        # lateral offset beside the primary (m)
+ORBIT_SHIFT_AMP: float = 0.30      # parallel lateral shuffle amplitude (m)
+ORBIT_HALF_PERIOD: int = 12        # ticks per shuffle half-cycle
+FREEZE_TACKLE_TICKS: int = 25      # ball frozen this long → the extra one tackles
+CHASE_GAIN_TACKLE: float = 3.0     # speed gain so the orbit/tackle moves are brisk
 
 
 @dataclass(frozen=True)
@@ -454,6 +475,9 @@ class Coordinator:
         self._ball_stall_ticks: int = 0
         self._clash_phase: int = 0
         self._clash_active_ticks: int = 0
+        # Orbit-defender state (the "extra" defender while defending our half).
+        self._extra_defender_id: int | None = None
+        self._orbit_phase: int = 0
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
@@ -721,25 +745,17 @@ class Coordinator:
         else:
             self._apply_heuristic_roles(snapshot, robot_ids)
         self._apply_marker_assignment(snapshot, robot_ids)
+        self._update_ball_stall(snapshot)
         self._normal_tick(snapshot, robot_ids)
-        # Override the contesting robot's intent with a back-and-forth jiggle
-        # when the ball is wedged in a clash (runs after the trees so it wins).
+        # Post-tick intent overrides (run after the trees so they win):
+        #  - extra defender's confuse-and-tackle orbit while defending our half,
+        #  - clash escape (pass out / jiggle) for a ball wedged in a clash.
+        self._apply_orbit_defender(snapshot, robot_ids)
         self._apply_clash_royale(snapshot, robot_ids)
         return self._finalize_intents(snapshot, robot_ids)
 
-    def _apply_clash_royale(
-        self, snapshot: Snapshot, robot_ids: list[int]
-    ) -> None:
-        """Shake a wedged ball loose by oscillating our contesting robot.
-
-        Triggers only on a genuine clash: the ball has been ~stationary for
-        ``CLASH_STALL_TICKS`` while both one of ours and an opponent are touching
-        it. The robot nearest the ball then alternates retreating from / shoving
-        into the ball along the robot↔ball axis so the ball pops out.
-        """
-        if not self.clash_royale_enabled:
-            return
-
+    def _update_ball_stall(self, snapshot: Snapshot) -> None:
+        """Track how long the ball has been ~stationary (a frozen/wedged ball)."""
         ball = snapshot.ball_position
         if self._last_ball_pos is None:
             moved = math.inf
@@ -748,13 +764,29 @@ class Coordinator:
                 ball[0] - self._last_ball_pos[0], ball[1] - self._last_ball_pos[1]
             )
         self._last_ball_pos = ball
-
         if moved >= CLASH_STALL_EPS:
             self._ball_stall_ticks = 0
-            self._clash_active_ticks = 0
+        else:
+            self._ball_stall_ticks += 1
+
+    def _apply_clash_royale(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Resolve a ball wedged in a clash.
+
+        Triggers only on a genuine clash: the ball has been ~stationary for
+        ``CLASH_STALL_TICKS`` while both one of ours and an opponent are touching
+        it. If our contesting robot actually controls the ball, the right answer
+        is to PASS OUT of the clash to an open teammate (most useful in the
+        opponent half); otherwise we shake it loose by oscillating in/out along
+        the robot↔ball axis.
+        """
+        if not self.clash_royale_enabled:
             return
-        self._ball_stall_ticks += 1
+
+        ball = snapshot.ball_position
         if self._ball_stall_ticks < CLASH_STALL_TICKS:
+            self._clash_active_ticks = 0
             return
 
         # A clash needs an opponent contesting the stuck ball — otherwise it is
@@ -788,9 +820,21 @@ class Coordinator:
         if math.hypot(robot.position[0] - ball[0], robot.position[1] - ball[1]) > CLASH_BALL_CONTACT:
             return
 
+        # If we actually control the wedged ball, pass out of the clash rather
+        # than wrestle over it — keep possession by finding an open teammate.
+        if self._controls_ball(robot, ball):
+            target_id, target_pos = self._find_clash_escape_target(snapshot, rid)
+            if target_id is not None and target_pos is not None:
+                bb = self.blackboards[rid]
+                bb.current_intent = IntentPass(
+                    target_robot_id=target_id, target_pos=target_pos
+                )
+                bb.intent_source = "ClashEscapePass"
+                self._clash_active_ticks = 0
+                return
+
         # Give up after a while so we don't jiggle forever on a truly stuck ball.
         if self._clash_active_ticks >= CLASH_MAX_TICKS:
-            self._ball_stall_ticks = 0
             self._clash_active_ticks = 0
             return
         self._clash_active_ticks += 1
@@ -819,6 +863,51 @@ class Coordinator:
         bb = self.blackboards[rid]
         bb.current_intent = IntentMove(target_pos=target, target_orientation=face)
         bb.intent_source = "ClashRoyale"
+
+    @staticmethod
+    def _controls_ball(robot, ball: tuple[float, float]) -> bool:
+        """True when the ball is in front of the robot's kicker and in range."""
+        dx, dy = ball[0] - robot.position[0], ball[1] - robot.position[1]
+        if math.hypot(dx, dy) > CLASH_POSSESS_DIST:
+            return False
+        err = (math.atan2(dy, dx) - robot.orientation + math.pi) % (2 * math.pi) - math.pi
+        return abs(err) <= CLASH_POSSESS_HEADING
+
+    def _find_clash_escape_target(
+        self, snapshot: Snapshot, passer_id: int
+    ) -> tuple[int | None, tuple[float, float] | None]:
+        """Find the most forward open teammate to pass to out of a clash."""
+        ball = snapshot.ball_position
+        best_id: int | None = None
+        best_pos: tuple[float, float] | None = None
+        best_progress = -math.inf
+        for tm in snapshot.own_robots:
+            if tm.robot_id == passer_id or self._is_goalie(tm.robot_id):
+                continue
+            nearest_opp = min(
+                (
+                    math.hypot(opp.position[0] - tm.position[0], opp.position[1] - tm.position[1])
+                    for opp in snapshot.enemy_robots
+                ),
+                default=math.inf,
+            )
+            if nearest_opp < CLASH_ESCAPE_MARK_DIST:
+                continue
+            obstacles = list(snapshot.enemy_robots) + [
+                r
+                for r in snapshot.own_robots
+                if r.robot_id not in (passer_id, tm.robot_id)
+            ]
+            if not line_of_sight_clear(
+                ball, tm.position, obstacles, clearance=CLASH_ESCAPE_LANE_CLEARANCE
+            ):
+                continue
+            progress = tm.position[0] * self._attack_sign  # most advanced wins
+            if progress > best_progress:
+                best_progress = progress
+                best_id = tm.robot_id
+                best_pos = tm.position
+        return best_id, best_pos
 
     def _finalize_intents(
         self,
@@ -1924,25 +2013,98 @@ class Coordinator:
         presser = min(present, key=dist_to_ball)
         roles = {rid: RoleType.MARKER for rid in present}
         roles[presser] = RoleType.ATTACKER
+        self._extra_defender_id = None
 
         # Shot-zone blocking is the top defensive priority when they bring the
-        # ball into our half: dedicate the deepest remaining robot (closest to
-        # our goal, so it can hold the goal→ball line) as a DEFENDER.
+        # ball into our half. Dedicate the deepest remaining robot as the primary
+        # DEFENDER (holds the goal→ball line). When we still have plenty of
+        # robots, add an "extra" DEFENDER that orbits beside it to confuse the
+        # striker (its intent is driven by _apply_orbit_defender).
         if self._ball_in_our_half(snapshot):
-            others = [rid for rid in present if rid != presser]
+            own_goal = (self._own_goal_line_x, 0.0)
+
+            def dist_to_own_goal(rid: int) -> float:
+                p = _find_robot(snapshot, rid).position
+                return math.hypot(p[0] - own_goal[0], p[1] - own_goal[1])
+
+            others = sorted(
+                (rid for rid in present if rid != presser),
+                key=dist_to_own_goal,
+            )
             if others:
-                own_goal = (self._own_goal_line_x, 0.0)
-                blocker = min(
-                    others,
-                    key=lambda rid: math.hypot(
-                        _find_robot(snapshot, rid).position[0] - own_goal[0],
-                        _find_robot(snapshot, rid).position[1] - own_goal[1],
-                    ),
-                )
-                roles[blocker] = RoleType.DEFENDER
+                roles[others[0]] = RoleType.DEFENDER  # primary shot-zone blocker
+                # Add the extra orbit defender only while enough robots remain to
+                # keep marking the threats (presser + 2 defenders + ≥1 marker).
+                if len(others) >= 3:
+                    self._extra_defender_id = others[1]
+                    roles[others[1]] = RoleType.DEFENDER
 
         for rid in present:
             self.blackboards[rid].current_role = roles[rid]
+
+    def _apply_orbit_defender(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Drive the extra defender: confuse-and-shuffle, then tackle if frozen.
+
+        The extra defender sits beside the primary defender, slightly up-pitch,
+        and shuffles laterally in parallel so the striker can't read which lane
+        is covered. If the ball has been frozen for ``FREEZE_TACKLE_TICKS`` it
+        pounces and tackles. No-op unless the press is active and the ball is in
+        our half (where the extra defender was assigned).
+        """
+        rid = self._extra_defender_id
+        if (
+            not (self.gegenpress.enabled and self._gegenpress_active)
+            or rid is None
+            or rid not in self.blackboards
+            or self.blackboards[rid].current_role != RoleType.DEFENDER
+        ):
+            return
+        extra = _find_robot(snapshot, rid)
+        if extra is None or not self._ball_in_our_half(snapshot):
+            return
+        ball = snapshot.ball_position
+
+        # Frozen ball → tackle: rush the ball and face it.
+        if self._ball_stall_ticks >= FREEZE_TACKLE_TICKS:
+            face = math.atan2(ball[1] - extra.position[1], ball[0] - extra.position[0])
+            self.blackboards[rid].current_intent = IntentMove(
+                target_pos=ball, target_orientation=face, speed_gain=CHASE_GAIN_TACKLE
+            )
+            self.blackboards[rid].intent_source = "OrbitDefenderTackle"
+            return
+
+        # The primary defender is the other DEFENDER (deepest); orbit beside it.
+        primary = None
+        for other in robot_ids:
+            if (
+                other != rid
+                and other in self.blackboards
+                and self.blackboards[other].current_role == RoleType.DEFENDER
+                and _find_robot(snapshot, other) is not None
+            ):
+                primary = _find_robot(snapshot, other)
+                break
+        if primary is None:
+            return
+
+        # Up-pitch (toward the ball/opponent) and to one side, with a parallel
+        # lateral shuffle so the pair slides together rather than circling.
+        self._orbit_phase += 1
+        shift = ORBIT_SHIFT_AMP * math.sin(
+            (math.pi / ORBIT_HALF_PERIOD) * self._orbit_phase
+        )
+        side = 1.0 if extra.position[1] >= primary.position[1] else -1.0
+        target = (
+            primary.position[0] + ORBIT_FORWARD * self._attack_sign,
+            primary.position[1] + side * ORBIT_LATERAL + shift,
+        )
+        face = math.atan2(ball[1] - extra.position[1], ball[0] - extra.position[0])
+        self.blackboards[rid].current_intent = IntentMove(
+            target_pos=target, target_orientation=face, speed_gain=CHASE_GAIN_TACKLE
+        )
+        self.blackboards[rid].intent_source = "OrbitDefenderShuffle"
 
     def _ball_in_our_half(self, snapshot: Snapshot) -> bool:
         """True when the ball is on our side of the halfway line."""
@@ -2035,6 +2197,17 @@ class Coordinator:
             free = [rid for rid in marker_ids if rid not in assignment]
             if not free:
                 break
+            # Anti-cluster: if this opponent is bunched with one we already mark,
+            # don't send a second robot — one marker covers the cluster and the
+            # free markers zone-cover instead of all converging.
+            op = opp_by_id[oid].position
+            if any(
+                math.hypot(op[0] - opp_by_id[t].position[0], op[1] - opp_by_id[t].position[1])
+                <= MARK_CLUSTER_RADIUS
+                for t in taken
+                if t in opp_by_id
+            ):
+                continue
             rid = min(
                 free,
                 key=lambda r: math.hypot(

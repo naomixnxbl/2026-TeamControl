@@ -96,6 +96,10 @@ GOAL_MOUTH_HALF_WIDTH: float = 0.45
 
 GOALIE_ID: int = 0
 CHASE_SLOW_SPEED: float = 0.2
+# Proportional-speed gain when chasing a (free) ball. >1 saturates the speed cap
+# from a short distance so robots SPRINT onto a loose ball instead of crawling in
+# proportionally — the GegenPressing "win it back instantly" requirement.
+CHASE_SPEED_GAIN: float = 3.0
 SHOOT_DIST_THRESHOLD: float = 2.0
 
 # --- GegenPressing containment (default OFF; see AttackerBehaviorConfig) -----
@@ -144,6 +148,7 @@ class AttackerBehaviorConfig:
     shot_heading_tol: float = SHOT_HEADING_TOL
     shot_settle_ticks: int = SHOT_SETTLE_TICKS
     chase_slow_speed: float = CHASE_SLOW_SPEED
+    chase_speed_gain: float = CHASE_SPEED_GAIN
     shoot_dist_threshold: float = SHOOT_DIST_THRESHOLD
     wait_x: float = WAIT_X
     wait_y_limit: float = FIELD_HALF_Y
@@ -425,6 +430,7 @@ class ChaseBall(py_trees.behaviour.Behaviour):
             target_pos=snap.ball_position,
             target_orientation=angle_to_ball,
             max_speed=speed,
+            speed_gain=self._tree.behavior_config.chase_speed_gain,
         )
         bb.intent_source = "ChaseBall"
         return py_trees.common.Status.SUCCESS

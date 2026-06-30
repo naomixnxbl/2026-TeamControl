@@ -32,6 +32,41 @@ def test_receive_ball_faces_the_ball() -> None:
     assert math.isclose(target.target_orientation, math.atan2(1.0, 1.0), abs_tol=1e-6)
 
 
+def test_chase_ball_sprints_with_speed_gain() -> None:
+    from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
+    from TeamControl.bt.contracts.intent import IntentMove
+    from TeamControl.bt.trees.attacker import AttackerTree
+
+    tree = AttackerTree(us_positive=False)
+    snap = _snap(ball=(2.0, 0.0), robot_pos=(0.0, 0.0))
+    bb = RobotBlackboard(robot_id=1, current_role=RoleType.ATTACKER)
+    tree.set_snapshot(snap)
+    tree.tick(bb)
+    assert bb.intent_source == "ChaseBall"
+    assert isinstance(bb.current_intent, IntentMove)
+    assert bb.current_intent.speed_gain > 1.0
+
+
+def test_receiver_steps_onto_a_near_ball() -> None:
+    from TeamControl.bt.trees.supporter import HoldForPass
+
+    # Ball within the reception radius → the receiver moves onto it.
+    snap = _snap(ball=(0.5, 0.0), robot_pos=(0.0, 0.0))
+
+    class _Stub:
+        _snapshot = snap
+        _blackboard_ref = None
+
+    from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
+    bb = RobotBlackboard(robot_id=1, current_role=RoleType.SUPPORTER)
+    stub = _Stub()
+    stub._blackboard_ref = [bb]
+    node = HoldForPass(stub)
+    node.update()
+    assert bb.intent_source == "ReceiveMeetBall"
+    assert bb.current_intent.target_pos == (0.5, 0.0)
+
+
 def test_move_to_gain_reaches_cap_sooner() -> None:
     # A 0.5 m correction: gain 1.0 crawls at 0.5 m/s; gain 4.0 saturates the cap.
     snap = _snap(ball=(9.0, 9.0), robot_pos=(0.0, 0.0))

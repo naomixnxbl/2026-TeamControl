@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from TeamControl.bt.contracts.blackboard import RoleType
-from TeamControl.bt.contracts.intent import IntentMove
+from TeamControl.bt.contracts.intent import IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import (
     GamePhase,
     RefereeState,
@@ -86,6 +86,30 @@ def test_no_jiggle_without_opponent_contact() -> None:
     for _ in range(CLASH_STALL_TICKS + 2):
         coord.tick(snap, IDS)
     assert coord.blackboards[1].intent_source != "ClashRoyale"
+
+
+def test_passes_out_of_clash_when_we_control_the_ball() -> None:
+    coord = _coord(clash_royale=True)
+    # Our robot 1 controls the wedged ball (ball in front of its kicker), an
+    # opponent contests it, and teammate 2 is an open forward outlet.
+    snap = Snapshot(
+        ball_position=(0.0, 0.0),
+        ball_velocity=(0.0, 0.0),
+        own_robots=[
+            RobotState(robot_id=0, position=(-4.0, 0.0), orientation=0.0),
+            RobotState(robot_id=1, position=(-0.1, 0.0), orientation=0.0),  # faces ball (+x)
+            RobotState(robot_id=2, position=(2.0, 0.0), orientation=0.0),   # open outlet
+        ],
+        enemy_robots=[RobotState(robot_id=10, position=(-0.05, 0.18), orientation=0.0)],
+        referee_state=RefereeState(game_phase=GamePhase.RUNNING, score=(0, 0)),
+    )
+    for _ in range(CLASH_STALL_TICKS + 2):
+        coord.tick(snap, IDS)
+
+    bb = coord.blackboards[1]
+    assert bb.intent_source == "ClashEscapePass"
+    assert isinstance(bb.current_intent, IntentPass)
+    assert bb.current_intent.target_robot_id == 2
 
 
 def test_disabled_never_jiggles() -> None:

@@ -72,6 +72,30 @@ def test_ball_carrier_is_left_unmarked() -> None:
     assert targets[3] is None
 
 
+def test_clustered_opponents_get_one_marker_not_two() -> None:
+    # Two outlets bunched within a body length of each other: only one is
+    # man-marked; the spare marker drops to zone cover instead of converging.
+    own = [
+        RobotState(robot_id=2, position=(-2.0, 0.0), orientation=0.0),
+        RobotState(robot_id=3, position=(-2.0, 0.5), orientation=0.0),
+    ]
+    enemies = [
+        RobotState(robot_id=10, position=(1.2, 0.0), orientation=0.0),   # carrier (far)
+        RobotState(robot_id=11, position=(-1.0, 0.0), orientation=0.0),  # cluster
+        RobotState(robot_id=12, position=(-1.2, 0.2), orientation=0.0),  # cluster (bunched)
+    ]
+    snap = _snapshot(ball=(1.0, 0.0), own=own, enemies=enemies)
+
+    coord = _coord(GEGENPRESS_ROLES)
+    targets = _assign(coord, snap, [2, 3])
+
+    assigned = [t for t in targets.values() if t is not None]
+    # Exactly one of the bunched pair is covered; the other marker zone-covers.
+    assert len(assigned) == 1
+    assert assigned[0] in (11, 12)
+    assert None in targets.values()
+
+
 def test_assignment_is_sticky_across_ticks() -> None:
     own = [
         RobotState(robot_id=2, position=(-2.0, 1.0), orientation=0.0),

@@ -81,7 +81,7 @@ def _roles(coord: Coordinator) -> dict[int, RoleType]:
     return {rid: coord.blackboards[rid].current_role for rid in IDS}
 
 
-def test_dedicates_a_shot_zone_blocker_in_our_half() -> None:
+def test_dedicates_shot_zone_blockers_in_our_half() -> None:
     coord = _coord()
     snap = _ball_in_our_half_snapshot()
     for _ in range(3):  # past enter_ticks
@@ -89,12 +89,33 @@ def test_dedicates_a_shot_zone_blocker_in_our_half() -> None:
     assert coord._gegenpress_active is True
 
     roles = _roles(coord)
-    # Exactly one presser and exactly one shot-zone blocker (DEFENDER).
+    # One presser, a primary + extra DEFENDER (shot zone), the rest man-mark.
     field = [roles[rid] for rid in (1, 2, 3, 4, 5)]
     assert field.count(RoleType.ATTACKER) == 1
-    assert field.count(RoleType.DEFENDER) == 1
-    # The deepest field robot (closest to our goal) takes the blocker job.
+    assert field.count(RoleType.DEFENDER) == 2
+    assert field.count(RoleType.MARKER) == 2
+    # The deepest field robot (closest to our goal) is the primary blocker, and
+    # the next-deepest becomes the orbiting extra defender.
     assert roles[2] == RoleType.DEFENDER
+    assert coord._extra_defender_id is not None
+    assert roles[coord._extra_defender_id] == RoleType.DEFENDER
+
+
+def test_extra_defender_orbits_then_tackles_a_frozen_ball() -> None:
+    coord = _coord()
+    snap = _ball_in_our_half_snapshot()
+    # A few ticks in: ball not yet "frozen" → the extra defender shuffles.
+    for _ in range(3):
+        coord.tick(snap, IDS)
+    extra = coord._extra_defender_id
+    assert extra is not None
+    assert coord.blackboards[extra].intent_source == "OrbitDefenderShuffle"
+
+    # Hold the (stationary) ball long enough and the extra defender pounces.
+    from TeamControl.bt.coordinator import FREEZE_TACKLE_TICKS
+    for _ in range(FREEZE_TACKLE_TICKS + 2):
+        coord.tick(snap, IDS)
+    assert coord.blackboards[coord._extra_defender_id].intent_source == "OrbitDefenderTackle"
 
 
 def test_does_not_shadow_opponents_in_their_own_half() -> None:
