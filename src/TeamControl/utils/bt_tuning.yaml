@@ -262,7 +262,7 @@ behavior_tree:
 
     # Default: 0.2 radians. Attacker must face the pass target within this error
     # before firing the pass.
-    pass_orient_tol: 0.2
+    pass_orient_tol: 0.001
 
     # Default: 0.45. Weight for receiver openness in pass target scoring.
     pass_openness_weight: 0.45
@@ -333,7 +333,7 @@ behavior_tree:
 
     # Default: 0.2 radians. Supporter must face the pass target within this
     # error before firing the pass.
-    pass_orient_tol: 0.2
+    pass_orient_tol: 0.001
 
     # Default: 100 ticks. How long a receiver holds for a pass signal before
     # giving up and returning to normal supporter behavior.

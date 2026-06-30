@@ -347,12 +347,10 @@ def _dribble_motion_target(
         )
 
     target_angle = _face_angle(robot.position, target_pos)
-    return move_to(
-        snapshot,
-        robot_id,
-        target_pos,
-        target_angle,
-        DRIBBLE_CARRY_SPEED,
+    return MotionTarget(
+        target_velocity=(0.0, 0.0),
+        target_orientation=target_angle,
+        arrival_mode="precision",
     )
 
 
