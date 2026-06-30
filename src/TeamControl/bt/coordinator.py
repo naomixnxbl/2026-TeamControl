@@ -1000,25 +1000,20 @@ class Coordinator:
                     # Ball in play but no teammate touched yet — hold position (double-touch rule).
                     if self._free_kick_kicker_hold is None:
                         self._free_kick_kicker_hold = (robot.position[0], robot.position[1])
-                if self._free_kick_kicker_ready:
+                    hold = self._free_kick_kicker_hold
+                    bb.current_intent = IntentMove(target_pos=hold, target_orientation=None)
+                    intents.append(bb.current_intent)
+                elif self._free_kick_kicker_ready:
+                    if not self._free_kick_has_kicked:
+                        self._free_kick_has_kicked = True
+                        self._free_kick_ball_ref = (bx, by)
                     bb.current_intent = IntentKick(target_pos=self._opp_goal)
-                elif dist_to_approach < 0.10:
-                    # Reached approach position — now drive straight into the ball
-                    bb.current_intent = IntentMove(
-                        target_pos=self._free_kick_kicker_hold, target_orientation=None
-                    )
+                    intents.append(bb.current_intent)
+                elif dist_to_approach < 0.15:
+                    bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
                     intents.append(bb.current_intent)
                 else:
-                    # Ball not yet in play — approach and kick.
-                    if self._free_kick_kicker_ready:
-                        if not self._free_kick_has_kicked:
-                            self._free_kick_has_kicked = True
-                            self._free_kick_ball_ref = (bx, by)  # ref from actual kick position
-                        bb.current_intent = IntentKick(target_pos=self._opp_goal)
-                    elif dist_to_approach < 0.15:
-                        bb.current_intent = IntentMove(target_pos=(bx, by), target_orientation=None)
-                    else:
-                        bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
+                    bb.current_intent = IntentMove(target_pos=(approach_x, by), target_orientation=None)
                     intents.append(bb.current_intent)
             elif ROLE_ASSIGNMENT.get(robot_id) == RoleType.GOALIE:
                 on_line = abs(robot.position[0] - self._own_goal_line_x) < 0.30
