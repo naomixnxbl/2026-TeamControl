@@ -36,7 +36,13 @@ from TeamControl.robot.voronoi_game_navigator import run_voronoi_game_navigator
 from TeamControl.robot.voronoi_pd_test_navigator import run_pd_planner_test
 from TeamControl.robot.coop import run_coop
 from TeamControl.bt.run_bt_v2_process import run_bt_v2_process
-from TeamControl.utils.sim_config import Btv2Config, Sim3v3Config, Sim6v6Config
+from TeamControl.utils.sim_config import (
+    Btv2Config,
+    Sim3v3Config,
+    Sim6v6Config,
+    SimBlueDivBConfig,
+    SimGegenpressConfig,
+)
 
 from TeamControl.network.ssl_sockets import grSimSender
 from TeamControl.network.grSimPacketFactory import grSimPacketFactory
@@ -77,8 +83,9 @@ class SimEngine(QObject):
         "btv2_test",
         "bt_3v3",
         "bt_6v6",
+        "gegenpress",
     ]
-    COMPETITION_MODES = {"6v6", "btv2", "bt_3v3", "bt_6v6"}
+    COMPETITION_MODES = {"6v6", "btv2", "bt_3v3", "bt_6v6", "gegenpress"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -548,6 +555,68 @@ class SimEngine(QObject):
             team = "yellow" if preset.us_yellow else "blue"
             self.log_message.emit(
                 f"[engine] BT v2 test mode — {team} robot #{our_id} via Coordinator"
+            )
+            return procs
+
+        if mode == "gegenpress":
+            # Our side (yellow) runs the GegenPressing strategy; the opponent
+            # (blue) plays a representative Division B opponent (defensively
+            # solid + direct counter) built natively from our trees + the
+            # strategy layer — a real foil rather than a mirror of our press.
+            gp = SimGegenpressConfig()
+            opp = SimBlueDivBConfig()
+            gp_roles = {rid: role.name for rid, role in gp.roles.items()}
+            opp_roles = {rid: role.name for rid, role in opp.roles.items()}
+            self.log_message.emit(
+                f"[engine] GegenPressing mode — yellow=btv2+reactive-press "
+                f"{gp.yellow_ids} roles={gp_roles} press={gp.attacker_press} "
+                f"counter_attack={gp.counter_attack} gegenpress={gp.gegenpress} "
+                f"vs blue=DivB {opp.blue_ids} roles={opp_roles} "
+                f"heuristic_role_swap={opp.heuristic_role_swap} "
+                f"strategy_enabled={bool(opp.strategy and opp.strategy.get('enabled'))}"
+            )
+            # Yellow — normal btv2 that reactively GegenPresses when the
+            # opponent holds the ball (markers + pressing attacker).
+            procs.append(
+                Process(
+                    target=run_bt_v2_process,
+                    args=(ev, wm, dq),
+                    kwargs=dict(
+                        is_yellow=True,
+                        robot_ids=gp.yellow_ids,
+                        role_assignment=gp.roles,
+                        heuristic_role_swap=gp.heuristic_role_swap,
+                        movement_safety=gp.movement_safety,
+                        tick_period=gp.tick_period,
+                        press_enabled=gp.attacker_press,
+                        gegenpress=gp.gegenpress,
+                        counter_attack=gp.counter_attack,
+                        bt_state_q=self._bt_state_q,
+                    ),
+                    daemon=True,
+                    name="gegenpress_yellow",
+                )
+            )
+            # Blue — representative Division B opponent: solid back line + direct
+            # counter, shaped by its own strategy posture (distinct from yellow).
+            procs.append(
+                Process(
+                    target=run_bt_v2_process,
+                    args=(ev, wm, dq),
+                    kwargs=dict(
+                        is_yellow=False,
+                        robot_ids=opp.blue_ids,
+                        role_assignment=opp.roles,
+                        heuristic_role_swap=opp.heuristic_role_swap,
+                        movement_safety=opp.movement_safety,
+                        tick_period=opp.tick_period,
+                        counter_attack=opp.counter_attack,
+                        strategy=opp.strategy,
+                        bt_state_q=self._bt_state_q,
+                    ),
+                    daemon=True,
+                    name="gegenpress_blue_div_b",
+                )
             )
             return procs
 

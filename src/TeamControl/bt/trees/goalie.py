@@ -53,6 +53,11 @@ CLEAR_DRIBBLE_STEP_DIST: float = 0.18
 CLEAR_DRIBBLE_EDGE_BUFFER: float = 0.20
 CLEAR_DRIBBLE_MIN_STEP: float = 0.05
 GOALIE_BALL_INTERACTION_MARGIN: float = 0.18
+# Keeper agility: track the ball along the goal line snappily instead of the
+# proportional crawl (speed = min(dist, cap)). A high gain reaches the cap from
+# a short correction, and a raised cap lets the keeper cover the mouth quickly.
+GOALIE_TRACK_GAIN: float = 4.0
+GOALIE_TRACK_SPEED: float = 3.0
 FIELD_HALF_X: float = 4.5
 GOALIE_BOX_DEPTH: float = 1.0
 GOALIE_BOX_HALF_WIDTH: float = 1.0
@@ -198,6 +203,8 @@ class GoToTarget(py_trees.behaviour.Behaviour):
                     bb.current_intent = IntentMove(
                         target_pos=snap.ball_position,
                         target_orientation=angle_to_ball,
+                        max_speed=GOALIE_TRACK_SPEED,
+                        speed_gain=GOALIE_TRACK_GAIN,
                     )
                     bb.intent_source = "GoalieChaseBall"
                     return py_trees.common.Status.SUCCESS
@@ -229,6 +236,8 @@ class GoToTarget(py_trees.behaviour.Behaviour):
         bb.current_intent = IntentMove(
             target_pos=self._tree.predicted_intercept,
             target_orientation=self._tree._facing_angle,
+            max_speed=GOALIE_TRACK_SPEED,
+            speed_gain=GOALIE_TRACK_GAIN,
         )
         bb.intent_source = "GoaliePosition"
         return py_trees.common.Status.SUCCESS

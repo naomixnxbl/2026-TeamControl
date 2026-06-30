@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from TeamControl.bt.contracts.blackboard import RobotBlackboard, RoleType
-from TeamControl.bt.contracts.intent import Intent, IntentMove
+from TeamControl.bt.contracts.intent import Intent, IntentMove, IntentPass
 from TeamControl.bt.contracts.snapshot import GamePhase, Snapshot
+from TeamControl.bt.tactics.line_of_sight import line_of_sight_clear
 from TeamControl.bt.tactics.heuristic_role_swap import (
     RoleHeuristicWeights,
     assign_roles_heuristically,
@@ -41,6 +43,17 @@ from TeamControl.bt.tactics.rule_following import (
     MovementSafetyConfig,
     apply_rule_following,
     has_rule_following_enabled,
+)
+from TeamControl.bt.tactics.strategy import (
+    StrategyConfig,
+    apply_strategy_to_attacker_config,
+    apply_strategy_to_defender_positioning,
+    apply_strategy_to_role_weights,
+    apply_strategy_to_supporter_config,
+    evaluate_game_context,
+    is_strategy_active,
+    load_strategy_config,
+    resolve_effective_strategy,
 )
 
 # ---------------------------------------------------------------------------
@@ -121,6 +134,108 @@ FREE_KICK_SUPPORT_OFFSETS: list[tuple[float, float]] = [
 # free-kick episode so it can't flap as the ball moves after the kick.
 # ---------------------------------------------------------------------------
 FREE_KICK_GOAL_LINE_BAND: float = 1.5  # m from a goal line to count as corner/goal kick
+
+# ---------------------------------------------------------------------------
+# Marker (man-marking) assignment tuning — used only by MARKER-role robots
+# (the GegenPressing strategy).
+# ---------------------------------------------------------------------------
+# An opponent is "markable" only while it is in the danger area: its progress
+# from our goal toward the opponent goal must be at most this fraction of the
+# field length. Opponents deeper than this (their keeper / deep build-up
+# players) are left to zone cover instead — this is the "zone-flex" part of the
+# marking scheme: a marker drops its man and zone-covers once that man retreats
+# past this line.
+MARK_DANGER_ZONE_FRAC: float = 0.85
+# Tighter danger line used while the ball is in OUR half (the opponent is
+# attacking us). We stop shadowing opponents sitting back in their own field and
+# instead oppress only the real threats on our side, prioritising the shot zone.
+# 0.50 = the halfway line (progress 0.0 = our goal, 1.0 = their goal).
+MARK_DEFENSIVE_ZONE_FRAC: float = 0.50
+# Opponents bunched within this of an already-marked man are treated as one
+# cluster: a single marker covers the group and the rest zone-cover (spread out)
+# instead of all converging — stops our robots clustering when theirs do.
+MARK_CLUSTER_RADIUS: float = 0.55
+_FIELD_LEN_M: float = 9.0  # Div B field length (x spans -4.5..+4.5)
+
+# --- clash_royale: free a ball wedged between clashing robots ---------------
+# When the ball goes stationary with one of ours AND an opponent both touching
+# it (a "clash"), our contesting robot oscillates in/out along the robot↔ball
+# axis to shake the ball loose instead of leaning on it forever.
+CLASH_BALL_CONTACT: float = 0.20   # our robot within this of ball = touching it
+CLASH_OPP_CONTACT: float = 0.25    # opponent within this of ball = contesting
+CLASH_STALL_EPS: float = 0.04      # ball moved less than this per tick = stuck
+CLASH_STALL_TICKS: int = 10        # ticks stuck+contested before we jiggle
+CLASH_MAX_TICKS: int = 40          # stop jiggling after this many ticks (give up)
+CLASH_HALF_PERIOD: int = 5         # ticks per oscillation half-cycle (in/out)
+CLASH_RETREAT: float = 0.35        # retreat distance (m) away from the ball
+CLASH_SHOVE: float = 0.12          # shove distance (m) past the ball
+# When we control the wedged ball, pass out instead of jiggling.
+CLASH_POSSESS_DIST: float = 0.16   # within this of ball = we may control it
+CLASH_POSSESS_HEADING: float = 0.6 # ball must be within this heading error of front
+CLASH_ESCAPE_MARK_DIST: float = 0.4    # escape target must be this clear of any opp
+CLASH_ESCAPE_LANE_CLEARANCE: float = 0.15  # pass-lane clearance for the escape
+
+# --- orbit defender: confuse the striker, then tackle a frozen ball ---------
+# The "extra" defender added while the opponent attacks our half sits beside the
+# primary defender (slightly up-pitch) and shuffles laterally in parallel to
+# disguise which lane is covered. If the ball freezes long enough it pounces.
+ORBIT_FORWARD: float = 0.35        # up-pitch offset from the primary defender (m)
+ORBIT_LATERAL: float = 0.40        # lateral offset beside the primary (m)
+ORBIT_SHIFT_AMP: float = 0.30      # parallel lateral shuffle amplitude (m)
+ORBIT_HALF_PERIOD: int = 12        # ticks per shuffle half-cycle
+FREEZE_TACKLE_TICKS: int = 25      # ball frozen this long → the extra one tackles
+CHASE_GAIN_TACKLE: float = 3.0     # speed gain so the orbit/tackle moves are brisk
+
+
+@dataclass(frozen=True)
+class GegenpressConfig:
+    """Reactive GegenPressing trigger (off by default).
+
+    The team plays its normal base roles while WE clearly control the ball. The
+    moment we don't — the opponent holds it OR it is a loose/free ball the
+    opponent is at least as close to — the press engages: the robot nearest the
+    ball becomes the presser/retriever (ATTACKER) and our other field players
+    man-mark. This is the GegenPressing principle that a free ball must be won
+    back instantly, not waited on.
+
+    Engagement is debounced by ``enter_ticks`` so the whole team does not
+    collapse into a marking shape on a momentary loose touch — e.g. right after
+    a kickoff, when possession is still being contested — and released after
+    ``exit_ticks`` of clear own possession.
+    """
+
+    enabled: bool = False
+    # The press engages when the nearest opponent is within this margin (m) of
+    # being as close to the ball as our nearest robot:
+    #   opp_dist <= own_dist + press_margin.
+    # 0.0 = press only when the opponent is strictly closer; a small positive
+    # value makes us contest 50/50 balls more eagerly.
+    press_margin: float = 0.10
+    # Consecutive ticks without clear own possession needed to engage the press.
+    enter_ticks: int = 8
+    # Consecutive ticks of clear own possession needed to disengage.
+    exit_ticks: int = 12
+    # When our nearest robot is this much (m) closer to the ball than any
+    # opponent, we count it as SECURE own possession and:
+    #   * drop the press immediately (no exit debounce), and
+    #   * flip into the counter-attack break (carrier attacks, the rest sprint
+    #     into the opponent half to receive — no clustering, no marking).
+    secure_margin: float = 0.30
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> "GegenpressConfig":
+        if isinstance(raw, GegenpressConfig):
+            return raw
+        if not isinstance(raw, dict):
+            return cls()
+        d = cls()
+        return cls(
+            enabled=bool(raw.get("enabled", d.enabled)),
+            press_margin=float(raw.get("press_margin", d.press_margin)),
+            enter_ticks=int(raw.get("enter_ticks", d.enter_ticks)),
+            exit_ticks=int(raw.get("exit_ticks", d.exit_ticks)),
+            secure_margin=float(raw.get("secure_margin", d.secure_margin)),
+        )
 
 # Attacking box slots for OUR corner kick — (depth in front of opp goal, y).
 # depth is measured back from the opponent goal line toward midfield; kept ≥1.3m
@@ -305,6 +420,10 @@ class Coordinator:
         heuristic_weights: RoleHeuristicWeights | None = None,
         heuristic_weights_file: str = "bt_tuning.yaml",
         movement_safety: MovementSafetyConfig | dict[str, bool | float] | None = None,
+        strategy: StrategyConfig | dict[str, Any] | None = None,
+        strategy_file: str = "bt_tuning.yaml",
+        gegenpress: GegenpressConfig | dict[str, Any] | None = None,
+        clash_royale: bool = True,
     ) -> None:
         self.trees = trees
         self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
@@ -319,8 +438,53 @@ class Coordinator:
             if isinstance(movement_safety, MovementSafetyConfig)
             else MovementSafetyConfig.from_mapping(movement_safety)
         )
+        # Team-strategy layer (context-aware). Disabled, neutral and rule-free
+        # by default, so this is a no-op until `strategy.enabled: true` (plus a
+        # dial change or a rule) in yaml. When active it is re-resolved every
+        # tick against the live game context (see _refresh_dynamic_strategy).
+        if isinstance(strategy, StrategyConfig):
+            self.strategy = strategy
+        elif isinstance(strategy, dict):
+            self.strategy = StrategyConfig.from_mapping(strategy)
+        else:
+            self.strategy = load_strategy_config(strategy_file)
+        # Pristine base copies — per-tick strategy always transforms from these
+        # so scales never compound across ticks.
+        self._base_heuristic_weights = self.heuristic_weights
+        self._strategy_targets = self._collect_strategy_targets()
+        if is_strategy_active(self.strategy):
+            # Apply the base posture immediately; rules layer on each tick.
+            self._apply_effective_strategy(self.strategy)
+            print(
+                f"[BT] team strategy active: {len(self.strategy.rules)} "
+                f"context rule(s)",
+                flush=True,
+            )
         self.blackboards: dict[int, RobotBlackboard] = {}
         self._role_swap_last_changed_at: dict[int, float] = {}
+        # MARKER-role bookkeeping: marker_id -> currently-assigned opponent id.
+        # Sticky across ticks so a marker keeps its man while that man stays in
+        # the danger area (no flicker); see _apply_marker_assignment.
+        self._marker_to_opp: dict[int, int] = {}
+        # Reactive GegenPressing trigger state (see GegenpressConfig). While
+        # active, non-goalie field roles are overridden to presser + markers.
+        self.gegenpress = (
+            gegenpress
+            if isinstance(gegenpress, GegenpressConfig)
+            else GegenpressConfig.from_mapping(gegenpress)
+        )
+        self._gegenpress_active: bool = False
+        self._press_streak: int = 0      # consecutive ticks without clear own control
+        self._release_streak: int = 0    # consecutive ticks of clear own control
+        # clash_royale anti-stall state.
+        self.clash_royale_enabled: bool = bool(clash_royale)
+        self._last_ball_pos: tuple[float, float] | None = None
+        self._ball_stall_ticks: int = 0
+        self._clash_phase: int = 0
+        self._clash_active_ticks: int = 0
+        # Orbit-defender state (the "extra" defender while defending our half).
+        self._extra_defender_id: int | None = None
+        self._orbit_phase: int = 0
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
@@ -382,6 +546,11 @@ class Coordinator:
         phase = snapshot.referee_state.game_phase
 
         if phase != self._last_phase:
+            # Re-evaluate the press from scratch each new phase (e.g. after a
+            # stoppage or kickoff) so a stale press never carries across.
+            self._gegenpress_active = False
+            self._press_streak = 0
+            self._release_streak = 0
             self._free_kick_kicker_id = None
             self._free_kick_support_slots = {}
             self._free_kick_kicker_ready = False
@@ -441,6 +610,10 @@ class Coordinator:
             # Robots must not move — produce no intents so the dispatcher
             # lets existing commands time out and robots coast to zero.
             return []
+
+        # Re-resolve the context-aware team strategy before any handler or role
+        # tree runs this tick. No-op unless the strategy layer is active.
+        self._refresh_dynamic_strategy(snapshot)
 
         if phase == GamePhase.STOPPED:
             self._handle_stopped(snapshot, robot_ids)
@@ -569,9 +742,185 @@ class Coordinator:
             return result
             return self._finalize_intents(snapshot, robot_ids)
 
-        self._apply_heuristic_roles(snapshot, robot_ids)
+        # Possession-driven dynamic role assignment. Three mutually-exclusive
+        # states per tick (so roles never fight):
+        #   * pressing            → presser + markers + shot-zone defender(s),
+        #   * secure own ball     → counter-attack break (carrier attacks, the
+        #                           rest sprint into the opponent half — no
+        #                           clustering around the carrier),
+        #   * contested / neutral → the normal (heuristic/static) assignment.
+        self._update_gegenpress_state(snapshot)
+        if self.gegenpress.enabled and self._gegenpress_active:
+            self._apply_gegenpress_roles(snapshot, robot_ids)
+        elif self.gegenpress.enabled and self._we_have_secure_possession(snapshot):
+            self._apply_counter_attack_roles(snapshot, robot_ids)
+        else:
+            self._apply_heuristic_roles(snapshot, robot_ids)
+        self._apply_marker_assignment(snapshot, robot_ids)
+        self._promote_redundant_markers_to_outlets(robot_ids)
+        self._update_ball_stall(snapshot)
         self._normal_tick(snapshot, robot_ids)
+        # Post-tick intent overrides (run after the trees so they win):
+        #  - extra defender's confuse-and-tackle orbit while defending our half,
+        #  - clash escape (pass out / jiggle) for a ball wedged in a clash.
+        self._apply_orbit_defender(snapshot, robot_ids)
+        self._apply_clash_royale(snapshot, robot_ids)
         return self._finalize_intents(snapshot, robot_ids)
+
+    def _update_ball_stall(self, snapshot: Snapshot) -> None:
+        """Track how long the ball has been ~stationary (a frozen/wedged ball)."""
+        ball = snapshot.ball_position
+        if self._last_ball_pos is None:
+            moved = math.inf
+        else:
+            moved = math.hypot(
+                ball[0] - self._last_ball_pos[0], ball[1] - self._last_ball_pos[1]
+            )
+        self._last_ball_pos = ball
+        if moved >= CLASH_STALL_EPS:
+            self._ball_stall_ticks = 0
+        else:
+            self._ball_stall_ticks += 1
+
+    def _apply_clash_royale(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Resolve a ball wedged in a clash.
+
+        Triggers only on a genuine clash: the ball has been ~stationary for
+        ``CLASH_STALL_TICKS`` while both one of ours and an opponent are touching
+        it. If our contesting robot actually controls the ball, the right answer
+        is to PASS OUT of the clash to an open teammate (most useful in the
+        opponent half); otherwise we shake it loose by oscillating in/out along
+        the robot↔ball axis.
+        """
+        if not self.clash_royale_enabled:
+            return
+
+        ball = snapshot.ball_position
+        if self._ball_stall_ticks < CLASH_STALL_TICKS:
+            self._clash_active_ticks = 0
+            return
+
+        # A clash needs an opponent contesting the stuck ball — otherwise it is
+        # just a parked ball the normal chase should handle.
+        if not snapshot.enemy_robots:
+            return
+        opp_dist = min(
+            math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+            for r in snapshot.enemy_robots
+        )
+        if opp_dist > CLASH_OPP_CONTACT:
+            return
+
+        candidates = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and not self._is_goalie(rid)
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not candidates:
+            return
+        rid = min(
+            candidates,
+            key=lambda r: math.hypot(
+                _find_robot(snapshot, r).position[0] - ball[0],
+                _find_robot(snapshot, r).position[1] - ball[1],
+            ),
+        )
+        robot = _find_robot(snapshot, rid)
+        if math.hypot(robot.position[0] - ball[0], robot.position[1] - ball[1]) > CLASH_BALL_CONTACT:
+            return
+
+        # If we actually control the wedged ball, pass out of the clash rather
+        # than wrestle over it — keep possession by finding an open teammate.
+        if self._controls_ball(robot, ball):
+            target_id, target_pos = self._find_clash_escape_target(snapshot, rid)
+            if target_id is not None and target_pos is not None:
+                bb = self.blackboards[rid]
+                bb.current_intent = IntentPass(
+                    target_robot_id=target_id, target_pos=target_pos
+                )
+                bb.intent_source = "ClashEscapePass"
+                self._clash_active_ticks = 0
+                return
+
+        # Give up after a while so we don't jiggle forever on a truly stuck ball.
+        if self._clash_active_ticks >= CLASH_MAX_TICKS:
+            self._clash_active_ticks = 0
+            return
+        self._clash_active_ticks += 1
+
+        nx = robot.position[0] - ball[0]
+        ny = robot.position[1] - ball[1]
+        n = math.hypot(nx, ny)
+        if n < 1e-9:
+            ux, uy = math.cos(robot.orientation), math.sin(robot.orientation)
+        else:
+            ux, uy = nx / n, ny / n  # unit vector pointing from ball to robot
+
+        face = math.atan2(ball[1] - robot.position[1], ball[0] - robot.position[0])
+        half = (self._clash_phase // CLASH_HALF_PERIOD) % 2
+        self._clash_phase += 1
+        if half == 0:
+            # Retreat: pull back away from the ball.
+            target = (
+                robot.position[0] + ux * CLASH_RETREAT,
+                robot.position[1] + uy * CLASH_RETREAT,
+            )
+        else:
+            # Shove: drive in toward (and just past) the ball.
+            target = (ball[0] - ux * CLASH_SHOVE, ball[1] - uy * CLASH_SHOVE)
+
+        bb = self.blackboards[rid]
+        bb.current_intent = IntentMove(target_pos=target, target_orientation=face)
+        bb.intent_source = "ClashRoyale"
+
+    @staticmethod
+    def _controls_ball(robot, ball: tuple[float, float]) -> bool:
+        """True when the ball is in front of the robot's kicker and in range."""
+        dx, dy = ball[0] - robot.position[0], ball[1] - robot.position[1]
+        if math.hypot(dx, dy) > CLASH_POSSESS_DIST:
+            return False
+        err = (math.atan2(dy, dx) - robot.orientation + math.pi) % (2 * math.pi) - math.pi
+        return abs(err) <= CLASH_POSSESS_HEADING
+
+    def _find_clash_escape_target(
+        self, snapshot: Snapshot, passer_id: int
+    ) -> tuple[int | None, tuple[float, float] | None]:
+        """Find the most forward open teammate to pass to out of a clash."""
+        ball = snapshot.ball_position
+        best_id: int | None = None
+        best_pos: tuple[float, float] | None = None
+        best_progress = -math.inf
+        for tm in snapshot.own_robots:
+            if tm.robot_id == passer_id or self._is_goalie(tm.robot_id):
+                continue
+            nearest_opp = min(
+                (
+                    math.hypot(opp.position[0] - tm.position[0], opp.position[1] - tm.position[1])
+                    for opp in snapshot.enemy_robots
+                ),
+                default=math.inf,
+            )
+            if nearest_opp < CLASH_ESCAPE_MARK_DIST:
+                continue
+            obstacles = list(snapshot.enemy_robots) + [
+                r
+                for r in snapshot.own_robots
+                if r.robot_id not in (passer_id, tm.robot_id)
+            ]
+            if not line_of_sight_clear(
+                ball, tm.position, obstacles, clearance=CLASH_ESCAPE_LANE_CLEARANCE
+            ):
+                continue
+            progress = tm.position[0] * self._attack_sign  # most advanced wins
+            if progress > best_progress:
+                best_progress = progress
+                best_id = tm.robot_id
+                best_pos = tm.position
+        return best_id, best_pos
 
     def _finalize_intents(
         self,
@@ -1595,6 +1944,433 @@ class Coordinator:
             bb.current_role = new_role
             if old_role != new_role:
                 self._role_swap_last_changed_at[robot_id] = now
+
+    def _should_engage_press(self, snapshot: Snapshot) -> bool:
+        """True when we do NOT clearly control the ball.
+
+        Covers both opponent possession and loose/free balls: the press engages
+        whenever the nearest opponent is within ``press_margin`` of being as
+        close to the ball as our nearest robot. When we are clearly closest
+        (own_dist + margin < opp_dist) we keep playing our base shape.
+        """
+        if not snapshot.enemy_robots:
+            return False
+        ball = snapshot.ball_position
+        opp_dist = min(
+            math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+            for r in snapshot.enemy_robots
+        )
+        own_dist = min(
+            (
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.own_robots
+            ),
+            default=math.inf,
+        )
+        return opp_dist <= own_dist + self.gegenpress.press_margin
+
+    def _update_gegenpress_state(self, snapshot: Snapshot) -> None:
+        """Debounced possession tracking that engages/disengages the press."""
+        if not self.gegenpress.enabled:
+            return
+        if self._should_engage_press(snapshot):
+            self._press_streak += 1
+            self._release_streak = 0
+        else:
+            self._release_streak += 1
+            self._press_streak = 0
+
+        if (
+            not self._gegenpress_active
+            and self._press_streak >= self.gegenpress.enter_ticks
+        ):
+            self._gegenpress_active = True
+        elif self._gegenpress_active and (
+            # Secure own possession breaks the press INSTANTLY (no debounce) so
+            # the counter-attack launches the moment we win the ball; otherwise
+            # the exit debounce avoids flicker on contested/loose balls.
+            self._we_have_secure_possession(snapshot)
+            or self._release_streak >= self.gegenpress.exit_ticks
+        ):
+            self._gegenpress_active = False
+
+    def _we_have_secure_possession(self, snapshot: Snapshot) -> bool:
+        """True when our nearest robot is clearly closest to the ball.
+
+        The trigger for switching from defending into the counter-attack: our
+        nearest robot is at least ``secure_margin`` closer to the ball than any
+        opponent (covers both holding it and clearly winning a loose ball).
+        """
+        ball = snapshot.ball_position
+        own_dist = min(
+            (
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.own_robots
+            ),
+            default=math.inf,
+        )
+        if math.isinf(own_dist):
+            return False
+        opp_dist = min(
+            (
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.enemy_robots
+            ),
+            default=math.inf,
+        )
+        return own_dist + self.gegenpress.secure_margin <= opp_dist
+
+    def _apply_counter_attack_roles(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Counter-attack break: carrier attacks, everyone else sprints forward.
+
+        When we secure the ball the team must NOT keep hovering near the carrier
+        in its defensive shape. The robot on/nearest the ball becomes the
+        ATTACKER (it carries / makes the direct forward release via the
+        counter_attack branch); every other field robot becomes a SUPPORTER,
+        whose RepositionToSpace spreads them into open space toward the opponent
+        goal — outlets for the counter, not a cluster around the ball.
+        """
+        ball = snapshot.ball_position
+        present = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and not self._is_goalie(rid)
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not present:
+            return
+        self._extra_defender_id = None
+        carrier = min(
+            present,
+            key=lambda rid: math.hypot(
+                _find_robot(snapshot, rid).position[0] - ball[0],
+                _find_robot(snapshot, rid).position[1] - ball[1],
+            ),
+        )
+        for rid in present:
+            self.blackboards[rid].current_role = (
+                RoleType.ATTACKER if rid == carrier else RoleType.SUPPORTER
+            )
+
+    def _apply_gegenpress_roles(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Override field roles while the press is active.
+
+        The non-goalie robot nearest the ball presses (ATTACKER — its tree's
+        containment branch shepherds the carrier). When the ball is in OUR half
+        (the opponent is attacking us), blocking the shot zone is the priority:
+        one robot is dedicated as a DEFENDER on the goal→ball line BEFORE the
+        rest man-mark (MARKER). When the ball is in their half we press high and
+        everyone else man-marks. The goalie is left untouched.
+        """
+        ball = snapshot.ball_position
+        present = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and not self._is_goalie(rid)
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not present:
+            return
+
+        def dist_to_ball(rid: int) -> float:
+            p = _find_robot(snapshot, rid).position
+            return math.hypot(p[0] - ball[0], p[1] - ball[1])
+
+        presser = min(present, key=dist_to_ball)
+        roles = {rid: RoleType.MARKER for rid in present}
+        roles[presser] = RoleType.ATTACKER
+        self._extra_defender_id = None
+
+        # Shot-zone blocking is the top defensive priority when they bring the
+        # ball into our half. Dedicate the deepest remaining robot as the primary
+        # DEFENDER (holds the goal→ball line). When we still have plenty of
+        # robots, add an "extra" DEFENDER that orbits beside it to confuse the
+        # striker (its intent is driven by _apply_orbit_defender).
+        if self._ball_in_our_half(snapshot):
+            own_goal = (self._own_goal_line_x, 0.0)
+
+            def dist_to_own_goal(rid: int) -> float:
+                p = _find_robot(snapshot, rid).position
+                return math.hypot(p[0] - own_goal[0], p[1] - own_goal[1])
+
+            others = sorted(
+                (rid for rid in present if rid != presser),
+                key=dist_to_own_goal,
+            )
+            if others:
+                roles[others[0]] = RoleType.DEFENDER  # primary shot-zone blocker
+                # Add the extra orbit defender only while enough robots remain to
+                # keep marking the threats (presser + 2 defenders + ≥1 marker).
+                if len(others) >= 3:
+                    self._extra_defender_id = others[1]
+                    roles[others[1]] = RoleType.DEFENDER
+
+        for rid in present:
+            self.blackboards[rid].current_role = roles[rid]
+
+    def _apply_orbit_defender(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Drive the extra defender: confuse-and-shuffle, then tackle if frozen.
+
+        The extra defender sits beside the primary defender, slightly up-pitch,
+        and shuffles laterally in parallel so the striker can't read which lane
+        is covered. If the ball has been frozen for ``FREEZE_TACKLE_TICKS`` it
+        pounces and tackles. No-op unless the press is active and the ball is in
+        our half (where the extra defender was assigned).
+        """
+        rid = self._extra_defender_id
+        if (
+            not (self.gegenpress.enabled and self._gegenpress_active)
+            or rid is None
+            or rid not in self.blackboards
+            or self.blackboards[rid].current_role != RoleType.DEFENDER
+        ):
+            return
+        extra = _find_robot(snapshot, rid)
+        if extra is None or not self._ball_in_our_half(snapshot):
+            return
+        ball = snapshot.ball_position
+
+        # Frozen ball → tackle: rush the ball and face it.
+        if self._ball_stall_ticks >= FREEZE_TACKLE_TICKS:
+            face = math.atan2(ball[1] - extra.position[1], ball[0] - extra.position[0])
+            self.blackboards[rid].current_intent = IntentMove(
+                target_pos=ball, target_orientation=face, speed_gain=CHASE_GAIN_TACKLE
+            )
+            self.blackboards[rid].intent_source = "OrbitDefenderTackle"
+            return
+
+        # The primary defender is the other DEFENDER (deepest); orbit beside it.
+        primary = None
+        for other in robot_ids:
+            if (
+                other != rid
+                and other in self.blackboards
+                and self.blackboards[other].current_role == RoleType.DEFENDER
+                and _find_robot(snapshot, other) is not None
+            ):
+                primary = _find_robot(snapshot, other)
+                break
+        if primary is None:
+            return
+
+        # Up-pitch (toward the ball/opponent) and to one side, with a parallel
+        # lateral shuffle so the pair slides together rather than circling.
+        self._orbit_phase += 1
+        shift = ORBIT_SHIFT_AMP * math.sin(
+            (math.pi / ORBIT_HALF_PERIOD) * self._orbit_phase
+        )
+        side = 1.0 if extra.position[1] >= primary.position[1] else -1.0
+        target = (
+            primary.position[0] + ORBIT_FORWARD * self._attack_sign,
+            primary.position[1] + side * ORBIT_LATERAL + shift,
+        )
+        face = math.atan2(ball[1] - extra.position[1], ball[0] - extra.position[0])
+        self.blackboards[rid].current_intent = IntentMove(
+            target_pos=target, target_orientation=face, speed_gain=CHASE_GAIN_TACKLE
+        )
+        self.blackboards[rid].intent_source = "OrbitDefenderShuffle"
+
+    def _promote_redundant_markers_to_outlets(self, robot_ids: list[int]) -> None:
+        """Turn redundant markers into forward outlets.
+
+        After the marker matching, any MARKER with no man to cover
+        (``mark_target_id is None``) is redundant — its job is already done by a
+        teammate or there is no distinct threat for it. Rather than have it
+        hover/zone-cover and clutter our half, promote it to SUPPORTER so it
+        breaks into open space toward the opponent goal — a useful counter-attack
+        outlet to receive a pass once we win the ball. Only while pressing.
+        """
+        if not (self.gegenpress.enabled and self._gegenpress_active):
+            return
+        for rid in robot_ids:
+            bb = self.blackboards.get(rid)
+            if (
+                bb is not None
+                and bb.current_role == RoleType.MARKER
+                and bb.mark_target_id is None
+            ):
+                bb.current_role = RoleType.SUPPORTER
+
+    def _ball_in_our_half(self, snapshot: Snapshot) -> bool:
+        """True when the ball is on our side of the halfway line."""
+        bx = snapshot.ball_position[0]
+        progress = (bx - self._own_goal_line_x) * self._attack_sign / _FIELD_LEN_M
+        return progress < 0.5
+
+    def _apply_marker_assignment(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Assign each MARKER robot an opponent to shadow (team-level, stable).
+
+        Man-to-man with zone-flex: a marker keeps its assigned man while that
+        man stays in the danger area (sticky, no flicker); when its man retreats
+        past the danger line it is dropped and the marker falls to zone cover
+        (``mark_target_id = None``). Free markers pick up the *most dangerous*
+        unmarked opponents first (those nearest our goal), each by the nearest
+        free marker — so when markers are scarce the biggest threats are covered.
+
+        The current ball carrier (the opponent nearest the ball) is deliberately
+        left UNMARKED here: the pressing attacker contains him. This avoids two
+        of our robots converging on the same opponent.
+
+        Writes ``mark_target_id`` onto each marker's blackboard. A no-op when no
+        present robot currently holds the MARKER role, so non-GegenPress modes
+        never pay for it.
+        """
+        marker_ids = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and self.blackboards[rid].current_role == RoleType.MARKER
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not marker_ids:
+            return
+
+        own_goal_x = self._own_goal_line_x
+
+        def progress(opp) -> float:
+            # 0.0 at our own goal line, 1.0 at the opponent goal line.
+            return (opp.position[0] - own_goal_x) * self._attack_sign / _FIELD_LEN_M
+
+        # The ball carrier is contained by the presser, not man-marked.
+        carrier_id: int | None = None
+        if snapshot.enemy_robots:
+            carrier = min(
+                snapshot.enemy_robots,
+                key=lambda r: math.hypot(
+                    r.position[0] - snapshot.ball_position[0],
+                    r.position[1] - snapshot.ball_position[1],
+                ),
+            )
+            carrier_id = carrier.robot_id
+
+        # While defending our own half, tighten the danger line so we stop
+        # shadowing opponents sitting back in their field and oppress only the
+        # threats on our side (the shot-zone blocker covers the goal lane).
+        danger_frac = (
+            MARK_DEFENSIVE_ZONE_FRAC
+            if self._ball_in_our_half(snapshot)
+            else MARK_DANGER_ZONE_FRAC
+        )
+        opp_by_id = {
+            opp.robot_id: opp
+            for opp in snapshot.enemy_robots
+            if opp.robot_id != carrier_id
+            and progress(opp) <= danger_frac
+        }
+        danger_ids = set(opp_by_id)
+        marker_pos = {rid: _find_robot(snapshot, rid).position for rid in marker_ids}
+
+        assignment: dict[int, int] = {}
+        taken: set[int] = set()
+
+        # Step 1 — keep sticky assignments whose man is still markable.
+        for rid in marker_ids:
+            prev = self._marker_to_opp.get(rid)
+            if prev is not None and prev in danger_ids and prev not in taken:
+                assignment[rid] = prev
+                taken.add(prev)
+
+        # Step 2 — cover the most dangerous unmarked opponents first (those
+        # closest to our goal), each by its nearest still-free marker.
+        available = sorted(
+            (oid for oid in danger_ids if oid not in taken),
+            key=lambda oid: progress(opp_by_id[oid]),
+        )
+        for oid in available:
+            free = [rid for rid in marker_ids if rid not in assignment]
+            if not free:
+                break
+            # Anti-cluster: if this opponent is bunched with one we already mark,
+            # don't send a second robot — one marker covers the cluster and the
+            # free markers zone-cover instead of all converging.
+            op = opp_by_id[oid].position
+            if any(
+                math.hypot(op[0] - opp_by_id[t].position[0], op[1] - opp_by_id[t].position[1])
+                <= MARK_CLUSTER_RADIUS
+                for t in taken
+                if t in opp_by_id
+            ):
+                continue
+            rid = min(
+                free,
+                key=lambda r: math.hypot(
+                    marker_pos[r][0] - opp_by_id[oid].position[0],
+                    marker_pos[r][1] - opp_by_id[oid].position[1],
+                ),
+            )
+            assignment[rid] = oid
+            taken.add(oid)
+
+        # Commit: write targets and refresh the sticky map.
+        self._marker_to_opp = {}
+        for rid in marker_ids:
+            oid = assignment.get(rid)
+            self.blackboards[rid].mark_target_id = oid
+            if oid is not None:
+                self._marker_to_opp[rid] = oid
+
+    def _collect_strategy_targets(self) -> list[tuple[Any, str, Any, Any]]:
+        """Snapshot each role tree's base config so per-tick strategy can be
+        re-derived from the pristine originals.
+
+        Returns ``(tree, attribute_name, base_config, apply_fn)`` tuples for the
+        attacker/supporter ``behavior_config`` and the defender
+        ``positioning_config``. Trees without a config (e.g. the goalie) are
+        skipped, so they are never touched.
+        """
+        targets: list[tuple[Any, str, Any, Any]] = []
+        for role, tree in self.trees.items():
+            if role == RoleType.ATTACKER and hasattr(tree, "behavior_config"):
+                targets.append(
+                    (tree, "behavior_config", tree.behavior_config,
+                     apply_strategy_to_attacker_config)
+                )
+            elif role == RoleType.SUPPORTER and hasattr(tree, "behavior_config"):
+                targets.append(
+                    (tree, "behavior_config", tree.behavior_config,
+                     apply_strategy_to_supporter_config)
+                )
+            elif role == RoleType.DEFENDER and hasattr(tree, "positioning_config"):
+                targets.append(
+                    (tree, "positioning_config", tree.positioning_config,
+                     apply_strategy_to_defender_positioning)
+                )
+        return targets
+
+    def _apply_effective_strategy(self, effective: StrategyConfig) -> None:
+        """Rewrite the role weights and each tree's config from *effective*.
+
+        Always transforms from the pristine base copies, so repeated calls are
+        idempotent and scales never compound. The replaced tree configs are
+        read live by the tree nodes, so reassignment takes effect immediately.
+        """
+        self.heuristic_weights = apply_strategy_to_role_weights(
+            self._base_heuristic_weights, effective
+        )
+        for tree, attr, base_config, apply_fn in self._strategy_targets:
+            setattr(tree, attr, apply_fn(base_config, effective))
+
+    def _refresh_dynamic_strategy(self, snapshot: Snapshot) -> None:
+        """Re-resolve the team strategy against the live game context.
+
+        No-op while the strategy layer is inactive — in that case the role
+        weights and tree configs are left exactly as loaded.
+        """
+        if not is_strategy_active(self.strategy):
+            return
+        context = evaluate_game_context(snapshot, self._attack_sign)
+        effective = resolve_effective_strategy(self.strategy, context)
+        self._apply_effective_strategy(effective)
 
     def _role_of(self, robot_id: int) -> RoleType:
         return self.role_assignment.get(robot_id, RoleType.SUPPORTER)

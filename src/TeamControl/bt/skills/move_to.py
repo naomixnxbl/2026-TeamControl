@@ -29,19 +29,22 @@ def _proportional_velocity(
     robot_pos: tuple[float, float],
     target_pos: tuple[float, float],
     max_speed: float = _MAX_SPEED,
+    gain: float = 1.0,
 ) -> tuple[float, float]:
     """Compute a proportional velocity vector toward *target_pos*.
 
-    The robot moves directly toward the target at a speed proportional to
-    the distance, clamped to *max_speed*.  Returns (0.0, 0.0) when the
-    robot is already at the target.
+    The robot moves directly toward the target at a speed proportional to the
+    distance (scaled by *gain*), clamped to *max_speed*.  ``gain=1.0`` is the
+    classic ``min(distance, max_speed)`` profile; higher gains reach the cap
+    from closer in for a snappier approach.  Returns (0.0, 0.0) when the robot
+    is already at the target.
     """
     dx = target_pos[0] - robot_pos[0]
     dy = target_pos[1] - robot_pos[1]
     dist = math.hypot(dx, dy)
     if dist < 1e-9:
         return (0.0, 0.0)
-    speed = min(dist, max_speed)
+    speed = min(dist * max(gain, 0.0), max_speed)
     return (dx / dist * speed, dy / dist * speed)
 
 
@@ -51,6 +54,7 @@ def move_to(
     target_pos: tuple[float, float],
     target_orientation: float | None = None,
     max_speed: float | None = None,
+    gain: float = 1.0,
 ) -> MotionTarget:
     """Navigate robot *robot_id* to *target_pos*.
 
@@ -69,7 +73,10 @@ def move_to(
     """
     robot = _get_robot(snapshot, robot_id)
     velocity = _proportional_velocity(
-        robot.position, target_pos, max_speed=max_speed if max_speed is not None else _MAX_SPEED
+        robot.position,
+        target_pos,
+        max_speed=max_speed if max_speed is not None else _MAX_SPEED,
+        gain=gain,
     )
     # Keep current orientation when none specified — avoids spinning to face 0.0.
     orientation = target_orientation if target_orientation is not None else robot.orientation

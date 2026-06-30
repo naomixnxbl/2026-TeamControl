@@ -111,6 +111,15 @@ class SupporterBehaviorConfig:
     reposition_y_max: float = REPOSITION_Y_MAX
     pass_orient_tol: float = PASS_ORIENT_TOL
     pass_signal_timeout_ticks: int = PASS_SIGNAL_TIMEOUT_TICKS
+    # When repositioning, reject candidate cells closer than this to the ball so
+    # supporters don't crowd the ball carrier. Default 0.0 disables the check,
+    # so every cell is considered exactly as before.
+    reposition_min_ball_distance: float = 0.0
+    # Bias repositioning toward the opponent goal. Adds
+    # reposition_goal_weight * (max_field_dist - dist_to_goal) to each cell's
+    # openness score. Default 0.0 keeps the original openness-only scoring with
+    # a goal-distance tie-break, so behaviour is unchanged.
+    reposition_goal_weight: float = 0.0
 
 
 def load_supporter_behavior_config(
@@ -470,7 +479,15 @@ class IsPassTarget(py_trees.behaviour.Behaviour):
 
 
 class HoldForPass(py_trees.behaviour.Behaviour):
-    """Hold current position and face the ball, waiting for a pass to arrive."""
+    """Wait for a pass, then actively meet the ball.
+
+    Holds position facing the ball while the pass is still far away, but once
+    the ball is within ``RECEIVE_RADIUS`` the receiver steps onto it (facing it)
+    so a pass that lands a little short/wide is still collected on the dribbler
+    instead of trickling past a stationary robot.
+    """
+
+    RECEIVE_RADIUS: float = 1.2
 
     def __init__(self, tree_ref: SupporterTree) -> None:
         super().__init__("HoldForPass")
@@ -488,11 +505,21 @@ class HoldForPass(py_trees.behaviour.Behaviour):
             snap.ball_position[1] - robot.position[1],
             snap.ball_position[0] - robot.position[0],
         )
+        dist_to_ball = math.hypot(
+            snap.ball_position[0] - robot.position[0],
+            snap.ball_position[1] - robot.position[1],
+        )
+        if dist_to_ball <= self.RECEIVE_RADIUS:
+            # Step onto the incoming ball to secure it on the dribbler.
+            target = snap.ball_position
+            bb.intent_source = "ReceiveMeetBall"
+        else:
+            target = robot.position
+            bb.intent_source = "HoldForPass"
         bb.current_intent = IntentMove(
-            target_pos=robot.position,
+            target_pos=target,
             target_orientation=angle_to_ball,
         )
-        bb.intent_source = "HoldForPass"
         return py_trees.common.Status.SUCCESS
 
 
@@ -520,15 +547,25 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         t = self._tree
+        cfg = t.behavior_config
         best_pos = t._reposition_fallback
         best_score = -1.0
         best_goal_dist = float("inf")
         gx, gy = t.goal_position
+        bx, by = snap.ball_position
 
         cx = t.repo_x_min
         while cx <= t.repo_x_max:
             cy = t.repo_y_min
             while cy <= t.repo_y_max:
+                # Skip cells too near the ball (anti-crowding). Default 0.0
+                # disables the check so all cells stay in play.
+                if cfg.reposition_min_ball_distance > 0.0 and (
+                    math.hypot(cx - bx, cy - by) < cfg.reposition_min_ball_distance
+                ):
+                    cy += cfg.grid_step
+                    continue
+
                 if snap.enemy_robots:
                     opp_score = min(
                         math.hypot(cx - opp.position[0], cy - opp.position[1])
@@ -545,17 +582,21 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
                     if d < own_score:
                         own_score = d
 
-                cell_score = min(opp_score, own_score)
-
                 goal_dist = math.hypot(cx - gx, cy - gy)
+                # Openness, optionally biased toward the opponent goal. The goal
+                # term is 0 at the default weight, leaving the original score.
+                cell_score = min(opp_score, own_score) + (
+                    cfg.reposition_goal_weight * max(0.0, cfg.max_field_dist - goal_dist)
+                )
+
                 if (cell_score > best_score
                         or (cell_score == best_score and goal_dist < best_goal_dist)):
                     best_score = cell_score
                     best_pos = (cx, cy)
                     best_goal_dist = goal_dist
 
-                cy += t.behavior_config.grid_step
-            cx += t.behavior_config.grid_step
+                cy += cfg.grid_step
+            cx += cfg.grid_step
 
         angle_to_ball = math.atan2(
             snap.ball_position[1] - robot.position[1],

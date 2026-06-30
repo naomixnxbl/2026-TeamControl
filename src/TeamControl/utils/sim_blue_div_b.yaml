@@ -1,0 +1,88 @@
+# Blue opponent for the `gegenpress` UI mode — a REPRESENTATIVE Division B team.
+#
+# Built natively from our own behaviour trees + the strategy layer (no external
+# or licensed code; a full RoboCup team stack — TIGERs/ER-Force/RoboTeam — is
+# Java/C++/ROS2 and can't be dropped into this Python+grSim pipeline).
+#
+# Modelled on what most Division B sides actually play: simple, solid, direct.
+#   * reliable goalie + a deeper 2-defender back line that blocks the shot lane,
+#   * the nearest robot goes to the ball, carries and shoots quickly,
+#   * sparing/cautious passing (reception is unreliable at this level → direct),
+#   * a direct counter when it wins the ball.
+# This is deliberately a DIFFERENT style from our possession-gegenpress (yellow),
+# so it's a real foil rather than a mirror.
+
+yellow:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+blue:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+
+# Base roles; dynamic role swap + the strategy posture below shape the team.
+roles:
+  0: goalie
+  1: attacker
+  2: supporter
+  3: supporter
+  4: supporter
+  5: supporter
+
+# Nearest-robot-attacks behaviour (realistic for a Div B side).
+heuristic_role_swap: True
+
+# Direct counter: release the ball forward when won, rather than patient buildup.
+counter_attack: True
+
+# Team posture — the strategy layer (see bt_tuning.yaml docs). This is what makes
+# blue play a solid+direct Division B style instead of our possession game.
+strategy:
+  enabled: true
+  role_bias:
+    # Pull more robots back to defend than our gegenpress side does.
+    defender_weight_scale: 1.4
+  formation:
+    # Keep a genuine 2-man back line (min_defenders 1→2, max 2→3).
+    extra_defenders: 1
+  attacking:
+    # Direct: shoot from a touch further out, settle less before shooting, and
+    # pass more cautiously (so they carry-and-shoot rather than over-pass).
+    shoot_distance_scale: 1.2
+    settle_time_scale: 0.7
+    pass_caution_scale: 1.3
+  defending:
+    # Slightly deeper line — sit and block the direct shot rather than step out.
+    line_height_scale: 0.85
+  rules:
+    # When they win it and get it forward, throw a runner up for the counter.
+    - name: break_on_counter
+      when:
+        possession: own
+        ball_zone: attacking
+      apply:
+        formation: {extra_attackers: 1}
+        attacking: {shoot_distance_scale: 1.3}
+    # When we attack them in their half, drop into a compact low block.
+    - name: low_block_under_pressure
+      when:
+        possession: opponent
+        ball_in_our_half: true
+      apply:
+        formation: {extra_defenders: 1}
+        defending: {line_height_scale: 0.75}
+
+movement_safety:
+  keep_robots_in_bounds: true
+  keep_goalie_in_goal_box: true
+  keep_non_goalies_out_of_goalie_box: true
+  avoid_ball_touch_in_opponent_defense_area: true
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+  goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+  defense_area_ball_touch_margin: 0.18
+  defense_area_dribble_kick_margin: 0.30
+
+tick_period: 0.01

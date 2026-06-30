@@ -1,6 +1,6 @@
 yellow:
   A:
-    ip: 127.0.0.1 # enter your IP (127.0.0.1) or the actual robot interface
+    ip: 127.0.0.1
     port: 50514
     grSimID: 0
     shellID: 0
@@ -85,12 +85,12 @@ gc:
   multicast-group: 224.5.23.1
   port: 10003
 network:
-  robot_ip: 0.0.0.0 # set this to 0.0.0.0 for grSim OR your computer's IP
-  vision_ip: 0.0.0.0 # set this to 0.0.0.0 for grSim OR your computer's IP
+  robot_ip: 0.0.0.0
+  vision_ip: 0.0.0.0
 use_grSim_vision: true
 us_yellow: true
 us_positive: true
-send_to_grSim: true # turn on if you need to test on grSim
+send_to_grSim: true
 record_world_snapshots: false
 team_name: TurtleRabbit
 record_world_snapshot_dir: match_replays
