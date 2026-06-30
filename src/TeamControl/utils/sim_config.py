@@ -106,6 +106,18 @@ class BTSimConfig:
         self.blue_ids: list[int] = [int(x) for x in raw["blue"]["robot_ids"]]
         self.roles: dict[int, RoleType] = _parse_roles(raw["roles"], config_filename)
         self.heuristic_role_swap: bool = bool(raw.get("heuristic_role_swap", False))
+        # GegenPressing containment: when true the lone attacker contains the
+        # ball carrier goal-side instead of diving at the ball. Default False so
+        # every existing sim config is unchanged.
+        self.attacker_press: bool = bool(raw.get("attacker_press", False))
+        # Reactive GegenPressing trigger (see coordinator.GegenpressConfig).
+        # Raw mapping passed straight through to the Coordinator; None when the
+        # config omits it (every existing sim config), keeping the press off.
+        self.gegenpress: dict | None = raw.get("gegenpress")
+        # Counter-attack release: when true the attacker prefers a direct forward
+        # pass into the opponent half over carrying the ball up. Default False so
+        # existing sim configs are unchanged.
+        self.counter_attack: bool = bool(raw.get("counter_attack", False))
         self.movement_safety: dict[str, bool | float] = _parse_movement_safety(
             raw.get("movement_safety")
         )
@@ -134,6 +146,17 @@ class Sim3v3Config(BTSimConfig):
     """In-memory view of ``sim_3v3.yaml``."""
 
     def __init__(self, config_filename: str = "sim_3v3.yaml") -> None:
+        super().__init__(config_filename)
+
+
+class SimGegenpressConfig(BTSimConfig):
+    """In-memory view of ``sim_gegenpress.yaml`` — the GegenPressing strategy.
+
+    Same shape as the 6v6 sim but with MARKER roles for the outfield robots and
+    ``attacker_press: true`` so the lone attacker contains the ball carrier.
+    """
+
+    def __init__(self, config_filename: str = "sim_gegenpress.yaml") -> None:
         super().__init__(config_filename)
 
 

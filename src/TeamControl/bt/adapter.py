@@ -46,6 +46,7 @@ from TeamControl.bt.contracts.snapshot import (
 )
 from TeamControl.bt.skills.kick_at import kick_at
 from TeamControl.bt.skills.move_to import move_to
+from TeamControl.bt.skills.receive_ball import receive_ball
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.SSL.game_controller.common import GameState
 
@@ -66,7 +67,12 @@ DRIBBLE_CARRY_SPEED = 1.0
 KICK_APPROACH_OFFSET = 0.22
 KICK_APPROACH_TOL = 0.08
 KICK_CONTACT_DISTANCE = 0.18
-KICK_ALIGN_TOL = 0.35
+# Heading error (rad) between the robot's facing and the ball→target line
+# allowed before the kick fires. 0.22 rad (~13°) keeps shots/passes on target
+# (at 2 m a 13° error is ~0.45 m — inside the goal mouth) while staying loose
+# enough that the robot still fires; the approach logic rotates it under this
+# before driving through the ball.
+KICK_ALIGN_TOL = 0.22
 KICK_BALL_FRONT_TOL = 0.45
 KICK_APPROACH_SPEED = 1.0
 KICK_CONTACT_SPEED = 1.5
@@ -479,6 +485,7 @@ def intent_to_motion_target(
                 intent.target_pos,
                 intent.target_orientation,
                 intent.max_speed,
+                gain=intent.speed_gain,
             )
             if _is_ball_target(intent.target_pos, snapshot.ball_position):
                 return _guard_ball_approach(snapshot, robot_id, target)
@@ -496,11 +503,10 @@ def intent_to_motion_target(
                 arrival_mode="precision",
             )
         if isinstance(intent, IntentReceive):
-            return MotionTarget(
-                target_velocity=(0.0, 0.0),
-                target_orientation=0.0,
-                arrival_mode="normal",
-            )
+            # Present the dribbler to the incoming ball: hold position but face
+            # the ball (receive_ball orients toward it) instead of staring at
+            # heading 0.0, which left the ball arriving behind/beside the kicker.
+            return receive_ball(snapshot, robot_id)
     except ValueError:
         # Robot absent from snapshot — skip the tick for it.
         return None

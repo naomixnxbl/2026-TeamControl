@@ -1,0 +1,75 @@
+# GegenPressing strategy sim config — our side (yellow) for the `gegenpress`
+# UI mode (SimEngine._build_foreground). The opponent (blue) runs the standard
+# btv2 BT.
+#
+# Design: we play NORMAL btv2 (goalie + attacker + supporters, with dynamic role
+# swapping) by default, and only collapse into the GegenPressing shape REACTIVELY
+# — i.e. once the opponent has actually held the ball (see the `gegenpress`
+# section). While the press is active, our non-goalie field players man-mark the
+# opponent outlets one-on-one (zone-flex) and the robot nearest the ball presses
+# the carrier. This is what stops us pressing too early — e.g. right after a
+# kickoff, when possession is still being contested.
+#
+# Network settings (grSim address, vision, robot IPs) still come from
+# ipconfig.yaml.
+
+yellow:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+blue:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+
+# Base roles = normal btv2 (the press overrides these reactively).
+# Valid roles: goalie, defender, supporter, attacker, marker.
+roles:
+  0: goalie
+  1: attacker
+  2: supporter
+  3: supporter
+  4: supporter
+  5: supporter
+
+# Normal btv2 play uses dynamic role swapping while WE have the ball.
+heuristic_role_swap: True
+
+# Keep the attacker's containment branch available; it self-gates (only fires
+# when an opponent controls the ball), so it costs nothing during our attacks.
+attacker_press: True
+
+# Counter-attack: when we win/hold the ball in our half, release it the most
+# direct way to a teammate already in the opponent half, then keep possession
+# up there rather than carrying it up ourselves.
+counter_attack: True
+
+# Reactive GegenPressing trigger.
+#   enabled        — master switch for the reactive press.
+#   possession_radius — an opponent within this (m) and nearest the ball "controls" it.
+#   enter_ticks    — consecutive opponent-control ticks before the press engages
+#                    (100 Hz → 8 ticks ≈ 0.08 s). This debounce avoids triggering
+#                    on a momentary touch right after a kickoff.
+#   exit_ticks     — consecutive own/loose ticks before we revert to btv2.
+gegenpress:
+  enabled: true
+  possession_radius: 0.5
+  enter_ticks: 8
+  exit_ticks: 12
+
+# Runtime movement safety guard rails. FOR THE REAL MATCH, KEEP THESE ALL TRUE.
+movement_safety:
+  keep_robots_in_bounds: true
+  keep_goalie_in_goal_box: true
+  keep_non_goalies_out_of_goalie_box: true
+  avoid_ball_touch_in_opponent_defense_area: true
+
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+  goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+  defense_area_ball_touch_margin: 0.18
+  defense_area_dribble_kick_margin: 0.30
+
+# Tick period in seconds for each BT process (100 Hz = 0.01).
+tick_period: 0.01

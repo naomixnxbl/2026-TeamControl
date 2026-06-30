@@ -30,6 +30,11 @@ class IntentMove:
     # Optional speed cap in m/s. None means use the skill's default (2.0 m/s).
     # Set to 1.4 during STOPPED to comply with the SSL < 1.5 m/s rule.
     max_speed: float | None = None
+    # Proportional-speed multiplier. The default 1.0 makes commanded speed scale
+    # as min(distance, cap) — which crawls for small corrections. Values > 1
+    # reach the cap from closer in, giving a snappier approach (e.g. the goalie
+    # tracking the ball along the goal line). Still clamped by max_speed/default.
+    speed_gain: float = 1.0
 
 
 @dataclasses.dataclass(frozen=True)

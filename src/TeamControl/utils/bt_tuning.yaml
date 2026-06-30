@@ -253,9 +253,10 @@ behavior_tree:
     # Higher = more shots count as blocked.
     shot_corridor_radius: 0.20
 
-    # Default: 0.4 radians. Robot must face goal within this error to shoot.
-    # Higher = shoots with looser alignment; lower = waits for better aim.
-    shot_heading_tol: 0.4
+    # Default: 0.25 radians (~14°). Robot must face the aim point within this
+    # error to shoot. Higher = shoots with looser alignment (less accurate);
+    # lower = waits for a cleaner line before pulling the trigger.
+    shot_heading_tol: 0.25
 
     # Default: 15 ticks. Continuous possession required before shooting.
     # Higher = less instant shooting after receiving; lower = shoots sooner.

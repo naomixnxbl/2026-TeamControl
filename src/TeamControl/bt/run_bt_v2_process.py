@@ -28,6 +28,7 @@ from TeamControl.bt.coordinator import Coordinator
 from TeamControl.bt.trees.attacker import AttackerTree
 from TeamControl.bt.trees.defender import DefenderTree
 from TeamControl.bt.trees.goalie import GoalieTree
+from TeamControl.bt.trees.marker import MarkerTree
 from TeamControl.bt.trees.supporter import SupporterTree
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.utils.yaml_config import Config as _YamlConfig
@@ -144,23 +145,47 @@ def _build_coordinator(
     role_assignment: dict[int, RoleType] | None = None,
     heuristic_role_swap: bool = False,
     movement_safety: dict[str, bool | float] | None = None,
+    press_enabled: bool | None = None,
+    gegenpress: dict | None = None,
+    counter_attack: bool | None = None,
 ) -> Coordinator:
+    # GegenPressing containment / counter-attack are off by default; when a mode
+    # requests either, rebuild the attacker config from yaml with the relevant
+    # flag(s) flipped on.
+    if press_enabled is None and counter_attack is None:
+        attacker_tree = AttackerTree(us_positive=us_positive)
+    else:
+        import dataclasses
+        from TeamControl.bt.trees.attacker import load_attacker_behavior_config
+        cfg = load_attacker_behavior_config()
+        overrides: dict[str, bool] = {}
+        if press_enabled is not None:
+            overrides["press_enabled"] = bool(press_enabled)
+        if counter_attack is not None:
+            overrides["counter_attack"] = bool(counter_attack)
+        cfg = dataclasses.replace(cfg, **overrides)
+        attacker_tree = AttackerTree(us_positive=us_positive, behavior_config=cfg)
     c = Coordinator(
         trees={
             RoleType.GOALIE: GoalieTree(us_positive=us_positive),
             RoleType.DEFENDER: DefenderTree(us_positive=us_positive),
             RoleType.SUPPORTER: SupporterTree(us_positive=us_positive),
-            RoleType.ATTACKER: AttackerTree(us_positive=us_positive),
+            RoleType.ATTACKER: attacker_tree,
+            RoleType.MARKER: MarkerTree(us_positive=us_positive),
         },
         us_positive=us_positive,
         role_assignment=role_assignment,
         heuristic_role_swap=heuristic_role_swap,
         movement_safety=movement_safety,
+        gegenpress=gegenpress,
     )
     print(
         f"[BT] coordinator built: us_positive={us_positive} "
         f"opp_goal={c._opp_goal} attack_sign={c._attack_sign} "
         f"heuristic_role_swap={heuristic_role_swap} "
+        f"press_enabled={press_enabled} "
+        f"counter_attack={counter_attack} "
+        f"gegenpress_enabled={c.gegenpress.enabled} "
         f"movement_safety={c.movement_safety}",
         flush=True,
     )
@@ -191,6 +216,9 @@ def run_bt_v2_process(
     config_file: str = "ipconfig.yaml",
     bt_state_q: "Queue | None" = None,
     verbose: bool = False,
+    press_enabled: bool | None = None,
+    gegenpress: dict | None = None,
+    counter_attack: bool | None = None,
 ) -> None:
     """Tick the v2 (TurtleRabbitBT) coordinator in a child process.
 
@@ -227,6 +255,9 @@ def run_bt_v2_process(
         role_assignment=role_assignment,
         heuristic_role_swap=heuristic_role_swap,
         movement_safety=movement_safety,
+        press_enabled=press_enabled,
+        gegenpress=gegenpress,
+        counter_attack=counter_attack,
     )
     dribble_tracker = DribbleLimitTracker(max_dribble_distance_m=load_dribble_distance_limit())
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")

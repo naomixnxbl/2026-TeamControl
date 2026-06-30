@@ -85,12 +85,33 @@ POSSESSION_HEADING_TOL: float = 0.3   # radians (~17 degrees)
 # Robot radius is ~0.09 m, so 0.20 m means an opponent within ~one body length
 # of the line counts as a block.
 SHOT_CORRIDOR_RADIUS: float = 0.20
-SHOT_HEADING_TOL: float = 0.4
+# Robot must face the aim point within this error before HasClearShot commits.
+# Tightened from 0.4 → 0.25 rad (~14°) so the team only pulls the trigger when
+# genuinely lined up — a big accuracy win for finishing.
+SHOT_HEADING_TOL: float = 0.25
 SHOT_SETTLE_TICKS: int = 30
+# Half-width of the goal mouth (m). Aim points are sampled across ±this around
+# the goal centre to find the most open part of the net.
+GOAL_MOUTH_HALF_WIDTH: float = 0.45
 
 GOALIE_ID: int = 0
 CHASE_SLOW_SPEED: float = 0.2
 SHOOT_DIST_THRESHOLD: float = 2.0
+
+# --- GegenPressing containment (default OFF; see AttackerBehaviorConfig) -----
+# When pressing is enabled and an opponent controls the ball, the attacker
+# contains the carrier from the goal side ("stands in front of him") instead of
+# diving at the ball. This shepherds the carrier and forces a turn — the core
+# of GegenPressing — while staying rule-safe:
+#   * standing goal-side at a fixed standoff means we never drive through the
+#     opponent (no pushing foul, §8.4.1);
+#   * capping the approach speed near the carrier keeps any contact well under
+#     the crashing threshold (§8.4.2).
+PRESS_ENABLED: bool = False
+PRESS_STANDOFF: float = 0.5            # m goal-side of the carrier to contain
+PRESS_CRASH_RADIUS: float = 0.55      # cap speed within this distance of carrier
+PRESS_APPROACH_SPEED: float = 0.9     # capped speed (m/s) inside the crash radius
+PRESS_POSSESSION_RADIUS: float = 0.5  # opponent "controls" the ball within this
 
 PENALTY_BOX_DEPTH: float = 1.0
 FIELD_HALF_X: float = 4.5
@@ -102,6 +123,8 @@ PASS_MARKED_DISTANCE_FRAC: float = 0.05
 PASS_PRESSURE_RADIUS_FRAC: float = 0.08
 PASS_LANE_CLEARANCE_FRAC: float = 0.02
 PASS_ORIENT_TOL: float = 0.2
+COUNTER_ATTACK: bool = False
+COUNTER_OUTLET_MARKED_FRAC: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -130,6 +153,21 @@ class AttackerBehaviorConfig:
     pass_pressure_radius_frac: float = PASS_PRESSURE_RADIUS_FRAC
     pass_lane_clearance_frac: float = PASS_LANE_CLEARANCE_FRAC
     pass_orient_tol: float = PASS_ORIENT_TOL
+    # GegenPressing containment dials (default OFF → behaviour unchanged).
+    press_enabled: bool = PRESS_ENABLED
+    press_standoff: float = PRESS_STANDOFF
+    press_crash_radius: float = PRESS_CRASH_RADIUS
+    press_approach_speed: float = PRESS_APPROACH_SPEED
+    press_possession_radius: float = PRESS_POSSESSION_RADIUS
+    # Counter-attack release (default OFF → behaviour unchanged). When on, an
+    # attacker holding the ball in OUR half looks first for the most direct
+    # forward pass to a teammate already in the opponent half, instead of
+    # carrying it up itself — get it forward fast, then keep possession there.
+    counter_attack: bool = COUNTER_ATTACK
+    # A teammate counts as a forward outlet only if its nearest opponent is at
+    # least this far (fraction of field scale) — avoids releasing into a marked
+    # man.
+    counter_outlet_marked_frac: float = COUNTER_OUTLET_MARKED_FRAC
     pass_openness_weight: float = 0.45
     pass_forward_score_weight: float = 0.25
     pass_distance_score_weight: float = 0.20
@@ -178,6 +216,11 @@ def load_attacker_behavior_config(
 
 
 def _coerce_config_value(value, default):
+    # bool is a subclass of int — check it first so a flag isn't coerced to 0/1.
+    if isinstance(default, bool):
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
     if isinstance(default, tuple):
         return tuple(int(item) for item in value)
     if isinstance(default, int):
@@ -325,17 +368,22 @@ class HasClearShot(py_trees.behaviour.Behaviour):
         if dist_to_goal > config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
 
-        angle_to_goal = math.atan2(
-            goal[1] - robot.position[1], goal[0] - robot.position[0]
+        # Aim at the most open part of the net (away from the keeper), not always
+        # the centre. ShootAtGoal kicks at this same point.
+        ball = snap.ball_position
+        target = _best_goal_target(snap, goal, config.shot_corridor_radius)
+        self._tree._shot_target = target
+
+        angle_to_target = math.atan2(
+            target[1] - robot.position[1], target[0] - robot.position[0]
         )
-        heading_err = (angle_to_goal - robot.orientation + math.pi) % (2 * math.pi) - math.pi
+        heading_err = (angle_to_target - robot.orientation + math.pi) % (2 * math.pi) - math.pi
         if abs(heading_err) > config.shot_heading_tol:
             return py_trees.common.Status.FAILURE
 
-        ball = snap.ball_position
         for opp in snap.enemy_robots:
             if (
-                _point_to_segment_dist(opp.position, ball, goal)
+                _point_to_segment_dist(opp.position, ball, target)
                 <= config.shot_corridor_radius
             ):
                 return py_trees.common.Status.FAILURE
@@ -686,6 +734,131 @@ class WaitNearGoal(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.SUCCESS
 
 
+class PressContainment(py_trees.behaviour.Behaviour):
+    """Contain the opponent ball carrier from the goal side (GegenPressing).
+
+    Active only when ``press_enabled`` is set (the node is not even added to the
+    tree otherwise). When an opponent controls the ball, the attacker moves to a
+    standoff point between the carrier and OUR goal — "stands in front of him" —
+    facing the ball, with the approach speed capped near the carrier so contact
+    stays rule-legal (no push, no crash). This forces the carrier to turn back
+    and is the trigger for our markers to deny his outlets.
+
+    SUCCESS → wrote a containment intent (we are pressing).
+    FAILURE → the ball is loose or ours → fall through to ChaseBall and go win it.
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("PressContainment")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+
+        config = self._tree.behavior_config
+        carrier = _opponent_controlling_ball(snap, config.press_possession_radius)
+        if carrier is None:
+            return py_trees.common.Status.FAILURE
+
+        # Containment point: goal-side of the carrier, toward our own goal.
+        own_goal = self._tree.own_goal_position
+        dx = own_goal[0] - carrier.position[0]
+        dy = own_goal[1] - carrier.position[1]
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            ux, uy = -self._tree.us_sign, 0.0
+        else:
+            ux, uy = dx / dist, dy / dist
+        target = (
+            carrier.position[0] + ux * config.press_standoff,
+            carrier.position[1] + uy * config.press_standoff,
+        )
+
+        # Face the ball so we can react to the next touch / pass.
+        angle_to_ball = math.atan2(
+            snap.ball_position[1] - robot.position[1],
+            snap.ball_position[0] - robot.position[0],
+        )
+        # Anti-crash / anti-push: cap speed once close to the carrier.
+        max_speed = None
+        if math.hypot(
+            robot.position[0] - carrier.position[0],
+            robot.position[1] - carrier.position[1],
+        ) <= config.press_crash_radius:
+            max_speed = config.press_approach_speed
+
+        bb.current_intent = IntentMove(
+            target_pos=target,
+            target_orientation=angle_to_ball,
+            max_speed=max_speed,
+        )
+        bb.intent_source = "PressContainment"
+        return py_trees.common.Status.SUCCESS
+
+
+class ShouldCounterRelease(py_trees.behaviour.Behaviour):
+    """Succeed when a counter-attack release should be attempted.
+
+    Gate for the counter-attack branch: only when ``counter_attack`` is enabled
+    AND the ball carrier is still in OUR half. Once we have advanced into the
+    opponent half we fall through to the normal possession actions (shoot / pass
+    / hold) so we KEEP possession there rather than forcing more releases.
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("ShouldCounterRelease")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        if not self._tree.behavior_config.counter_attack:
+            return py_trees.common.Status.FAILURE
+        snap = self._tree._snapshot
+        if snap is None:
+            return py_trees.common.Status.FAILURE
+        # Our half is the side opposite the attacking goal.
+        goal_x = self._tree.goal_position[0]
+        ball_in_our_half = snap.ball_position[0] * goal_x < 0.0
+        return (
+            py_trees.common.Status.SUCCESS
+            if ball_in_our_half
+            else py_trees.common.Status.FAILURE
+        )
+
+
+class FindForwardOutlet(py_trees.behaviour.Behaviour):
+    """Pick the most direct forward teammate in the opponent half to release to."""
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("FindForwardOutlet")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+
+        target_id, target_pos = _find_forward_outlet(
+            snap,
+            bb.robot_id,
+            self._tree.goal_position,
+            self._tree.behavior_config,
+        )
+        if target_id is None or target_pos is None:
+            return py_trees.common.Status.FAILURE
+
+        self._tree._pass_target_id = target_id
+        self._tree._pass_target_pos = target_pos
+        return py_trees.common.Status.SUCCESS
+
+
 class ShootAtGoal(py_trees.behaviour.Behaviour):
     """Write IntentKick toward goal."""
 
@@ -697,7 +870,8 @@ class ShootAtGoal(py_trees.behaviour.Behaviour):
         bb = self._tree._blackboard_ref[0]
         if bb is None:
             return py_trees.common.Status.FAILURE
-        bb.current_intent = IntentKick(target_pos=self._tree.goal_position)
+        # Kick at the open aim point HasClearShot selected (falls back to centre).
+        bb.current_intent = IntentKick(target_pos=self._tree._shot_target)
         bb.intent_source = "ShootAtGoal"
         return py_trees.common.Status.SUCCESS
 
@@ -740,8 +914,17 @@ class AttackerTree:
             (-GOAL_POSITION[0], GOAL_POSITION[1]) if us_positive
             else GOAL_POSITION
         )
+        # Our own goal is opposite the opponent goal; +1/-1 sign points from our
+        # goal toward the opponent goal (i.e. our attacking direction in x).
+        self.own_goal_position: tuple[float, float] = (
+            -self.goal_position[0], self.goal_position[1]
+        )
+        self.us_sign: float = -1.0 if us_positive else 1.0
         self._pass_target_id: int | None = None
         self._pass_target_pos: tuple[float, float] | None = None
+        # Aim point inside the goal mouth chosen by HasClearShot (avoids the
+        # keeper); ShootAtGoal kicks at it. Defaults to the goal centre.
+        self._shot_target: tuple[float, float] = self.goal_position
         self._tick_index: int = 0
         self._possession_ticks_by_robot: dict[int, int] = {}
         self._possession_last_tick_by_robot: dict[int, int] = {}
@@ -806,11 +989,26 @@ class AttackerTree:
             PassToOpenTeammate(self),
         ])
 
+        # Counter-attack release — fires only while counter_attack is enabled and
+        # the ball is still in our half. Reuses the dribble-to-face then pass
+        # nodes (they read _pass_target_*). Placed before the normal pass so a
+        # forward outlet is preferred over carrying the ball up ourselves.
+        counter_seq = py_trees.composites.Sequence(
+            name="CounterReleaseSequence", memory=False
+        )
+        counter_seq.add_children([
+            ShouldCounterRelease(self),
+            FindForwardOutlet(self),
+            DribbleTowardPassTarget(self),
+            PassToOpenTeammate(self),
+        ])
+
         possession_action = py_trees.composites.Selector(
             name="PossessionAction", memory=False
         )
         possession_action.add_children([
             shoot_seq,
+            counter_seq,
             pass_seq,
             HoldPossession(self),
         ])
@@ -826,10 +1024,14 @@ class AttackerTree:
         root = py_trees.composites.Selector(
             name="AttackingSelector", memory=False
         )
-        root.add_children([
-            possession_seq,
-            ChaseBall(self),
-        ])
+        children = [possession_seq]
+        # GegenPressing: when enabled, contain the carrier before falling back to
+        # chasing. Only inserted when press_enabled so the default topology — and
+        # the tests asserting it — stay exactly as before.
+        if self.behavior_config.press_enabled:
+            children.append(PressContainment(self))
+        children.append(ChaseBall(self))
+        root.add_children(children)
         return root
 
 
@@ -842,6 +1044,98 @@ def _find_robot(snap: Snapshot, robot_id: int):
         if r.robot_id == robot_id:
             return r
     return None
+
+
+def _best_goal_target(
+    snap: Snapshot,
+    goal: tuple[float, float],
+    corridor_radius: float,
+) -> tuple[float, float]:
+    """Pick the most open aim point inside the goal mouth (avoid the keeper).
+
+    Samples a handful of points across the mouth and scores each by how far the
+    nearest opponent sits from the ball→point line. Returns the point with the
+    most clearance, tie-broken toward the centre for a higher-percentage shot.
+    Falls back to the goal centre when there are no opponents.
+    """
+    if not snap.enemy_robots:
+        return goal
+
+    ball = snap.ball_position
+    offsets = (-1.0, -0.5, 0.0, 0.5, 1.0)
+    best_point = goal
+    best_score: tuple[float, float] | None = None
+    for frac in offsets:
+        point = (goal[0], goal[1] + frac * GOAL_MOUTH_HALF_WIDTH)
+        clearance = min(
+            _point_to_segment_dist(opp.position, ball, point)
+            for opp in snap.enemy_robots
+        )
+        # Maximise clearance; on ties prefer the more central point (-|frac|).
+        score = (clearance, -abs(frac))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_point = point
+    return best_point
+
+
+def _find_forward_outlet(
+    snap: Snapshot,
+    passer_id: int,
+    goal: tuple[float, float],
+    config: AttackerBehaviorConfig,
+) -> tuple[int | None, tuple[float, float] | None]:
+    """Pick the most direct forward teammate in the opponent half to release to.
+
+    "Most direct" = the open teammate that is furthest advanced toward the
+    opponent goal with a clear ball→teammate lane and no tight marker. Returns
+    (id, pos), or (None, None) when there is no clean forward outlet (the caller
+    then falls back to carrying / a normal pass).
+    """
+    passer = _find_robot(snap, passer_id)
+    if passer is None:
+        return None, None
+
+    goal_x = goal[0]
+    field_scale = _field_scale(snap, goal)
+    marked_distance = field_scale * config.counter_outlet_marked_frac
+    lane_clearance = field_scale * config.pass_lane_clearance_frac
+
+    best_id: int | None = None
+    best_pos: tuple[float, float] | None = None
+    best_progress = -math.inf
+
+    for teammate in snap.own_robots:
+        if teammate.robot_id in (GOALIE_ID, passer_id):
+            continue
+        # Must already be in the opponent half (same side as the attacking goal).
+        if teammate.position[0] * goal_x <= 0.0:
+            continue
+        # Reject tightly marked outlets.
+        if _nearest_opponent_distance(snap, teammate.position) < marked_distance:
+            continue
+        # Require a clear release lane.
+        obstacles = list(snap.enemy_robots)
+        obstacles.extend(
+            robot
+            for robot in snap.own_robots
+            if robot.robot_id not in (passer_id, teammate.robot_id)
+        )
+        if not line_of_sight_clear(
+            snap.ball_position,
+            teammate.position,
+            obstacles,
+            clearance=lane_clearance,
+        ):
+            continue
+        # Furthest forward (most advanced toward goal) wins — the most direct ball.
+        progress = teammate.position[0] * (1.0 if goal_x >= 0 else -1.0)
+        if progress > best_progress:
+            best_progress = progress
+            best_id = teammate.robot_id
+            best_pos = teammate.position
+
+    return best_id, best_pos
 
 
 def _find_best_pass_target(
@@ -948,6 +1242,43 @@ def _goal_lane_blocked(
         _point_to_segment_dist(opp.position, snap.ball_position, goal) <= clearance
         for opp in snap.enemy_robots
     )
+
+
+def _opponent_controlling_ball(snap: Snapshot, possession_radius: float):
+    """Return the opponent that controls the ball, or None.
+
+    An opponent controls the ball when it is the nearest robot to the ball
+    (closer than any of our robots) and within ``possession_radius``. A loose
+    ball, or a ball our team is closest to, returns None so the caller chases.
+    """
+    if not snap.enemy_robots:
+        return None
+    nearest_opp = min(
+        snap.enemy_robots,
+        key=lambda r: math.hypot(
+            r.position[0] - snap.ball_position[0],
+            r.position[1] - snap.ball_position[1],
+        ),
+    )
+    opp_dist = math.hypot(
+        nearest_opp.position[0] - snap.ball_position[0],
+        nearest_opp.position[1] - snap.ball_position[1],
+    )
+    if opp_dist > possession_radius:
+        return None
+    own_dist = min(
+        (
+            math.hypot(
+                r.position[0] - snap.ball_position[0],
+                r.position[1] - snap.ball_position[1],
+            )
+            for r in snap.own_robots
+        ),
+        default=math.inf,
+    )
+    if opp_dist > own_dist:
+        return None
+    return nearest_opp
 
 
 def _nearest_opponent_distance(

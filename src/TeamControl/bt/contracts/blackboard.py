@@ -19,6 +19,12 @@ class RoleType(str, Enum):
     DEFENDER = "DEFENDER"
     SUPPORTER = "SUPPORTER"
     GOALIE = "GOALIE"
+    # Man-marking role used by the GegenPressing strategy: shadow a specific
+    # opponent goal-side (one-on-one), dropping into zone cover when that
+    # opponent leaves the danger area. The opponent it shadows is decided
+    # team-level by the Coordinator and handed to the tree via
+    # ``RobotBlackboard.mark_target_id``.
+    MARKER = "MARKER"
 
 
 @dataclasses.dataclass
@@ -50,3 +56,8 @@ class RobotBlackboard:
     # this tick. Used for debug logging — lets traces show which branch of
     # the tree fired without parsing the intent payload.
     intent_source: str | None = dataclasses.field(default=None)
+    # For a MARKER robot: the id of the opponent it has been assigned to shadow
+    # this tick, or ``None`` when it has no man (drop into zone cover). Written
+    # by the Coordinator's marker-assignment pass before the marker tree ticks;
+    # ignored by every other role.
+    mark_target_id: int | None = dataclasses.field(default=None)

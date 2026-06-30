@@ -29,9 +29,12 @@ class TestRoleType:
     def test_goalie_value(self):
         assert RoleType.GOALIE.value == "GOALIE"
 
+    def test_marker_value(self):
+        assert RoleType.MARKER.value == "MARKER"
+
     def test_all_members_present(self):
         names = {m.name for m in RoleType}
-        assert names == {"ATTACKER", "DEFENDER", "SUPPORTER", "GOALIE"}
+        assert names == {"ATTACKER", "DEFENDER", "SUPPORTER", "GOALIE", "MARKER"}
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +127,12 @@ class TestNoWorldStateFields:
             "current_intent",
             "last_intent",
             "intent_source",
+            "mark_target_id",
         }
+
+    def test_mark_target_id_defaults_to_none(self):
+        bb = RobotBlackboard(robot_id=2, current_role=RoleType.MARKER)
+        assert bb.mark_target_id is None
 
 
 # ---------------------------------------------------------------------------

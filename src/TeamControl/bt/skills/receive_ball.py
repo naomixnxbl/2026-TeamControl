@@ -9,6 +9,7 @@ positioning the robot before this skill is invoked.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from TeamControl.bt.contracts.motion_target import MotionTarget
@@ -47,8 +48,18 @@ def receive_ball(
         ValueError: If *robot_id* is not present in *snapshot*.
     """
     robot = _get_robot(snapshot, robot_id)
+    # Face the ball so the dribbler/kicker plate meets it head-on. Falling back
+    # to the current orientation only when the ball is exactly on the robot
+    # (degenerate atan2) avoids a spurious snap to heading 0.0.
+    bx, by = snapshot.ball_position
+    dx, dy = bx - robot.position[0], by - robot.position[1]
+    orientation = (
+        math.atan2(dy, dx)
+        if math.hypot(dx, dy) > 1e-9
+        else float(robot.orientation)
+    )
     return MotionTarget(
         target_velocity=(0.0, 0.0),
-        target_orientation=float(robot.orientation),
+        target_orientation=float(orientation),
         arrival_mode="precision",
     )
