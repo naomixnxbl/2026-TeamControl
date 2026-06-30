@@ -181,6 +181,11 @@ role_swap:
     # Higher = defenders react more strongly to opponent possession.
     opponent_has_ball: 0.04
 
+    # Default: 0.0 (off). Bonus for being the single deepest field player (the
+    # "last man" closest to our own goal). Raise it to anchor one robot as a
+    # dedicated sweeper that resists being pulled up the pitch.
+    last_man: 0.0
+
   supporter:
     # Rewards being spaced away from teammates.
     # Higher = supporters spread out more instead of clustering.
@@ -210,11 +215,35 @@ role_swap:
     # Higher = supporters become more attacking during our possession.
     own_has_ball: 0.02
 
+    # Default: 0.0 (off). Rewards lateral separation from the ball, normalized
+    # against teammates (the most offset robot scores highest). Raise it to
+    # stretch the play wide and pull supporters off the ball line.
+    width: 0.0
+
+  approach:
+    # Sub-weights for the attacker.approach_quality feature (how "natural" a
+    # robot's approach to the ball is). These blend three 0..1 sub-scores and
+    # default to the original hard-coded mix, so leaving them unchanged keeps
+    # behaviour identical.
+    # Rewards being behind the ball relative to the target goal (can push it
+    # forward rather than back). Default: 0.5.
+    behind_ball: 0.5
+    # Rewards already facing the ball (less turning needed). Default: 0.3.
+    facing: 0.3
+    # Rewards being physically close to the ball. Default: 0.2.
+    distance: 0.2
+
 behavior_tree:
   attacker:
     # Default: 0.11. Centre-to-centre distance for claiming ball possession.
     # Higher = easier to claim possession; lower = stricter dribbler contact.
     possession_dist: 0.11
+
+    # Default: 0.11 (== possession_dist). Once the ball is controlled it may
+    # drift out to this distance before possession is dropped (hysteresis).
+    # Keep equal to possession_dist for the original behaviour; set it slightly
+    # higher (e.g. 0.16) to stop the possession flag flickering tick-to-tick.
+    possession_release_dist: 0.11
 
     # Default: 0.3 radians. Ball must be this close to the robot's front
     # heading before possession is accepted.
@@ -285,6 +314,12 @@ behavior_tree:
     # Default: 0.25. Distance-score falloff window as a fraction of field scale.
     pass_distance_window_frac: 0.25
 
+    # Default: 0.0. Minimum pass-target score required to release a pass. The
+    # best teammate is still chosen by score; this only rejects a pass when even
+    # the best option is weak (the attacker then holds/dribbles instead). 0.0
+    # accepts any valid target. Try ~0.3 to suppress hopeful, low-quality passes.
+    pass_min_score: 0.0
+
   supporter:
     # Default: 0.11. Centre-to-centre distance for claiming ball possession.
     possession_dist: 0.11
@@ -339,6 +374,17 @@ behavior_tree:
     # giving up and returning to normal supporter behavior.
     pass_signal_timeout_ticks: 100
 
+    # Default: 0.0 metres. When repositioning, reject candidate cells closer
+    # than this to the ball so supporters don't crowd the ball carrier.
+    # 0.0 disables the check (all cells considered). Try ~1.0 to keep spacing.
+    reposition_min_ball_distance: 0.0
+
+    # Default: 0.0. Bias repositioning toward the opponent goal. Adds
+    # reposition_goal_weight * (max_field_dist - dist_to_goal) to each cell's
+    # openness score. 0.0 keeps pure openness with a goal-distance tie-break.
+    # Small values (~0.05) nudge supporters to take more advanced positions.
+    reposition_goal_weight: 0.0
+
   defender:
     positioning:
       # Primary defender shot-block point on the line from our goal to the
@@ -374,3 +420,182 @@ behavior_tree:
       # Maximum distance a defender target can be nudged for teammate spacing.
       # Default: 0.45.
       teammate_max_nudge: 0.45
+
+      # Default: 0.6 metres. Distance to the ball within which the defender
+      # stops positioning and clears the ball. Higher = challenges/clears from
+      # further out (more aggressive); lower = only clears when the ball is
+      # almost on top of it.
+      challenge_distance: 0.6
+
+      # Default: 0.2 metres. Margin kept from the field edges when clamping a
+      # defender's target position.
+      field_margin: 0.2
+
+      # Default: 0.0 metres. How far past the halfway line a defender may push
+      # when a lane it is blocking extends into the attacking half. 0.0 keeps
+      # defenders strictly in their own half (original behaviour); raise it for
+      # a higher defensive line that steps over midfield to intercept.
+      allow_cross_midfield_m: 0.0
+
+# ===========================================================================
+# strategy: high-level, CONTEXT-AWARE team posture.
+#
+# This section sits ABOVE the role_swap weights and behavior_tree thresholds
+# above. Instead of hand-tuning dozens of low-level numbers, you move a few
+# intuitive dials (aggression, formation shape, shooting eagerness, etc.).
+#
+# Two parts:
+#   • base posture  — the dials directly under `strategy:` (role_bias,
+#     formation, stability, attacking, defending). Applied at all times while
+#     the layer is enabled.
+#   • rules         — context-triggered ADJUSTMENTS to that base. Each rule
+#     fires only when the live game situation matches its `when:` block, and
+#     layers its `apply:` dials on top of the base. This is the part static
+#     weights can't do: press higher when the ball is in the attacking third,
+#     sit back to protect a lead, throw numbers forward when chasing a game.
+#
+# Every tick the coordinator reads the game context (ball zone, possession,
+# scoreline), composes base + matching rules, and rewrites the low-level
+# configs for THAT tick. Scales from multiple firing rules multiply together;
+# count offsets add. The transform always starts from the loaded base values,
+# so nothing compounds over time.
+#
+# ───────────────────────────────────────────────────────────────────────────
+# IMPORTANT — DEFAULT IS "NO CHANGE":
+#   `enabled: false` makes this whole section a no-op. The team behaves
+#   EXACTLY as it did before this section existed. Even after you flip
+#   `enabled: true`, nothing changes until you move a dial off its neutral
+#   value (scales = 1.0, offsets = 0) OR add a rule. So you opt in twice:
+#   enable the layer, then change something.
+# ───────────────────────────────────────────────────────────────────────────
+#
+# How to read the dials:
+#   *_scale  values multiply an existing quantity. 1.0 = unchanged,
+#            >1.0 = more of it, <1.0 = less of it.
+#   extra_*  values are added to a role count. 0 = unchanged.
+#
+# NOTE: role_bias, formation and stability only have an effect while dynamic
+# role assignment is on (heuristic_role_swap: true in sim_6v6.yaml). The
+# attacking and defending dials affect the role trees directly and work in
+# both static and dynamic role modes.
+# ===========================================================================
+strategy:
+  # Master switch for the entire strategy layer. Leave false for default play.
+  enabled: false
+
+  role_bias:
+    # Multiplies each role's overall suitability score during dynamic role
+    # assignment. Raising one role's scale relative to the others pulls more
+    # robots into that role.
+    #   attacker_weight_scale > 1  → team commits more robots to attacking
+    #   defender_weight_scale > 1  → team keeps more robots back defending
+    #   supporter_weight_scale > 1 → team favours spread-out support shape
+    attacker_weight_scale: 1.0
+    defender_weight_scale: 1.0
+    supporter_weight_scale: 1.0
+
+    # Extra multiplier on the ball-pursuit terms of BOTH attacker and defender
+    # scores (closeness-to-ball, pressing an opponent with the ball, chasing
+    # loose balls). >1 = hunt the ball harder; <1 = sit off and contain.
+    press_scale: 1.0
+
+  formation:
+    # Added to the role_swap.role_targets counts. Use these to change the
+    # team shape without editing role_swap above.
+    #   extra_attackers: 1  → e.g. 1 → 2 ball-chasers (more direct attack)
+    #   extra_defenders: 1  → raises BOTH min and max defenders (sit deeper)
+    #   extra_supporters: 1 → keeps one more robot in a support role
+    extra_attackers: 0
+    extra_defenders: 0
+    extra_supporters: 0
+
+  stability:
+    # Scales every role-swap hysteresis term at once (current/cooldown biases,
+    # minimum swap interval, defender hold/stay/release biases).
+    #   > 1 → robots commit to a role longer (calmer, less reactive)
+    #   < 1 → roles change faster (more reactive, but can flicker)
+    role_stickiness_scale: 1.0
+
+  attacking:
+    # Multiplies the max goal distance from which a clear shot is allowed
+    # (attacker AND supporter). >1 = take longer shots; <1 = carry/pass closer.
+    shoot_distance_scale: 1.0
+
+    # Multiplies the attacker's allowed heading error before shooting.
+    # >1 = shoot with looser aim (more shots, lower accuracy);
+    # <1 = wait for a cleaner line.
+    shot_alignment_tolerance_scale: 1.0
+
+    # Multiplies how long continuous possession must be held before shooting.
+    # <1 = shoot sooner after gaining control; >1 = settle on the ball longer.
+    settle_time_scale: 1.0
+
+    # Multiplies the "receiver is marked / lane is blocked" pass thresholds
+    # (attacker pass gating + supporter marked threshold).
+    # >1 = more cautious passing (needs more space / clearer lanes);
+    # <1 = riskier passes into tighter windows.
+    pass_caution_scale: 1.0
+
+  defending:
+    # Multiplies how far up the goal→ball line the defender parks.
+    # >1 = higher, more proactive defensive line (steps toward the ball);
+    # <1 = deeper line that parks closer to our own goal.
+    # (Result is clamped so a defender never overruns the ball holder.)
+    line_height_scale: 1.0
+
+  # ── Context rules — the dynamic part ──────────────────────────────────────
+  # Each rule layers its `apply:` dials on top of the base posture above WHEN
+  # its `when:` conditions all match the live game context. Leave the list
+  # empty (`rules: []`) for a purely static base posture.
+  #
+  # Available `when:` conditions (omit any you don't care about):
+  #   ball_zone:            defensive | middle | attacking   (our attack frame)
+  #   possession:           own | opponent | loose
+  #   scoreline:            leading | level | trailing
+  #   ball_in_our_half:     true | false
+  #   goal_margin_at_least: <int>   (abs score difference ≥ N; pair with
+  #                                  scoreline to make it directional)
+  #
+  # `apply:` accepts the SAME dial blocks as the base posture (role_bias,
+  # formation, stability, attacking, defending). Unlisted dials stay neutral.
+  #
+  # Example (commented out — these only run once you uncomment AND set
+  # enabled: true). Copy the shape you want into the live `rules:` list below.
+  #
+  #   rules:
+  #     # Hunt the ball and push the line up when we have it in their third.
+  #     - name: high_press_in_attacking_third
+  #       when:
+  #         ball_zone: attacking
+  #       apply:
+  #         role_bias: {press_scale: 1.4}
+  #         defending: {line_height_scale: 1.3}
+  #
+  #     # Protect a lead: extra defender, stickier roles, safer passes.
+  #     - name: protect_the_lead
+  #       when:
+  #         scoreline: leading
+  #         goal_margin_at_least: 1
+  #       apply:
+  #         formation: {extra_defenders: 1}
+  #         role_bias: {defender_weight_scale: 1.3}
+  #         stability: {role_stickiness_scale: 1.5}
+  #         attacking: {pass_caution_scale: 1.3}
+  #
+  #     # Chase the game when behind: extra attacker, longer shots, riskier passes.
+  #     - name: chase_when_behind
+  #       when:
+  #         scoreline: trailing
+  #       apply:
+  #         formation: {extra_attackers: 1}
+  #         attacking: {shoot_distance_scale: 1.3, pass_caution_scale: 0.7}
+  #
+  #     # Drop deeper and contain when the opponent has it in our half.
+  #     - name: contain_in_our_half
+  #       when:
+  #         ball_in_our_half: true
+  #         possession: opponent
+  #       apply:
+  #         formation: {extra_defenders: 1}
+  #         defending: {line_height_scale: 0.8}
+  rules: []

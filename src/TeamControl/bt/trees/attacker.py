@@ -111,6 +111,11 @@ class AttackerBehaviorConfig:
     ball_in_range_threshold: float = BALL_IN_RANGE_THRESHOLD
     supporter_role_ids: tuple[int, ...] = SUPPORTER_ROLE_IDS
     possession_dist: float = POSSESSION_DIST
+    # Hysteresis: once the ball is controlled it may drift out to this distance
+    # before possession is dropped. Defaults to possession_dist (release ==
+    # acquire) so there is no hysteresis and behaviour is unchanged; raise it
+    # above possession_dist to stop the possession flag from flickering.
+    possession_release_dist: float = POSSESSION_DIST
     possession_heading_tol: float = POSSESSION_HEADING_TOL
     shot_corridor_radius: float = SHOT_CORRIDOR_RADIUS
     shot_heading_tol: float = SHOT_HEADING_TOL
@@ -132,6 +137,12 @@ class AttackerBehaviorConfig:
     pass_forward_scale_frac: float = 0.35
     pass_ideal_distance_frac: float = 0.22
     pass_distance_window_frac: float = 0.25
+    # Minimum pass-target score required to release a pass. The best teammate is
+    # still chosen by score; this just rejects passes when even the best option
+    # is weak. Default 0.0 accepts any valid target (scores are >= 0), so
+    # behaviour is unchanged; raise it to make the attacker hold/dribble instead
+    # of forcing a low-quality pass.
+    pass_min_score: float = 0.0
 
 
 def load_attacker_behavior_config(
@@ -230,7 +241,20 @@ class HasBallControl(py_trees.behaviour.Behaviour):
         dy = snap.ball_position[1] - robot.position[1]
         dist = math.hypot(dx, dy)
         config = self._tree.behavior_config
-        if dist > config.possession_dist:
+        # Possession-distance hysteresis. If we already held the ball on the
+        # previous tick, tolerate it drifting out to `possession_release_dist`
+        # before dropping possession; otherwise require the tighter
+        # `possession_dist` to first claim it. With release == acquire (the
+        # default) both thresholds are identical, so behaviour is unchanged.
+        prev_ticks = self._tree._possession_ticks_by_robot.get(bb.robot_id, 0)
+        prev_last_tick = self._tree._possession_last_tick_by_robot.get(bb.robot_id)
+        had_possession = (
+            prev_ticks > 0 and prev_last_tick == self._tree._tick_index - 1
+        )
+        acquire_dist = config.possession_dist
+        release_dist = max(config.possession_release_dist, acquire_dist)
+        max_dist = release_dist if had_possession else acquire_dist
+        if dist > max_dist:
             self._tree._possession_ticks_by_robot[bb.robot_id] = 0
             self._tree._possession_last_tick_by_robot[bb.robot_id] = self._tree._tick_index
             return py_trees.common.Status.FAILURE
@@ -905,6 +929,8 @@ def _find_best_pass_target(
             best_id = teammate.robot_id
             best_pos = teammate.position
 
+    if best_id is None or best_score < config.pass_min_score:
+        return None, None
     return best_id, best_pos
 
 

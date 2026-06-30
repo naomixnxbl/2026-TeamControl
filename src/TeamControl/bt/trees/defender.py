@@ -78,6 +78,16 @@ class DefenderPositioningConfig:
     opponent_possession_margin_ratio: float = OPPONENT_POSSESSION_MARGIN_RATIO
     teammate_min_gap: float = DEFENDER_TEAMMATE_MIN_GAP
     teammate_max_nudge: float = DEFENDER_TEAMMATE_MAX_NUDGE
+    # Distance to the ball within which the defender stops positioning and
+    # clears the ball (ChallengeSequence). Higher = challenges from further
+    # out; lower = only clears when the ball is right on top of it.
+    challenge_distance: float = CLOSE_ENOUGH_THRESHOLD
+    # Margin kept from the field edges when clamping defender targets.
+    field_margin: float = FIELD_MARGIN
+    # How far past the halfway line a defender may push when blocking a lane
+    # that extends into the attacking half. Default 0.0 keeps defenders strictly
+    # in their own half exactly as before; raise it for a higher line.
+    allow_cross_midfield_m: float = 0.0
 
 
 def load_defender_positioning_config(
@@ -251,7 +261,7 @@ class IsCloseEnough(py_trees.behaviour.Behaviour):
             snap.ball_position[0] - robot.position[0],
             snap.ball_position[1] - robot.position[1],
         )
-        if dist <= CLOSE_ENOUGH_THRESHOLD:
+        if dist <= self._tree.positioning_config.challenge_distance:
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -445,7 +455,7 @@ def _write_defensive_position_intent(
             )
             source = "BlockPassLane"
 
-    target = _clamp_defensive_target(target, tree.us_positive)
+    target = _clamp_defensive_target(target, tree.us_positive, tree.positioning_config)
     target = _space_from_teammates(
         target,
         snap,
@@ -595,6 +605,7 @@ def _space_from_teammates(
     return _clamp_defensive_target(
         (target[0] + push_x, target[1] + push_y),
         us_positive,
+        config,
     )
 
 
@@ -605,16 +616,24 @@ def _interpolate(start: Point, end: Point, fraction: float) -> Point:
     )
 
 
-def _clamp_defensive_target(target: Point, us_positive: bool) -> Point:
-    x = max(-FIELD_HALF_X + FIELD_MARGIN, min(FIELD_HALF_X - FIELD_MARGIN, target[0]))
-    y = max(-FIELD_HALF_Y + FIELD_MARGIN, min(FIELD_HALF_Y - FIELD_MARGIN, target[1]))
+def _clamp_defensive_target(
+    target: Point,
+    us_positive: bool,
+    config: DefenderPositioningConfig | None = None,
+) -> Point:
+    margin = FIELD_MARGIN if config is None else config.field_margin
+    cross = 0.0 if config is None else max(0.0, config.allow_cross_midfield_m)
+    x = max(-FIELD_HALF_X + margin, min(FIELD_HALF_X - margin, target[0]))
+    y = max(-FIELD_HALF_Y + margin, min(FIELD_HALF_Y - margin, target[1]))
 
     # Defenders hold the defensive half. If a pass lane extends into the
     # attacking half, meet it near midfield instead of abandoning shape.
+    # ``allow_cross_midfield_m`` lets the line push up to that many metres past
+    # the halfway line; default 0.0 keeps the strict own-half clamp.
     if us_positive:
-        x = max(0.0, x)
+        x = max(-cross, x)
     else:
-        x = min(0.0, x)
+        x = min(cross, x)
     return (x, y)
 
 

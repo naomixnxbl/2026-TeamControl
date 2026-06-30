@@ -71,6 +71,9 @@ class DefenderScoreWeights:
     ball_danger: float = 0.16
     pressure_escape: float = 0.06
     opponent_has_ball: float = 0.04
+    # Bonus for being the deepest field player (the "last man" closest to our
+    # own goal). Default 0.0 = off; raise it to keep a dedicated sweeper home.
+    last_man: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,24 @@ class SupporterScoreWeights:
     not_crowding_ball: float = 0.10
     forward_lane: float = 0.08
     own_has_ball: float = 0.02
+    # Bonus for lateral separation from the ball (stretching the play wide,
+    # relative to teammates). Default 0.0 = off; raise it for wider support.
+    width: float = 0.0
+
+
+@dataclass(frozen=True)
+class ApproachQualityWeights:
+    """Sub-weights for the attacker ``approach_quality`` feature.
+
+    These control how the 0..1 approach-quality score blends being behind the
+    ball (relative to the target goal), already facing the ball, and being
+    close to it. Defaults match the original hard-coded 0.5 / 0.3 / 0.2 mix, so
+    behaviour is unchanged until they are edited.
+    """
+
+    behind_ball: float = 0.5
+    facing: float = 0.3
+    distance: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -137,6 +158,7 @@ class RoleHeuristicWeights:
     context: ContextScaleWeights = field(default_factory=ContextScaleWeights)
     defender_count: DefenderCountWeights = field(default_factory=DefenderCountWeights)
     role_targets: RoleTargetCounts = field(default_factory=RoleTargetCounts)
+    approach: ApproachQualityWeights = field(default_factory=ApproachQualityWeights)
 
 
 @dataclass(frozen=True)
@@ -159,6 +181,7 @@ class RoleSwapContext:
     robot_between_ball_and_opponent_goal: bool = False
     angle_to_ball: float = 0.0
     approach_quality: float = 0.0
+    lateral_offset_from_ball: float = 0.0
     teammate_spacing: float = math.inf
     opponent_pressure: float = 0.0
     attacker_count: int = 0
@@ -263,6 +286,10 @@ def load_role_heuristic_weights(
             RoleTargetCounts,
             role_swap.get("role_targets"),
         ),
+        approach=_dataclass_from_section(
+            ApproachQualityWeights,
+            role_swap.get("approach"),
+        ),
     )
 
 
@@ -342,6 +369,7 @@ def assign_roles_heuristically(
             lane_width=field_scale * weights.context.lane_width_field_scale,
             pressure_radius=field_scale * weights.context.pressure_radius_field_scale,
             minimum_swap_interval=weights.stability.minimum_swap_interval,
+            approach_weights=weights.approach,
         )
         for rid in candidates
     }
@@ -419,6 +447,7 @@ def build_role_swap_context(
     lane_width: float = 0.35,
     pressure_radius: float = 1.0,
     minimum_swap_interval: float = 1.0,
+    approach_weights: ApproachQualityWeights | None = None,
 ) -> RoleSwapContext:
     """Build reusable heuristic inputs for one robot.
 
@@ -477,7 +506,13 @@ def build_role_swap_context(
                 robot.orientation,
             )
         ),
-        approach_quality=_approach_quality(robot, snapshot.ball_position, attack_goal),
+        approach_quality=_approach_quality(
+            robot,
+            snapshot.ball_position,
+            attack_goal,
+            approach_weights if approach_weights is not None else ApproachQualityWeights(),
+        ),
+        lateral_offset_from_ball=abs(robot.position[1] - snapshot.ball_position[1]),
         teammate_spacing=_nearest_distance(robot.position, teammates),
         opponent_pressure=_opponent_pressure(
             robot.position,
@@ -544,6 +579,15 @@ def _score_contexts(
         own_goal,
         attack_goal,
     )
+    width = _normalise_high_better(
+        {rid: ctx.lateral_offset_from_ball for rid, ctx in contexts.items()}
+    )
+    # The single deepest field player (closest to our own goal) is the "last
+    # man"; used by the optional defender.last_man weight.
+    deepest_rid = min(
+        contexts,
+        key=lambda rid: contexts[rid].distance_to_own_goal,
+    )
 
     scores: dict[int, RoleScores] = {}
     for rid, ctx in contexts.items():
@@ -571,6 +615,7 @@ def _score_contexts(
             + attacker_weights.opponent_has_ball_pressure * ball_close[rid] * opponent_has_ball
             + attacker_weights.loose_ball_pressure * ball_close[rid] * loose_ball
         )
+        last_man = 1.0 if rid == deepest_rid else 0.0
         defender = (
             defender_weights.own_goal_close * own_goal_close[rid]
             + defender_weights.ball_close * ball_close[rid]
@@ -578,6 +623,7 @@ def _score_contexts(
             + defender_weights.ball_danger * ball_danger
             + defender_weights.pressure_escape * pressure_escape
             + defender_weights.opponent_has_ball * opponent_has_ball
+            + defender_weights.last_man * last_man
         )
         supporter = (
             supporter_weights.spacing * spacing[rid]
@@ -587,6 +633,7 @@ def _score_contexts(
             + supporter_weights.not_crowding_ball * not_crowding_ball
             + supporter_weights.forward_lane * forward_lane
             + supporter_weights.own_has_ball * own_has_ball
+            + supporter_weights.width * width[rid]
         )
         scores[rid] = _apply_role_stability(
             RoleScores(
@@ -910,8 +957,16 @@ def _point_between(point: Point, seg_a: Point, seg_b: Point, corridor: float) ->
     )
 
 
-def _approach_quality(robot: RobotState, ball_position: Point, attack_goal: Point) -> float:
+def _approach_quality(
+    robot: RobotState,
+    ball_position: Point,
+    attack_goal: Point,
+    weights: ApproachQualityWeights | None = None,
+) -> float:
     """Score how naturally this robot can approach the ball to attack."""
+
+    if weights is None:
+        weights = ApproachQualityWeights()
 
     ball_to_goal = _sub(attack_goal, ball_position)
     ball_to_robot = _sub(robot.position, ball_position)
@@ -928,9 +983,9 @@ def _approach_quality(robot: RobotState, ball_position: Point, attack_goal: Poin
     facing_score = _clamp(1.0 - (turn_error / math.pi))
     distance_score = 1.0 / (1.0 + distance(robot.position, ball_position))
     return _clamp(
-        (0.5 * behind_ball_score)
-        + (0.3 * facing_score)
-        + (0.2 * distance_score)
+        (weights.behind_ball * behind_ball_score)
+        + (weights.facing * facing_score)
+        + (weights.distance * distance_score)
     )
 
 

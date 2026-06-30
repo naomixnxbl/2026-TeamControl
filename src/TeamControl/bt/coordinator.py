@@ -42,6 +42,17 @@ from TeamControl.bt.tactics.rule_following import (
     apply_rule_following,
     has_rule_following_enabled,
 )
+from TeamControl.bt.tactics.strategy import (
+    StrategyConfig,
+    apply_strategy_to_attacker_config,
+    apply_strategy_to_defender_positioning,
+    apply_strategy_to_role_weights,
+    apply_strategy_to_supporter_config,
+    evaluate_game_context,
+    is_strategy_active,
+    load_strategy_config,
+    resolve_effective_strategy,
+)
 
 # ---------------------------------------------------------------------------
 # Role assignment, fixed by robot ID unless heuristic role swapping is enabled.
@@ -305,6 +316,8 @@ class Coordinator:
         heuristic_weights: RoleHeuristicWeights | None = None,
         heuristic_weights_file: str = "bt_tuning.yaml",
         movement_safety: MovementSafetyConfig | dict[str, bool | float] | None = None,
+        strategy: StrategyConfig | dict[str, Any] | None = None,
+        strategy_file: str = "bt_tuning.yaml",
     ) -> None:
         self.trees = trees
         self.role_assignment = dict(role_assignment or ROLE_ASSIGNMENT)
@@ -319,6 +332,28 @@ class Coordinator:
             if isinstance(movement_safety, MovementSafetyConfig)
             else MovementSafetyConfig.from_mapping(movement_safety)
         )
+        # Team-strategy layer (context-aware). Disabled, neutral and rule-free
+        # by default, so this is a no-op until `strategy.enabled: true` (plus a
+        # dial change or a rule) in yaml. When active it is re-resolved every
+        # tick against the live game context (see _refresh_dynamic_strategy).
+        if isinstance(strategy, StrategyConfig):
+            self.strategy = strategy
+        elif isinstance(strategy, dict):
+            self.strategy = StrategyConfig.from_mapping(strategy)
+        else:
+            self.strategy = load_strategy_config(strategy_file)
+        # Pristine base copies — per-tick strategy always transforms from these
+        # so scales never compound across ticks.
+        self._base_heuristic_weights = self.heuristic_weights
+        self._strategy_targets = self._collect_strategy_targets()
+        if is_strategy_active(self.strategy):
+            # Apply the base posture immediately; rules layer on each tick.
+            self._apply_effective_strategy(self.strategy)
+            print(
+                f"[BT] team strategy active: {len(self.strategy.rules)} "
+                f"context rule(s)",
+                flush=True,
+            )
         self.blackboards: dict[int, RobotBlackboard] = {}
         self._role_swap_last_changed_at: dict[int, float] = {}
         self._free_kick_kicker_id: int | None = None
@@ -441,6 +476,10 @@ class Coordinator:
             # Robots must not move — produce no intents so the dispatcher
             # lets existing commands time out and robots coast to zero.
             return []
+
+        # Re-resolve the context-aware team strategy before any handler or role
+        # tree runs this tick. No-op unless the strategy layer is active.
+        self._refresh_dynamic_strategy(snapshot)
 
         if phase == GamePhase.STOPPED:
             self._handle_stopped(snapshot, robot_ids)
@@ -1600,6 +1639,59 @@ class Coordinator:
             bb.current_role = new_role
             if old_role != new_role:
                 self._role_swap_last_changed_at[robot_id] = now
+
+    def _collect_strategy_targets(self) -> list[tuple[Any, str, Any, Any]]:
+        """Snapshot each role tree's base config so per-tick strategy can be
+        re-derived from the pristine originals.
+
+        Returns ``(tree, attribute_name, base_config, apply_fn)`` tuples for the
+        attacker/supporter ``behavior_config`` and the defender
+        ``positioning_config``. Trees without a config (e.g. the goalie) are
+        skipped, so they are never touched.
+        """
+        targets: list[tuple[Any, str, Any, Any]] = []
+        for role, tree in self.trees.items():
+            if role == RoleType.ATTACKER and hasattr(tree, "behavior_config"):
+                targets.append(
+                    (tree, "behavior_config", tree.behavior_config,
+                     apply_strategy_to_attacker_config)
+                )
+            elif role == RoleType.SUPPORTER and hasattr(tree, "behavior_config"):
+                targets.append(
+                    (tree, "behavior_config", tree.behavior_config,
+                     apply_strategy_to_supporter_config)
+                )
+            elif role == RoleType.DEFENDER and hasattr(tree, "positioning_config"):
+                targets.append(
+                    (tree, "positioning_config", tree.positioning_config,
+                     apply_strategy_to_defender_positioning)
+                )
+        return targets
+
+    def _apply_effective_strategy(self, effective: StrategyConfig) -> None:
+        """Rewrite the role weights and each tree's config from *effective*.
+
+        Always transforms from the pristine base copies, so repeated calls are
+        idempotent and scales never compound. The replaced tree configs are
+        read live by the tree nodes, so reassignment takes effect immediately.
+        """
+        self.heuristic_weights = apply_strategy_to_role_weights(
+            self._base_heuristic_weights, effective
+        )
+        for tree, attr, base_config, apply_fn in self._strategy_targets:
+            setattr(tree, attr, apply_fn(base_config, effective))
+
+    def _refresh_dynamic_strategy(self, snapshot: Snapshot) -> None:
+        """Re-resolve the team strategy against the live game context.
+
+        No-op while the strategy layer is inactive — in that case the role
+        weights and tree configs are left exactly as loaded.
+        """
+        if not is_strategy_active(self.strategy):
+            return
+        context = evaluate_game_context(snapshot, self._attack_sign)
+        effective = resolve_effective_strategy(self.strategy, context)
+        self._apply_effective_strategy(effective)
 
     def _role_of(self, robot_id: int) -> RoleType:
         return self.role_assignment.get(robot_id, RoleType.SUPPORTER)
