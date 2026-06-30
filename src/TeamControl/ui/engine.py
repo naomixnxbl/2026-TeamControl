@@ -40,6 +40,8 @@ from TeamControl.utils.sim_config import (
     Btv2Config,
     Sim3v3Config,
     Sim6v6Config,
+    SimBlueBasicConfig,
+    SimBlueCompetitionConfig,
     SimBlueDivBConfig,
     SimGegenpressConfig,
 )
@@ -560,19 +562,22 @@ class SimEngine(QObject):
 
         if mode == "gegenpress":
             # Our side (yellow) runs the GegenPressing strategy; the opponent
-            # (blue) plays a representative Division B opponent (defensively
-            # solid + direct counter) built natively from our trees + the
-            # strategy layer — a real foil rather than a mirror of our press.
+            # (blue) is a COMPETITION-realistic team — dynamic roles + direct
+            # play + an adaptive match posture (press high, commit forward, drop
+            # to defend, hunt loose balls). A fair, competent foil so beating it
+            # demonstrates the press. (sim_blue_basic = passive drill,
+            # sim_blue_div_b = hard defensive counter — both kept as options.)
             gp = SimGegenpressConfig()
-            opp = SimBlueDivBConfig()
+            opp = SimBlueCompetitionConfig()
             gp_roles = {rid: role.name for rid, role in gp.roles.items()}
             opp_roles = {rid: role.name for rid, role in opp.roles.items()}
             self.log_message.emit(
                 f"[engine] GegenPressing mode — yellow=btv2+reactive-press "
                 f"{gp.yellow_ids} roles={gp_roles} press={gp.attacker_press} "
                 f"counter_attack={gp.counter_attack} gegenpress={gp.gegenpress} "
-                f"vs blue=DivB {opp.blue_ids} roles={opp_roles} "
+                f"vs blue=competition {opp.blue_ids} roles={opp_roles} "
                 f"heuristic_role_swap={opp.heuristic_role_swap} "
+                f"counter_attack={opp.counter_attack} "
                 f"strategy_enabled={bool(opp.strategy and opp.strategy.get('enabled'))}"
             )
             # Yellow — normal btv2 that reactively GegenPresses when the
@@ -597,8 +602,9 @@ class SimEngine(QObject):
                     name="gegenpress_yellow",
                 )
             )
-            # Blue — representative Division B opponent: solid back line + direct
-            # counter, shaped by its own strategy posture (distinct from yellow).
+            # Blue — competition-realistic team: dynamic roles, direct play, and
+            # an adaptive match posture (its strategy section). No reactive press
+            # (that's our identity), so the press can be demonstrated against it.
             procs.append(
                 Process(
                     target=run_bt_v2_process,
@@ -615,7 +621,7 @@ class SimEngine(QObject):
                         bt_state_q=self._bt_state_q,
                     ),
                     daemon=True,
-                    name="gegenpress_blue_div_b",
+                    name="gegenpress_blue_competition",
                 )
             )
             return procs

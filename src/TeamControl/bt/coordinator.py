@@ -186,6 +186,16 @@ ORBIT_HALF_PERIOD: int = 12        # ticks per shuffle half-cycle
 FREEZE_TACKLE_TICKS: int = 25      # ball frozen this long → the extra one tackles
 CHASE_GAIN_TACKLE: float = 3.0     # speed gain so the orbit/tackle moves are brisk
 
+# --- pass ⇄ receive sync ----------------------------------------------------
+# When any robot passes (IntentPass), the intended receiver commits to the
+# reception point and faces the ball until it arrives — so the receiver isn't
+# wandering off while the ball is in flight (the "out of sync" problem). Works
+# for any passer→receiver pairing (attacker→supporter included), both teams.
+PASS_RECEIVE_TIMEOUT_TICKS: int = 150  # give up waiting after ~1.5 s @100 Hz
+PASS_RECEIVE_DONE_DIST: float = 0.18   # receiver this close to ball = received
+PASS_RECEIVE_MEET_DIST: float = 1.0    # within this, step ONTO the ball to collect
+PASS_RECEIVE_SPEED_GAIN: float = 2.0   # brisk move to the reception point
+
 
 @dataclass(frozen=True)
 class GegenpressConfig:
@@ -485,6 +495,9 @@ class Coordinator:
         # Orbit-defender state (the "extra" defender while defending our half).
         self._extra_defender_id: int | None = None
         self._orbit_phase: int = 0
+        # Pass⇄receive sync: the in-flight pass we're shepherding a receiver onto.
+        # {"receiver": int, "target": (x, y), "ticks": int} or None.
+        self._incoming_pass: dict | None = None
         self._free_kick_kicker_id: int | None = None
         self._free_kick_support_slots: dict[int, int] = {}
         self._free_kick_kicker_ready: bool = False
@@ -551,6 +564,7 @@ class Coordinator:
             self._gegenpress_active = False
             self._press_streak = 0
             self._release_streak = 0
+            self._incoming_pass = None
             self._free_kick_kicker_id = None
             self._free_kick_support_slots = {}
             self._free_kick_kicker_ready = False
@@ -761,11 +775,75 @@ class Coordinator:
         self._update_ball_stall(snapshot)
         self._normal_tick(snapshot, robot_ids)
         # Post-tick intent overrides (run after the trees so they win):
+        #  - keep the pass receiver synced onto the in-flight ball,
         #  - extra defender's confuse-and-tackle orbit while defending our half,
         #  - clash escape (pass out / jiggle) for a ball wedged in a clash.
+        self._apply_pass_receive_sync(snapshot, robot_ids)
         self._apply_orbit_defender(snapshot, robot_ids)
         self._apply_clash_royale(snapshot, robot_ids)
         return self._finalize_intents(snapshot, robot_ids)
+
+    def _apply_pass_receive_sync(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Keep the intended receiver synced onto an in-flight pass.
+
+        When a robot issues an IntentPass, the receiver isn't told a pass is
+        coming (the supporter pass-signal only covers supporter→supporter), so
+        it drifts off the reception point while the ball travels — passer and
+        receiver out of sync. Here the Coordinator latches the pass and, until
+        the ball arrives (or a timeout), overrides the receiver to hold the
+        reception point facing the ball, then step ONTO the ball as it nears so
+        it's collected on the dribbler. Works for any passer→receiver pairing.
+        """
+        # Latch a freshly-issued pass (re-latches each tick the passer is still
+        # on it, which just keeps the receiver primed).
+        for rid in robot_ids:
+            bb = self.blackboards.get(rid)
+            if bb is None or not isinstance(bb.current_intent, IntentPass):
+                continue
+            target_id = bb.current_intent.target_robot_id
+            if target_id is not None and target_id != rid:
+                self._incoming_pass = {
+                    "receiver": target_id,
+                    "target": bb.current_intent.target_pos,
+                    "ticks": 0,
+                }
+            break
+
+        pending = self._incoming_pass
+        if pending is None:
+            return
+
+        receiver_id = pending["receiver"]
+        receiver = _find_robot(snapshot, receiver_id)
+        bb_recv = self.blackboards.get(receiver_id)
+        if receiver is None or bb_recv is None:
+            self._incoming_pass = None
+            return
+
+        ball = snapshot.ball_position
+        dist_to_ball = math.hypot(
+            receiver.position[0] - ball[0], receiver.position[1] - ball[1]
+        )
+        # Pass complete once the receiver is on the ball — hand back to its tree.
+        if dist_to_ball <= PASS_RECEIVE_DONE_DIST:
+            self._incoming_pass = None
+            return
+        pending["ticks"] += 1
+        if pending["ticks"] > PASS_RECEIVE_TIMEOUT_TICKS:
+            self._incoming_pass = None
+            return
+
+        # Hold the reception point until the ball is near, then step onto it.
+        face = math.atan2(ball[1] - receiver.position[1], ball[0] - receiver.position[0])
+        target = ball if dist_to_ball <= PASS_RECEIVE_MEET_DIST else pending["target"]
+        bb_recv.current_intent = IntentMove(
+            target_pos=target,
+            target_orientation=face,
+            speed_gain=PASS_RECEIVE_SPEED_GAIN,
+        )
+        bb_recv.intent_source = "ReceivePass"
 
     def _update_ball_stall(self, snapshot: Snapshot) -> None:
         """Track how long the ball has been ~stationary (a frozen/wedged ball)."""

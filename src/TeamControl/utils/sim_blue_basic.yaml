@@ -1,0 +1,44 @@
+# Blue opponent for the `gegenpress` UI mode — a BASIC, normal team.
+#
+# Plays plain balanced football: a goalie + a defender that protect the goal, a
+# striker that goes to the ball and shoots to score, and supporters that hold
+# outlets and pass. No press, no counter bias, no special strategy posture — a
+# neutral sparring partner so we can actually TEST our GegenPressing instead of
+# being countered into the ground. (The hard defensive Division B foil still
+# lives in sim_blue_div_b.yaml / SimBlueDivBConfig for later.)
+
+yellow:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+blue:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+
+# Balanced base shape: defend, support, and one striker to score.
+roles:
+  0: goalie
+  1: defender
+  2: attacker
+  3: supporter
+  4: supporter
+  5: supporter
+
+# Normal adaptive play: the nearest robot goes to the ball, a defender stays
+# home. (No press, no counter, no strategy posture — those keys are omitted.)
+heuristic_role_swap: True
+
+movement_safety:
+  keep_robots_in_bounds: true
+  keep_goalie_in_goal_box: true
+  keep_non_goalies_out_of_goalie_box: true
+  avoid_ball_touch_in_opponent_defense_area: true
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+  goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+  defense_area_ball_touch_margin: 0.18
+  defense_area_dribble_kick_margin: 0.30
+
+tick_period: 0.01

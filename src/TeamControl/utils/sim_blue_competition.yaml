@@ -1,0 +1,85 @@
+# Blue opponent for the `gegenpress` UI mode — a COMPETITION-realistic team.
+#
+# Plays like a real match side rather than a static drill: a full 6-robot shape
+# with dynamic role assignment (nearest goes to the ball, a back line holds),
+# direct forward play, and a posture that ADAPTS to the game context the way a
+# competent team does — press high in the attacking third, throw a runner
+# forward when attacking, drop into a compact block when defending our half,
+# and hunt loose balls. Set pieces (kickoff / free kicks / penalties) are
+# handled by the coordinator, so it behaves correctly in every game state.
+#
+# It is deliberately BALANCED (neutral base posture) — a fair, competent foil:
+# strong enough to look like real competition, not min-maxed to shut us down,
+# so that out-pressing it actually demonstrates the GegenPressing works.
+# (sim_blue_basic.yaml = passive drill; sim_blue_div_b.yaml = hard defensive
+# counter — both kept as alternatives.)
+
+yellow:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+blue:
+  robot_ids: [0, 1, 2, 3, 4, 5]
+
+roles:
+  0: goalie
+  1: attacker
+  2: supporter
+  3: supporter
+  4: supporter
+  5: supporter
+
+# Real adaptive play: nearest robot attacks, the rest form a dynamic shape.
+heuristic_role_swap: True
+# Direct play: release the ball forward and keep it advanced, don't over-dribble.
+counter_attack: True
+
+# Adaptive match posture (the strategy layer). Neutral base + context rules so
+# the team shifts between attack and defence like a competent side.
+strategy:
+  enabled: true
+  rules:
+    # Win it back high when the ball is in their third (modern pressing side).
+    - name: press_high_in_their_third
+      when:
+        ball_zone: attacking
+      apply:
+        role_bias: {press_scale: 1.3}
+        defending: {line_height_scale: 1.2}
+    # Commit an extra runner forward when we're attacking with the ball.
+    - name: commit_numbers_when_attacking
+      when:
+        possession: own
+        ball_zone: attacking
+      apply:
+        formation: {extra_attackers: 1}
+    # Drop into a compact block when they bring it into our half.
+    - name: drop_and_protect_when_defending
+      when:
+        possession: opponent
+        ball_in_our_half: true
+      apply:
+        formation: {extra_defenders: 1}
+        defending: {line_height_scale: 0.85}
+    # Pounce on 50/50s.
+    - name: hunt_loose_balls
+      when:
+        possession: loose
+      apply:
+        role_bias: {press_scale: 1.2}
+
+movement_safety:
+  keep_robots_in_bounds: true
+  keep_goalie_in_goal_box: true
+  keep_non_goalies_out_of_goalie_box: true
+  avoid_ball_touch_in_opponent_defense_area: true
+  field_length: 9.0
+  field_width: 6.0
+  field_margin: 0.05
+  goalie_box_depth: 1.0
+  goalie_box_width: 2.0
+  goalie_box_margin: 0.05
+  goalie_box_avoid_margin: 0.15
+  goalie_box_exit_margin: 0.10
+  defense_area_ball_touch_margin: 0.18
+  defense_area_dribble_kick_margin: 0.30
+
+tick_period: 0.01

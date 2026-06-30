@@ -164,11 +164,28 @@ class SimGegenpressConfig(BTSimConfig):
         super().__init__(config_filename)
 
 
+class SimBlueBasicConfig(BTSimConfig):
+    """In-memory view of ``sim_blue_basic.yaml`` — a basic, passive drill team
+    (defend / pass / score, no posture). Kept as a simple alternative."""
+
+    def __init__(self, config_filename: str = "sim_blue_basic.yaml") -> None:
+        super().__init__(config_filename)
+
+
+class SimBlueCompetitionConfig(BTSimConfig):
+    """In-memory view of ``sim_blue_competition.yaml`` — a competition-realistic
+    blue team: dynamic roles + direct play + an adaptive match posture (press
+    high, commit forward, drop to defend, hunt loose balls). The default blue in
+    the ``gegenpress`` UI mode — a fair, competent foil to demonstrate the press."""
+
+    def __init__(self, config_filename: str = "sim_blue_competition.yaml") -> None:
+        super().__init__(config_filename)
+
+
 class SimBlueDivBConfig(BTSimConfig):
     """In-memory view of ``sim_blue_div_b.yaml`` — a representative Division B
-    opponent (defensively solid + direct counter), used as the blue team in the
-    ``gegenpress`` UI mode. Built natively from our trees + the strategy layer;
-    no external/licensed code."""
+    opponent (defensively solid + direct counter). A harder foil than
+    SimBlueBasicConfig; kept available but not the default blue."""
 
     def __init__(self, config_filename: str = "sim_blue_div_b.yaml") -> None:
         super().__init__(config_filename)
