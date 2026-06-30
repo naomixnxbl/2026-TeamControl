@@ -40,6 +40,7 @@ from TeamControl.utils.sim_config import (
     Btv2Config,
     Sim3v3Config,
     Sim6v6Config,
+    SimBlueDivBConfig,
     SimGegenpressConfig,
 )
 
@@ -559,18 +560,20 @@ class SimEngine(QObject):
 
         if mode == "gegenpress":
             # Our side (yellow) runs the GegenPressing strategy; the opponent
-            # (blue) runs the standard btv2 BT so we can A/B the press against a
-            # normal team.
+            # (blue) plays a representative Division B opponent (defensively
+            # solid + direct counter) built natively from our trees + the
+            # strategy layer — a real foil rather than a mirror of our press.
             gp = SimGegenpressConfig()
-            opp = Btv2Config()
+            opp = SimBlueDivBConfig()
             gp_roles = {rid: role.name for rid, role in gp.roles.items()}
             opp_roles = {rid: role.name for rid, role in opp.roles.items()}
             self.log_message.emit(
                 f"[engine] GegenPressing mode — yellow=btv2+reactive-press "
                 f"{gp.yellow_ids} roles={gp_roles} press={gp.attacker_press} "
                 f"counter_attack={gp.counter_attack} gegenpress={gp.gegenpress} "
-                f"vs blue=btv2 {opp.blue_ids} roles={opp_roles} "
-                f"heuristic_role_swap={opp.heuristic_role_swap}"
+                f"vs blue=DivB {opp.blue_ids} roles={opp_roles} "
+                f"heuristic_role_swap={opp.heuristic_role_swap} "
+                f"strategy_enabled={bool(opp.strategy and opp.strategy.get('enabled'))}"
             )
             # Yellow — normal btv2 that reactively GegenPresses when the
             # opponent holds the ball (markers + pressing attacker).
@@ -594,7 +597,8 @@ class SimEngine(QObject):
                     name="gegenpress_yellow",
                 )
             )
-            # Blue — standard btv2 opponent (no press, btv2 role swapping).
+            # Blue — representative Division B opponent: solid back line + direct
+            # counter, shaped by its own strategy posture (distinct from yellow).
             procs.append(
                 Process(
                     target=run_bt_v2_process,
@@ -606,10 +610,12 @@ class SimEngine(QObject):
                         heuristic_role_swap=opp.heuristic_role_swap,
                         movement_safety=opp.movement_safety,
                         tick_period=opp.tick_period,
+                        counter_attack=opp.counter_attack,
+                        strategy=opp.strategy,
                         bt_state_q=self._bt_state_q,
                     ),
                     daemon=True,
-                    name="gegenpress_blue_btv2",
+                    name="gegenpress_blue_div_b",
                 )
             )
             return procs

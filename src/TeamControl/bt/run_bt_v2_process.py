@@ -149,6 +149,7 @@ def _build_coordinator(
     press_enabled: bool | None = None,
     gegenpress: dict | None = None,
     counter_attack: bool | None = None,
+    strategy: dict | None = None,
 ) -> Coordinator:
     # GegenPressing containment / counter-attack are off by default; when a mode
     # requests either, rebuild the attacker config from yaml with the relevant
@@ -179,6 +180,7 @@ def _build_coordinator(
         heuristic_role_swap=heuristic_role_swap,
         movement_safety=movement_safety,
         gegenpress=gegenpress,
+        strategy=strategy,
     )
     print(
         f"[BT] coordinator built: us_positive={us_positive} "
@@ -187,6 +189,7 @@ def _build_coordinator(
         f"press_enabled={press_enabled} "
         f"counter_attack={counter_attack} "
         f"gegenpress_enabled={c.gegenpress.enabled} "
+        f"strategy_active={c.strategy.enabled} "
         f"movement_safety={c.movement_safety}",
         flush=True,
     )
@@ -220,6 +223,7 @@ def run_bt_v2_process(
     press_enabled: bool | None = None,
     gegenpress: dict | None = None,
     counter_attack: bool | None = None,
+    strategy: dict | None = None,
 ) -> None:
     """Tick the v2 (TurtleRabbitBT) coordinator in a child process.
 
@@ -259,6 +263,7 @@ def run_bt_v2_process(
         press_enabled=press_enabled,
         gegenpress=gegenpress,
         counter_attack=counter_attack,
+        strategy=strategy,
     )
     dribble_tracker = DribbleLimitTracker(max_dribble_distance_m=load_dribble_distance_limit())
     # Unified PD-backed motion: every robot's command flows through one executor

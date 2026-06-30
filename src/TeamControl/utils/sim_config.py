@@ -118,6 +118,10 @@ class BTSimConfig:
         # pass into the opponent half over carrying the ball up. Default False so
         # existing sim configs are unchanged.
         self.counter_attack: bool = bool(raw.get("counter_attack", False))
+        # Team-strategy posture (the `strategy:` section). Raw mapping passed
+        # straight to the Coordinator; None falls back to bt_tuning.yaml (a no-op
+        # unless enabled there). Lets one team play a distinct posture.
+        self.strategy: dict | None = raw.get("strategy")
         self.movement_safety: dict[str, bool | float] = _parse_movement_safety(
             raw.get("movement_safety")
         )
@@ -157,6 +161,16 @@ class SimGegenpressConfig(BTSimConfig):
     """
 
     def __init__(self, config_filename: str = "sim_gegenpress.yaml") -> None:
+        super().__init__(config_filename)
+
+
+class SimBlueDivBConfig(BTSimConfig):
+    """In-memory view of ``sim_blue_div_b.yaml`` — a representative Division B
+    opponent (defensively solid + direct counter), used as the blue team in the
+    ``gegenpress`` UI mode. Built natively from our trees + the strategy layer;
+    no external/licensed code."""
+
+    def __init__(self, config_filename: str = "sim_blue_div_b.yaml") -> None:
         super().__init__(config_filename)
 
 

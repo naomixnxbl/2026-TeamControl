@@ -124,10 +124,13 @@ def test_engages_after_sustained_opponent_possession() -> None:
 
     roles = _roles(coord)
     assert roles[0] == RoleType.GOALIE
-    # Exactly one presser; the rest of the field man-marks.
     field = [roles[rid] for rid in (1, 2, 3, 4, 5)]
+    # One presser; the two markable outlets (opp 11, 12) are man-marked, and the
+    # two redundant markers are promoted to forward SUPPORTER outlets rather than
+    # clustering. So: 1 ATTACKER + 2 MARKER + 2 SUPPORTER.
     assert field.count(RoleType.ATTACKER) == 1
-    assert field.count(RoleType.MARKER) == 4
+    assert field.count(RoleType.MARKER) == 2
+    assert field.count(RoleType.SUPPORTER) == 2
     # The presser is the robot nearest the ball (robot 1 at (-0.5, 0)).
     assert roles[1] == RoleType.ATTACKER
 
