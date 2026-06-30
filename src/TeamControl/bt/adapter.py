@@ -48,6 +48,7 @@ from TeamControl.bt.skills.kick_at import kick_at
 from TeamControl.bt.skills.move_to import move_to
 from TeamControl.bt.skills.receive_ball import receive_ball
 from TeamControl.network.robot_command import RobotCommand
+from TeamControl.robot.pd_controller import PDController
 from TeamControl.SSL.game_controller.common import GameState
 
 # Runtime world state comes in as raw SSL/grSim millimetres.
@@ -571,6 +572,111 @@ def intent_to_robot_command(
     )
 
 
+class _RobotMovement:
+    """Per-robot motion state. Holds the heading PD controller so each robot
+    keeps its own derivative history (no shared state between robots)."""
+
+    def __init__(self, angular_kp: float, angular_kd: float, angular_limit: float) -> None:
+        self.angular_pd = PDController(angular_kp, angular_kd, angular_limit)
+
+
+class MotionExecutor:
+    """Stateful PD-backed motion layer — the unified Intent → RobotCommand path.
+
+    Resolves each Intent the same way as :func:`intent_to_robot_command` (same
+    skill layer, ball-approach guard, kick/dribble flags, world→body rotation),
+    but replaces the memoryless proportional heading gain with a **per-robot PD
+    controller**. The derivative term brakes the turn as the heading error
+    shrinks, damping the overshoot/oscillation the plain-P gain produced. Linear
+    velocity still comes from the skill layer so the guards and kick contact
+    speeds are preserved untouched.
+
+    One :class:`PDController` per robot, created lazily, so robots never share
+    derivative state. Drop-in for the legacy path: ``run_bt_v2_process`` builds
+    one executor and routes every robot's command through it.
+    """
+
+    ANGULAR_KP: float = 4.0   # matches the legacy proportional heading gain
+    ANGULAR_KD: float = 0.35  # derivative braking (damps turn overshoot)
+    ANGULAR_LIMIT: float = 6.0
+
+    def __init__(
+        self,
+        angular_kp: float = ANGULAR_KP,
+        angular_kd: float = ANGULAR_KD,
+        angular_limit: float = ANGULAR_LIMIT,
+    ) -> None:
+        self._angular_kp = angular_kp
+        self._angular_kd = angular_kd
+        self._angular_limit = angular_limit
+        self._movements: dict[int, _RobotMovement] = {}
+
+    def _get_movement(self, robot_id: int) -> _RobotMovement:
+        movement = self._movements.get(robot_id)
+        if movement is None:
+            movement = _RobotMovement(
+                self._angular_kp, self._angular_kd, self._angular_limit
+            )
+            self._movements[robot_id] = movement
+        return movement
+
+    def resolve_command(
+        self,
+        intent: Intent,
+        robot_id: int,
+        snapshot: Snapshot,
+        is_yellow: bool,
+    ) -> RobotCommand | None:
+        """Intent → RobotCommand with PD heading control. None if robot absent."""
+        try:
+            robot = _get_robot(snapshot, robot_id)
+        except ValueError:
+            return None
+
+        # IntentReceive = hold still and ready; no linear or angular motion.
+        if isinstance(intent, IntentReceive):
+            return RobotCommand(
+                robot_id=robot_id, vx=0.0, vy=0.0, w=0.0,
+                kick=0, dribble=0, isYellow=bool(is_yellow),
+            )
+
+        target = intent_to_motion_target(intent, robot_id, snapshot)
+        if target is None:
+            return None
+
+        current_o = robot.orientation
+        # PD heading control. Error wrapped to [-pi, pi]; a None target
+        # orientation resolves (via the skill layer) to the current heading, so
+        # the error is 0 and w is 0.
+        err = (target.target_orientation - current_o + math.pi) % (2 * math.pi) - math.pi
+        w = float(self._get_movement(robot_id).angular_pd.update(err))
+
+        # Skills produce target_velocity in WORLD frame; grSim wants body frame.
+        vx_world, vy_world = target.target_velocity
+        cos_o = math.cos(current_o)
+        sin_o = math.sin(current_o)
+        vt = vx_world * cos_o + vy_world * sin_o    # forward along heading
+        vn = -vx_world * sin_o + vy_world * cos_o   # left perpendicular
+
+        wants_kick = isinstance(intent, (IntentKick, IntentPass))
+        kick = (
+            1
+            if wants_kick and _kick_pose_ready(snapshot, robot_id, intent.target_pos)
+            else 0
+        )
+        dribble = 1 if isinstance(intent, IntentDribble) else 0
+
+        return RobotCommand(
+            robot_id=robot_id,
+            vx=float(vt),
+            vy=float(vn),
+            w=w,
+            kick=kick,
+            dribble=dribble,
+            isYellow=bool(is_yellow),
+        )
+
+
 def dispatch_coordinator_output(
     coordinator,
     robot_ids: Iterable[int],
@@ -579,6 +685,7 @@ def dispatch_coordinator_output(
     dispatcher_q,
     run_time: float = 1.0,
     dribble_tracker: DribbleLimitTracker | None = None,
+    executor: "MotionExecutor | None" = None,
 ) -> int:
     """Walk each robot's blackboard after a ``Coordinator.tick`` and emit a
     ``RobotCommand`` per non-empty intent.
@@ -608,7 +715,12 @@ def dispatch_coordinator_output(
             # SSL §8.4.2: 1-metre limit reached — force a kick toward the dribble
             # target instead of continuing to carry.
             intent = IntentKick(target_pos=intent.target_pos)
-        cmd = intent_to_robot_command(intent, rid, snapshot, is_yellow)
+        # Unified motion: route through the PD executor when provided, else the
+        # legacy memoryless proportional path (kept for backward compatibility).
+        if executor is not None:
+            cmd = executor.resolve_command(intent, rid, snapshot, is_yellow)
+        else:
+            cmd = intent_to_robot_command(intent, rid, snapshot, is_yellow)
         if cmd is None:
             continue
         if not dispatcher_q.full():

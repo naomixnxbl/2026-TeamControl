@@ -89,13 +89,15 @@ def test_dedicates_shot_zone_blockers_in_our_half() -> None:
     assert coord._gegenpress_active is True
 
     roles = _roles(coord)
-    # One presser, a primary + extra DEFENDER (shot zone), the rest man-mark.
     field = [roles[rid] for rid in (1, 2, 3, 4, 5)]
+    # One presser, a primary + extra DEFENDER (shot zone). There is only ONE
+    # real threat in our half (opp 11), so one robot marks it and the redundant
+    # marker is promoted to a forward SUPPORTER outlet (not left clustering).
     assert field.count(RoleType.ATTACKER) == 1
     assert field.count(RoleType.DEFENDER) == 2
-    assert field.count(RoleType.MARKER) == 2
-    # The deepest field robot (closest to our goal) is the primary blocker, and
-    # the next-deepest becomes the orbiting extra defender.
+    assert field.count(RoleType.MARKER) == 1
+    assert field.count(RoleType.SUPPORTER) == 1
+    # The deepest field robot is the primary blocker; another is the orbit extra.
     assert roles[2] == RoleType.DEFENDER
     assert coord._extra_defender_id is not None
     assert roles[coord._extra_defender_id] == RoleType.DEFENDER

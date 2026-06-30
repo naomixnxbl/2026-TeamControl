@@ -18,6 +18,7 @@ from multiprocessing import Event, Queue
 
 from TeamControl.bt.adapter import (
     DribbleLimitTracker,
+    MotionExecutor,
     build_snapshot_from_world_model,
     dispatch_coordinator_output,
     load_dribble_distance_limit,
@@ -260,6 +261,10 @@ def run_bt_v2_process(
         counter_attack=counter_attack,
     )
     dribble_tracker = DribbleLimitTracker(max_dribble_distance_m=load_dribble_distance_limit())
+    # Unified PD-backed motion: every robot's command flows through one executor
+    # so heading is PD-controlled (D-term damps turn overshoot) instead of the
+    # old memoryless proportional gain.
+    motion_executor = MotionExecutor()
     print(f"[BT] started — yellow={is_yellow}, us_positive={_us_positive}, robot_ids={robot_ids}")
 
     tag = "[BT-YELLOW]" if is_yellow else "[BT-BLUE]"
@@ -354,6 +359,7 @@ def run_bt_v2_process(
                     is_yellow,
                     dispatcher_q,
                     dribble_tracker=dribble_tracker,
+                    executor=motion_executor,
                 )
             time.sleep(tick_period)
     except KeyboardInterrupt:

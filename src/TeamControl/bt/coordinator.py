@@ -215,6 +215,12 @@ class GegenpressConfig:
     enter_ticks: int = 8
     # Consecutive ticks of clear own possession needed to disengage.
     exit_ticks: int = 12
+    # When our nearest robot is this much (m) closer to the ball than any
+    # opponent, we count it as SECURE own possession and:
+    #   * drop the press immediately (no exit debounce), and
+    #   * flip into the counter-attack break (carrier attacks, the rest sprint
+    #     into the opponent half to receive — no clustering, no marking).
+    secure_margin: float = 0.30
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "GegenpressConfig":
@@ -228,6 +234,7 @@ class GegenpressConfig:
             press_margin=float(raw.get("press_margin", d.press_margin)),
             enter_ticks=int(raw.get("enter_ticks", d.enter_ticks)),
             exit_ticks=int(raw.get("exit_ticks", d.exit_ticks)),
+            secure_margin=float(raw.get("secure_margin", d.secure_margin)),
         )
 
 # Attacking box slots for OUR corner kick — (depth in front of opp goal, y).
@@ -735,16 +742,22 @@ class Coordinator:
             return result
             return self._finalize_intents(snapshot, robot_ids)
 
-        # Reactive GegenPressing: while the opponent holds the ball, override
-        # field roles to presser + markers; otherwise fall back to the normal
-        # (heuristic or static) role assignment. The two are mutually exclusive
-        # per tick so they never fight over a robot's role.
+        # Possession-driven dynamic role assignment. Three mutually-exclusive
+        # states per tick (so roles never fight):
+        #   * pressing            → presser + markers + shot-zone defender(s),
+        #   * secure own ball     → counter-attack break (carrier attacks, the
+        #                           rest sprint into the opponent half — no
+        #                           clustering around the carrier),
+        #   * contested / neutral → the normal (heuristic/static) assignment.
         self._update_gegenpress_state(snapshot)
         if self.gegenpress.enabled and self._gegenpress_active:
             self._apply_gegenpress_roles(snapshot, robot_ids)
+        elif self.gegenpress.enabled and self._we_have_secure_possession(snapshot):
+            self._apply_counter_attack_roles(snapshot, robot_ids)
         else:
             self._apply_heuristic_roles(snapshot, robot_ids)
         self._apply_marker_assignment(snapshot, robot_ids)
+        self._promote_redundant_markers_to_outlets(robot_ids)
         self._update_ball_stall(snapshot)
         self._normal_tick(snapshot, robot_ids)
         # Post-tick intent overrides (run after the trees so they win):
@@ -1972,11 +1985,75 @@ class Coordinator:
             and self._press_streak >= self.gegenpress.enter_ticks
         ):
             self._gegenpress_active = True
-        elif (
-            self._gegenpress_active
-            and self._release_streak >= self.gegenpress.exit_ticks
+        elif self._gegenpress_active and (
+            # Secure own possession breaks the press INSTANTLY (no debounce) so
+            # the counter-attack launches the moment we win the ball; otherwise
+            # the exit debounce avoids flicker on contested/loose balls.
+            self._we_have_secure_possession(snapshot)
+            or self._release_streak >= self.gegenpress.exit_ticks
         ):
             self._gegenpress_active = False
+
+    def _we_have_secure_possession(self, snapshot: Snapshot) -> bool:
+        """True when our nearest robot is clearly closest to the ball.
+
+        The trigger for switching from defending into the counter-attack: our
+        nearest robot is at least ``secure_margin`` closer to the ball than any
+        opponent (covers both holding it and clearly winning a loose ball).
+        """
+        ball = snapshot.ball_position
+        own_dist = min(
+            (
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.own_robots
+            ),
+            default=math.inf,
+        )
+        if math.isinf(own_dist):
+            return False
+        opp_dist = min(
+            (
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.enemy_robots
+            ),
+            default=math.inf,
+        )
+        return own_dist + self.gegenpress.secure_margin <= opp_dist
+
+    def _apply_counter_attack_roles(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> None:
+        """Counter-attack break: carrier attacks, everyone else sprints forward.
+
+        When we secure the ball the team must NOT keep hovering near the carrier
+        in its defensive shape. The robot on/nearest the ball becomes the
+        ATTACKER (it carries / makes the direct forward release via the
+        counter_attack branch); every other field robot becomes a SUPPORTER,
+        whose RepositionToSpace spreads them into open space toward the opponent
+        goal — outlets for the counter, not a cluster around the ball.
+        """
+        ball = snapshot.ball_position
+        present = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and not self._is_goalie(rid)
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not present:
+            return
+        self._extra_defender_id = None
+        carrier = min(
+            present,
+            key=lambda rid: math.hypot(
+                _find_robot(snapshot, rid).position[0] - ball[0],
+                _find_robot(snapshot, rid).position[1] - ball[1],
+            ),
+        )
+        for rid in present:
+            self.blackboards[rid].current_role = (
+                RoleType.ATTACKER if rid == carrier else RoleType.SUPPORTER
+            )
 
     def _apply_gegenpress_roles(
         self, snapshot: Snapshot, robot_ids: list[int]
@@ -2100,6 +2177,27 @@ class Coordinator:
             target_pos=target, target_orientation=face, speed_gain=CHASE_GAIN_TACKLE
         )
         self.blackboards[rid].intent_source = "OrbitDefenderShuffle"
+
+    def _promote_redundant_markers_to_outlets(self, robot_ids: list[int]) -> None:
+        """Turn redundant markers into forward outlets.
+
+        After the marker matching, any MARKER with no man to cover
+        (``mark_target_id is None``) is redundant — its job is already done by a
+        teammate or there is no distinct threat for it. Rather than have it
+        hover/zone-cover and clutter our half, promote it to SUPPORTER so it
+        breaks into open space toward the opponent goal — a useful counter-attack
+        outlet to receive a pass once we win the ball. Only while pressing.
+        """
+        if not (self.gegenpress.enabled and self._gegenpress_active):
+            return
+        for rid in robot_ids:
+            bb = self.blackboards.get(rid)
+            if (
+                bb is not None
+                and bb.current_role == RoleType.MARKER
+                and bb.mark_target_id is None
+            ):
+                bb.current_role = RoleType.SUPPORTER
 
     def _ball_in_our_half(self, snapshot: Snapshot) -> bool:
         """True when the ball is on our side of the halfway line."""

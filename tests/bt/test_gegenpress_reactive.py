@@ -159,6 +159,27 @@ def test_phase_change_resets_the_press() -> None:
     assert coord._gegenpress_active is False
 
 
+def test_secure_possession_breaks_press_instantly_into_counter_attack() -> None:
+    # exit_ticks is huge to prove the break is INSTANT on secure possession,
+    # not waiting out the normal release debounce.
+    coord = _coord({"enabled": True, "enter_ticks": 3, "exit_ticks": 999})
+    for _ in range(3):
+        coord.tick(_opp_control_snapshot(), IDS)
+    assert coord._gegenpress_active is True
+
+    coord.tick(_own_control_snapshot(), IDS)  # a single tick with the ball secured
+    assert coord._gegenpress_active is False
+
+    roles = _roles(coord)
+    field = [roles[rid] for rid in (1, 2, 3, 4, 5)]
+    # Carrier attacks; everyone else supports (breaks forward) — no marking,
+    # no defenders clustering in our half.
+    assert field.count(RoleType.ATTACKER) == 1
+    assert RoleType.MARKER not in field
+    assert RoleType.DEFENDER not in field
+    assert all(r in (RoleType.ATTACKER, RoleType.SUPPORTER) for r in field)
+
+
 def test_disabled_trigger_keeps_base_roles() -> None:
     coord = _coord({"enabled": False})
     for _ in range(10):
