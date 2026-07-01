@@ -8,6 +8,7 @@ from TeamControl.skills._shared import Behaviour, reset_robot_state
 from TeamControl.skills.stop                    import stop, compliance as _stop_compliance
 from TeamControl.skills.face_ball               import face_ball
 from TeamControl.skills.face_target             import face_target
+from TeamControl.skills.chase_ball              import chase_ball
 from TeamControl.skills.move_to_ball            import move_to_ball
 from TeamControl.skills.move_to_point           import move_to_point
 from TeamControl.skills.intercept_ball          import intercept_ball
@@ -29,6 +30,7 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
     Behaviour("stop",             "Stop (§5.4)",           "Hold position, nudge away if < 0.55 m from ball, cap speed at 1.4 m/s — full STOPPED compliance.", False, stop, _stop_compliance),
     Behaviour("face_ball",        "Face Ball",             "Rotate in place to face the ball.",                                                           False, face_ball),
     Behaviour("face_target",      "Face Target",           "Rotate in place to face a chosen point.",                                                     True,  face_target),
+    Behaviour("chase_ball",       "Chase Ball",            "Gegenpress-style sprint directly to the ball with a snappy chase gain.",                       False, chase_ball),
     Behaviour("move_to_ball",     "Move To Ball",          "Face ball then drive toward it, stopping 15 cm short.",                                       False, move_to_ball),
     Behaviour("move_to_point",    "Move To Point",         "Drive to a chosen field position.",                                                           True,  move_to_point),
     Behaviour("intercept_ball",   "Intercept Ball",        "Move to where ball will be in ~0.8 s (velocity prediction), not its current position.",       False, intercept_ball),

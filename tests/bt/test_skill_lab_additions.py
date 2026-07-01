@@ -29,6 +29,7 @@ from TeamControl.skills._shared import (
     own_goal,
     set_attack_sign,
 )
+from TeamControl.skills.chase_ball import CHASE_BALL_SPEED_GAIN, chase_ball
 from TeamControl.skills.kick_at_goal import kick_at_goal
 from TeamControl.skills.move_then_attack import move_then_attack
 from TeamControl.skills.pass_to_outlet import pass_to_outlet
@@ -160,6 +161,23 @@ def test_pass_to_outlet_faces_ball_when_no_outlet():
     assert isinstance(pass_to_outlet(snap, own[0], None), IntentOrient)
 
 
+def test_chase_ball_targets_ball_directly_with_speed_gain():
+    own = [_r(1, (0.0, 0.0), o=0.0)]
+    snap = _snap(own=own, ball=(1.0, 1.0))
+    intent = chase_ball(snap, own[0], None)
+
+    assert isinstance(intent, IntentMove)
+    assert intent.target_pos == snap.ball_position
+    assert intent.target_orientation == pytest.approx(0.7853981633974483)
+    assert intent.max_speed is None
+    assert intent.speed_gain == CHASE_BALL_SPEED_GAIN
+
+
+def test_chase_ball_returns_none_without_visible_robot():
+    snap = _snap(own=[], ball=(1.0, 0.0))
+    assert chase_ball(snap, None, None) is None
+
+
 # ── kick skills emit IntentKick; the PD executor fires the kicker ─────────────
 
 def test_kick_at_goal_emits_kick_at_open_aim():
@@ -243,5 +261,5 @@ def test_receive_pass_leads_a_moving_ball():
 # ── registry wiring ───────────────────────────────────────────────────────────
 
 def test_new_skills_registered():
-    for skill_id in ("receive_pass", "shoot_open_goal", "pass_to_outlet"):
+    for skill_id in ("chase_ball", "receive_pass", "shoot_open_goal", "pass_to_outlet"):
         assert skill_id in BEHAVIOURS_BY_ID
