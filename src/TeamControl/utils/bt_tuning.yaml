@@ -212,7 +212,7 @@ role_swap:
   supporter:
     # Rewards being spaced away from teammates.
     # Higher = supporters spread out more instead of clustering.
-    spacing: 0.30
+    spacing: 0.18
 
     # Rewards being closer to the opponent goal.
     # Higher = supporters take more advanced attacking support positions.
@@ -228,7 +228,7 @@ role_swap:
 
     # Rewards not being too close to the ball.
     # Higher = supporters avoid crowding the attacker.
-    not_crowding_ball: 0.10
+    not_crowding_ball: 0.05
 
     # Rewards being between the ball and opponent goal.
     # Higher = supporters prefer forward passing/shot-support lanes.
@@ -292,7 +292,7 @@ behavior_tree:
 
     # Default: 2.0 metres. Max distance to goal where a clear shot is allowed.
     # Higher = attempts longer shots; lower = carries/passes closer first.
-    shoot_dist_threshold: 2.0
+    shoot_dist_threshold: 1.5
 
     # Default: 0.08. Minimum pass distance as a fraction of field scale.
     # Higher = ignores short passes.
@@ -304,11 +304,11 @@ behavior_tree:
 
     # Default: 0.05. Receiver is rejected if an opponent is closer than this
     # fraction of field scale.
-    pass_marked_distance_frac: 0.05
+    pass_marked_distance_frac: 0.08
 
     # Default: 0.08. Opponent pressure radius used when deciding to look for a
     # pass instead of carrying/shooting.
-    pass_pressure_radius_frac: 0.08
+    pass_pressure_radius_frac: 0.12
 
     # Default: 0.02. Pass lane clearance as a fraction of field scale.
     # Higher = pass lanes are considered blocked more easily.
@@ -316,7 +316,7 @@ behavior_tree:
 
     # Default: 0.2 radians. Attacker must face the pass target within this error
     # before firing the pass.
-    pass_orient_tol: 0.001
+    pass_orient_tol: 0.01
 
     # Default: 0.45. Weight for receiver openness in pass target scoring.
     pass_openness_weight: 0.45
@@ -393,7 +393,7 @@ behavior_tree:
 
     # Default: 0.2 radians. Supporter must face the pass target within this
     # error before firing the pass.
-    pass_orient_tol: 0.001
+    pass_orient_tol: 0.01
 
     # Default: 100 ticks. How long a receiver holds for a pass signal before
     # giving up and returning to normal supporter behavior.
