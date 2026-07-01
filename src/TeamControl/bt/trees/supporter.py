@@ -153,6 +153,12 @@ class SupporterBehaviorConfig:
     pass_distance_window: float = 2.0
     # Receiver openness normalization: nearest opponent at this distance → score 1.
     pass_openness_radius: float = 1.5
+    # Hard cap on pass distance (m). Candidates farther than this from the ball
+    # are rejected. 0.0 disables the check (original behaviour).
+    pass_max_distance: float = 0.0
+    # Bonus added to a candidate's score when the ball→candidate heading is already
+    # within pass_orient_tol of the robot's heading (no dribble-turn needed).
+    pass_heading_bonus: float = 0.0
     # Scoring weights — should sum to 1.0.
     pass_lane_weight: float = 0.30      # how open the pass corridor is
     pass_distance_weight: float = 0.40  # how close to ideal pass range
@@ -355,9 +361,18 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
         gx, gy = self._tree.goal_position
         cfg = self._tree.behavior_config
         ball_pos = snap.ball_position
+        robot = _find_robot(snap, bb.robot_id)
 
         for r in snap.own_robots:
             if r.robot_id == GOALIE_ID or r.robot_id == bb.robot_id:
+                continue
+
+            # Hard cap: skip targets too far from the ball carrier.
+            pass_dist = math.hypot(
+                r.position[0] - ball_pos[0],
+                r.position[1] - ball_pos[1],
+            )
+            if cfg.pass_max_distance > 0.0 and pass_dist > cfg.pass_max_distance:
                 continue
 
             # Build obstacle list: all robots except passer and this candidate.
@@ -385,10 +400,6 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
                 lane_quality = 1.0
 
             # Distance score: peaks at ideal pass distance, falls off either side.
-            pass_dist = math.hypot(
-                r.position[0] - ball_pos[0],
-                r.position[1] - ball_pos[1],
-            )
             dist_score = max(
                 0.0,
                 1.0 - abs(pass_dist - cfg.pass_ideal_distance) / cfg.pass_distance_window,
@@ -414,6 +425,19 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
                 + cfg.pass_openness_weight * openness
                 + cfg.pass_goal_weight     * goal_proximity
             )
+
+            # Heading bonus: no dribble-turn needed if already facing this target.
+            if cfg.pass_heading_bonus > 0.0 and robot is not None:
+                angle_ball_to_candidate = math.atan2(
+                    r.position[1] - ball_pos[1],
+                    r.position[0] - ball_pos[0],
+                )
+                heading_err = abs(
+                    (angle_ball_to_candidate - robot.orientation + math.pi)
+                    % (2 * math.pi) - math.pi
+                )
+                if heading_err <= cfg.pass_orient_tol:
+                    score += cfg.pass_heading_bonus
 
             # Attacker gets a bonus to prefer feeding the ball-carrier role.
             if r.robot_id == cfg.attacker_id:

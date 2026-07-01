@@ -359,17 +359,19 @@ class HasSettledPossession(py_trees.behaviour.Behaviour):
 
 
 class HasClearShot(py_trees.behaviour.Behaviour):
-    """Succeed when the robot can fire immediately without repositioning.
+    """Succeed when a shot on goal is worth attempting.
 
-    Selects the best goal mouth point satisfying ALL three constraints:
-      1. Corridor clear — no opponent within ``SHOT_CORRIDOR_RADIUS`` of ball→point.
-      2. Robot is within ``SHOOT_DIST_THRESHOLD`` of the goal.
-      3. Ball→point angle is within ``shot_heading_tol`` of the robot's heading,
-         matching the adapter's ``KICK_ALIGN_TOL`` gate in ``_kick_pose_ready``.
+    Two checks:
+      1. Robot within ``shoot_dist_threshold`` of the goal.
+      2. Robot is roughly facing the goal within ``shot_heading_tol`` (a loose
+         check — the adapter rotates in place to fine-align without losing possession).
+      3. The best open aim point in the goal mouth has a clear corridor
+         (no opponent within ``shot_corridor_radius``).
 
-    Constraint 3 is critical: without it the BT picks a far-post aim point the
-    adapter cannot fire at from the current orientation, causing ``_kick_motion_target``
-    to issue a repositioning move that breaks possession and prevents the kick.
+    Heading alignment to the exact aim point is intentionally NOT required here.
+    The adapter's ``_kick_motion_target`` now rotates in place when already in
+    contact range, so the BT only needs to confirm the robot is roughly on target
+    and the corridor isn't completely blocked.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -387,18 +389,33 @@ class HasClearShot(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         goal = self._tree.goal_position
+        config = self._tree.behavior_config
 
         dist_to_goal = math.hypot(
             robot.position[0] - goal[0], robot.position[1] - goal[1]
         )
-        config = self._tree.behavior_config
         if dist_to_goal > config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
 
-        target = _alignable_shot_target(
-            snap, robot, goal, config.shot_corridor_radius, config.shot_heading_tol
+        # Loose heading check: is the robot at least roughly facing the goal?
+        # The adapter handles fine-alignment; this just prevents shooting while
+        # facing completely the wrong direction.
+        angle_to_goal = math.atan2(
+            goal[1] - robot.position[1], goal[0] - robot.position[0]
         )
-        if target is None:
+        heading_err = (
+            angle_to_goal - robot.orientation + math.pi
+        ) % (2 * math.pi) - math.pi
+        if abs(heading_err) > config.shot_heading_tol:
+            return py_trees.common.Status.FAILURE
+
+        # Pick the most-open aim point and check its corridor is not blocked.
+        ball = snap.ball_position
+        target = _best_goal_target(snap, goal, config.shot_corridor_radius)
+        if snap.enemy_robots and any(
+            _point_to_segment_dist(opp.position, ball, target) <= config.shot_corridor_radius
+            for opp in snap.enemy_robots
+        ):
             return py_trees.common.Status.FAILURE
 
         self._tree._shot_target = target
@@ -1170,6 +1187,52 @@ def _best_goal_target(
             for opp in snap.enemy_robots
         )
         # Maximise clearance; on ties prefer the more central point (-|frac|).
+        score = (clearance, -abs(frac))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_point = point
+    return best_point
+
+
+def _alignable_shot_target(
+    snap: Snapshot,
+    robot,
+    goal: tuple[float, float],
+    corridor_radius: float,
+    heading_tol: float,
+) -> tuple[float, float] | None:
+    """Pick the best goal mouth point the robot can fire at without repositioning.
+
+    Mirrors the adapter's ``_kick_pose_ready`` alignment gate: the angle from the
+    ball to the aim point must be within ``heading_tol`` of the robot's current
+    orientation.  Among qualifying points, maximise corridor clearance and prefer
+    the more central point on ties.  Returns ``None`` when no unblocked, alignable
+    aim point exists — the caller should then skip the shot attempt.
+    """
+    ball = snap.ball_position
+    offsets = (-1.0, -0.5, 0.0, 0.5, 1.0)
+    best_point = None
+    best_score: tuple[float, float] | None = None
+    for frac in offsets:
+        point = (goal[0], goal[1] + frac * GOAL_MOUTH_HALF_WIDTH)
+        angle_ball_to_point = math.atan2(
+            point[1] - ball[1], point[0] - ball[0]
+        )
+        heading_err = (
+            angle_ball_to_point - robot.orientation + math.pi
+        ) % (2 * math.pi) - math.pi
+        if abs(heading_err) > heading_tol:
+            continue
+        clearance = (
+            min(
+                _point_to_segment_dist(opp.position, ball, point)
+                for opp in snap.enemy_robots
+            )
+            if snap.enemy_robots
+            else math.inf
+        )
+        if clearance <= corridor_radius:
+            continue
         score = (clearance, -abs(frac))
         if best_score is None or score > best_score:
             best_score = score

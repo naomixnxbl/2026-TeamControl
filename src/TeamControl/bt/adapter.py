@@ -380,6 +380,18 @@ def _kick_motion_target(
         return kick_at(snapshot, robot_id, target_pos)
 
     dist_to_ball = _distance(robot.position, ball)
+
+    # Already contact-close: rotate in place to face the kick angle.
+    # Moving backward to the approach position (below) would break possession
+    # because the approach is computed 0.22 m behind the ball — farther than
+    # KICK_APPROACH_TOL (0.08 m) from a robot that already has the ball at ~0.11 m.
+    if dist_to_ball <= KICK_CONTACT_DISTANCE:
+        return MotionTarget(
+            target_velocity=(0.0, 0.0),
+            target_orientation=angle,
+            arrival_mode="precision",
+        )
+
     heading_err = abs(_angle_error(angle, robot.orientation))
     angle_to_ball = _face_angle(robot.position, ball)
     ball_front_err = abs(_angle_error(angle_to_ball, robot.orientation))
