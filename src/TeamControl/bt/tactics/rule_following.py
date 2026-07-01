@@ -29,6 +29,16 @@ class MovementSafetyConfig:
     keep_goalie_in_goal_box: bool = True
     keep_non_goalies_out_of_goalie_box: bool = True
     avoid_ball_touch_in_opponent_defense_area: bool = True
+    # Keep a dribbled/carried ball inside the field lines. A carried ball leads
+    # the robot by ~ball_carry_margin, so a dribble target on the boundary would
+    # push the ball out while the robot is still legal. When enabled, dribble
+    # targets are aimed inside a boundary inset by field_margin + ball_carry_margin,
+    # and a ball already on the verge of a line is steered ball_save_margin back
+    # toward the interior. Off by default (opt-in) so existing behaviour/tests are
+    # unchanged; turned on in the match config.
+    keep_ball_in_bounds: bool = False
+    ball_carry_margin: float = 0.15
+    ball_save_margin: float = 0.30
     field_length: float = 9.0
     field_width: float = 6.0
     field_margin: float = 0.05
@@ -58,6 +68,7 @@ def has_rule_following_enabled(config: MovementSafetyConfig) -> bool:
         or config.keep_goalie_in_goal_box
         or config.keep_non_goalies_out_of_goalie_box
         or config.avoid_ball_touch_in_opponent_defense_area
+        or config.keep_ball_in_bounds
     )
 
 
@@ -106,10 +117,54 @@ def apply_rule_following(
             config=config,
             own_goal_line_x=own_goal_line_x,
         )
+    if config.keep_ball_in_bounds and isinstance(intent, IntentDribble):
+        target = _keep_carried_ball_in_field(
+            target, snapshot.ball_position, config
+        )
 
     if target == intent.target_pos:
         return intent
     return replace(intent, target_pos=target)
+
+
+def _keep_carried_ball_in_field(
+    target: tuple[float, float],
+    ball: tuple[float, float],
+    config: MovementSafetyConfig,
+) -> tuple[float, float]:
+    """Keep a dribbled ball inside the field lines.
+
+    A robot pushes the ball roughly ``ball_carry_margin`` ahead of itself, so a
+    dribble target on the edge would carry the ball out. Aim the dribble no
+    further out than a boundary inset by ``field_margin + ball_carry_margin`` (so
+    the ball stays in). When the ball is already on the verge of a line, steer the
+    dribble a solid ``ball_save_margin`` back toward the interior on that axis —
+    pull it in instead of following it out.
+    """
+    carry = max(0.0, config.ball_carry_margin)
+    margin = max(0.0, config.field_margin)
+    lim_x = max(0.0, config.field_length * 0.5 - margin - carry)
+    lim_y = max(0.0, config.field_width * 0.5 - margin - carry)
+    save = max(0.0, config.ball_save_margin)
+
+    tx, ty = float(target[0]), float(target[1])
+    bx, by = ball
+
+    # Verge save: the ball is already past the safe interior on an axis → aim
+    # decisively back inside on that axis rather than chasing it over the line.
+    if bx > lim_x:
+        tx = min(tx, lim_x - save)
+    elif bx < -lim_x:
+        tx = max(tx, -lim_x + save)
+    if by > lim_y:
+        ty = min(ty, lim_y - save)
+    elif by < -lim_y:
+        ty = max(ty, -lim_y + save)
+
+    # Preventive clamp: never aim a carried ball past the safe interior.
+    tx = _clamp(tx, -lim_x, lim_x)
+    ty = _clamp(ty, -lim_y, lim_y)
+    return (tx, ty)
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

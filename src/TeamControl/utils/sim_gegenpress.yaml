@@ -60,6 +60,13 @@ movement_safety:
   keep_non_goalies_out_of_goalie_box: true
   avoid_ball_touch_in_opponent_defense_area: true
 
+  # Keep a dribbled ball inside the lines: aim dribbles inside a boundary inset
+  # by field_margin + ball_carry_margin (the ball leads the robot), and steer a
+  # ball on the verge of a line back inside by ball_save_margin.
+  keep_ball_in_bounds: true
+  ball_carry_margin: 0.15
+  ball_save_margin: 0.30
+
   field_length: 9.0
   field_width: 6.0
   field_margin: 0.05

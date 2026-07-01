@@ -6,9 +6,11 @@ Topology (from docs/goalie_node.png):
     ├── LookAtBall          → writes IntentOrient(target_orientation=angle_to_ball)
     ├── GoalieBallSequence (Sequence)
     │   ├── GetBallHistory  → stores snap.ball_position as single-frame history
-    │   └── DoBallTrajectory → v1: sets predicted_intercept to NEUTRAL_GOAL_POSITION
+    │   └── DoBallTrajectory → predictive: extrapolates ball_velocity to the goal
+    │                          line and sets predicted_intercept to the crossing
+    │                          point when a shot is incoming, else tracks ball y
     └── GoToTarget          → positions normally, or rushes/controls/clears
-        [IsBallComing stub: always FAILURE — goalie stays at neutral position]
+        [IsBallComing: unused stub — GoToTarget reads predicted_intercept/_rushing]
 
 Design notes
 ------------
@@ -19,9 +21,12 @@ Design notes
   ``_blackboard_ref`` protocol (one-element list). Nodes write
   ``_blackboard_ref[0].current_intent`` to produce their output.
 - No raw motor commands are produced anywhere in this module.
-- v1 simplification: DoBallTrajectory tracks ball y on the goal line unless
-  the ball is inside the goalie box, then the goalie rushes to clear it.
-  IsBallComing is stubbed to always FAILURE.
+- DoBallTrajectory is predictive: when the ball is moving toward our goal above
+  a speed threshold it extrapolates the ball's velocity to the goal line and
+  stands at the predicted crossing point; otherwise it tracks the ball's y on
+  the line. If the ball is inside the goalie box it rushes out to clear it.
+  Prediction needs a real ball velocity in the snapshot (see adapter). The
+  IsBallComing node is an unused stub kept for the historical topology.
 """
 from __future__ import annotations
 
@@ -62,6 +67,16 @@ FIELD_HALF_X: float = 4.5
 GOALIE_BOX_DEPTH: float = 1.0
 GOALIE_BOX_HALF_WIDTH: float = 1.0
 GOALIE_BOX_MARGIN: float = 0.05
+
+# --- Predictive shot-stopping ------------------------------------------------
+# When the ball is moving toward our goal fast enough, extrapolate its
+# straight-line path to the goal line and stand where it will CROSS, instead of
+# chasing its current y (a reactive keeper arrives late on a ball struck across
+# the mouth). Needs a real ball velocity in the snapshot; below these thresholds
+# (slow/receding ball, or measurement noise) the keeper falls back to tracking y.
+SHOT_SPEED_MIN: float = 0.4            # m/s — ignore slow dribbles / velocity noise
+SHOT_TOWARD_GOAL_VX: float = 0.05      # m/s — min velocity component toward our goal
+GOALIE_PREDICT_HORIZON_S: float = 2.0  # s — only commit to a crossing within this time
 
 
 # -----------------------------------------------------------------------
@@ -119,14 +134,20 @@ class GetBallHistory(py_trees.behaviour.Behaviour):
 
 
 class DoBallTrajectory(py_trees.behaviour.Behaviour):
-    """Compute predicted intercept point for the goalie.
+    """Compute the goalie's intercept point — predictive shot-stopping.
 
-    Tracks the ball's y-position on the goal line, clamped to the goal mouth.
-    Stores the result in tree.predicted_intercept.
+    Priority:
+      1. Ball inside the goalie box and close → rush out and intercept the ball.
+      2. Ball moving toward our goal above ``SHOT_SPEED_MIN`` → extrapolate its
+         velocity to the goal line and stand at the predicted CROSSING point.
+      3. Otherwise → track the ball's current y on the goal line.
+
+    All positions are clamped to the goal mouth. Result stored in
+    ``tree.predicted_intercept``; ``tree._is_shot_incoming`` flags case 2.
     SUCCESS → always.
     """
 
-    GOAL_HALF_WIDTH: float = 1.0  # clamp ball y to stay within goal mouth
+    GOAL_HALF_WIDTH: float = 1.0  # clamp y to stay within goal mouth
 
     def __init__(self, tree_ref: GoalieTree) -> None:
         super().__init__("DoBallTrajectory")
@@ -137,21 +158,41 @@ class DoBallTrajectory(py_trees.behaviour.Behaviour):
         if snap is None:
             self._tree.predicted_intercept = self._tree._neutral_goal_position
             self._tree._rushing = False
+            self._tree._is_shot_incoming = False
             return py_trees.common.Status.SUCCESS
 
         goal_x = self._tree._neutral_goal_position[0]
         ball = snap.ball_position
+        vx, vy = snap.ball_velocity
+        ball_speed = math.hypot(vx, vy)
         dist_ball_to_goal = math.hypot(ball[0] - goal_x, ball[1])
 
+        # 1. Ball dangerously close and in the box — rush out and intercept it.
         if dist_ball_to_goal < RUSH_DIST and _inside_goalie_box(self._tree, ball):
-            # Ball is dangerously close — rush out and intercept
             self._tree.predicted_intercept = ball
             self._tree._rushing = True
-        else:
-            # Track ball y on goal line
-            clamped_y = max(-self.GOAL_HALF_WIDTH, min(self.GOAL_HALF_WIDTH, ball[1]))
-            self._tree.predicted_intercept = (goal_x, clamped_y)
-            self._tree._rushing = False
+            self._tree._is_shot_incoming = False
+            return py_trees.common.Status.SUCCESS
+
+        # 2. Predictive shot-stop: ball travelling toward our goal → stand where
+        # its straight-line path will cross the goal line.
+        goal_side = 1.0 if goal_x >= 0.0 else -1.0
+        approaching = vx * goal_side > SHOT_TOWARD_GOAL_VX
+        if ball_speed >= SHOT_SPEED_MIN and approaching:
+            t = (goal_x - ball[0]) / vx
+            if 0.0 < t <= GOALIE_PREDICT_HORIZON_S:
+                pred_y = ball[1] + vy * t
+                clamped_y = max(-self.GOAL_HALF_WIDTH, min(self.GOAL_HALF_WIDTH, pred_y))
+                self._tree.predicted_intercept = (goal_x, clamped_y)
+                self._tree._rushing = False
+                self._tree._is_shot_incoming = True
+                return py_trees.common.Status.SUCCESS
+
+        # 3. No shot — track the ball's y on the goal line.
+        clamped_y = max(-self.GOAL_HALF_WIDTH, min(self.GOAL_HALF_WIDTH, ball[1]))
+        self._tree.predicted_intercept = (goal_x, clamped_y)
+        self._tree._rushing = False
+        self._tree._is_shot_incoming = False
         return py_trees.common.Status.SUCCESS
 
 
@@ -239,7 +280,9 @@ class GoToTarget(py_trees.behaviour.Behaviour):
             max_speed=GOALIE_TRACK_SPEED,
             speed_gain=GOALIE_TRACK_GAIN,
         )
-        bb.intent_source = "GoaliePosition"
+        bb.intent_source = (
+            "GoalieInterceptShot" if self._tree._is_shot_incoming else "GoaliePosition"
+        )
         return py_trees.common.Status.SUCCESS
 
 
@@ -271,6 +314,9 @@ class GoalieTree:
         self.ball_history: tuple[float, float] | None = None
         self._facing_angle: float = 0.0
         self._rushing: bool = False
+        # Set by DoBallTrajectory when it positions at a predicted shot crossing
+        # (vs. tracking the ball's current y). Used for the intent source label.
+        self._is_shot_incoming: bool = False
         self._clear_target: tuple[float, float] = (-neutral_x, 0.0)
         # Build tree and expose IsBallComing node for testability
         self.is_ball_coming_node = IsBallComing(self)
