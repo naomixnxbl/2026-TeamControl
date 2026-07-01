@@ -61,6 +61,7 @@ from TeamControl.bt.contracts.intent import (
     IntentPass,
 )
 from TeamControl.bt.contracts.snapshot import Snapshot
+from TeamControl.bt.tactics.line_of_sight import evaluate_line_of_sight
 
 BT_TUNING_FILENAME = "bt_tuning.yaml"
 LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
@@ -120,6 +121,43 @@ class SupporterBehaviorConfig:
     # openness score. Default 0.0 keeps the original openness-only scoring with
     # a goal-distance tie-break, so behaviour is unchanged.
     reposition_goal_weight: float = 0.0
+    # Bias repositioning toward the ball carrier. Adds
+    # reposition_ball_proximity_weight * (1 - dist_to_ball / max_field_dist)
+    # to each cell's score, peaking at the ball position and falling off
+    # linearly with distance. Raise to ~1.5 to make proximity to the ball the
+    # dominant factor, keeping supporters in pass-receiving range.
+    reposition_ball_proximity_weight: float = 0.0
+    # Hard cap on how far (m) from the ball a supporter will consider
+    # repositioning. Cells beyond this are skipped entirely.
+    # 0.0 disables the check. Default 3.5 keeps supporters in passing range.
+    reposition_max_ball_distance: float = 0.0
+    # Corridor radius (m) used when scoring line-of-sight quality from the ball
+    # to each candidate cell. Closest obstacle within this distance sets the
+    # los_score; obstacles outside it contribute nothing.
+    reposition_los_score_radius: float = 0.30
+    # Weight for the LOS quality score. 0.0 disables it (original behaviour).
+    # Raise to ~1.0 to strongly prefer cells with a clear pass corridor from
+    # the ball carrier.
+    reposition_los_weight: float = 0.0
+
+    # --- Pass target selection weights (FindOpenTeammate) ---
+    # Minimum corridor half-width (m) for a pass lane to be considered open.
+    # Lanes with any obstacle closer than this are hard-rejected.
+    pass_lane_clearance: float = 0.15
+    # Wider scan radius (m) used to score lane quality continuously.
+    # Closest obstacle within this radius sets lane_quality in [0, 1].
+    pass_lane_score_radius: float = 0.40
+    # Ideal pass distance in metres. Distance score peaks here and falls off.
+    pass_ideal_distance: float = 1.8
+    # Half-window (m) for distance scoring. Score reaches 0 at ±this from ideal.
+    pass_distance_window: float = 2.0
+    # Receiver openness normalization: nearest opponent at this distance → score 1.
+    pass_openness_radius: float = 1.5
+    # Scoring weights — should sum to 1.0.
+    pass_lane_weight: float = 0.30      # how open the pass corridor is
+    pass_distance_weight: float = 0.40  # how close to ideal pass range
+    pass_openness_weight: float = 0.20  # how much space the receiver has
+    pass_goal_weight: float = 0.10      # how close receiver is to opponent goal
 
 
 def load_supporter_behavior_config(
@@ -315,38 +353,78 @@ class FindOpenTeammate(py_trees.behaviour.Behaviour):
         best_pos = None
         best_score = -1.0
         gx, gy = self._tree.goal_position
-        config = self._tree.behavior_config
+        cfg = self._tree.behavior_config
+        ball_pos = snap.ball_position
 
         for r in snap.own_robots:
             if r.robot_id == GOALIE_ID or r.robot_id == bb.robot_id:
                 continue
 
-            dist_to_goal = math.hypot(r.position[0] - gx, r.position[1] - gy)
-            goal_proximity = 1.0 - (dist_to_goal / config.max_field_dist)
+            # Build obstacle list: all robots except passer and this candidate.
+            obstacles = list(snap.enemy_robots) + [
+                other for other in snap.own_robots
+                if other.robot_id not in (bb.robot_id, r.robot_id)
+            ]
 
-            if r.robot_id == config.attacker_id:
-                score = config.attacker_pass_bonus * (
-                    1.0 + goal_proximity * config.goal_proximity_weight
+            # Evaluate lane with a wider radius to get a continuous quality score.
+            los = evaluate_line_of_sight(
+                ball_pos, r.position, obstacles,
+                clearance=cfg.pass_lane_score_radius,
+            )
+            # Hard filter: reject if any obstacle is within the minimum corridor.
+            if los.blockers and los.blockers[0].distance_to_line < cfg.pass_lane_clearance:
+                continue
+            # Lane quality: 1.0 when perfectly clear, falling off as obstacles
+            # approach the minimum corridor.
+            if los.blockers:
+                lane_quality = min(
+                    1.0,
+                    los.blockers[0].distance_to_line / cfg.pass_lane_score_radius,
                 )
             else:
-                if snap.enemy_robots:
-                    min_opp_dist = min(
-                        math.hypot(r.position[0] - opp.position[0],
-                                   r.position[1] - opp.position[1])
-                        for opp in snap.enemy_robots
-                    )
-                else:
-                    min_opp_dist = float("inf")
-                score = min_opp_dist * (
-                    1.0 + goal_proximity * config.goal_proximity_weight
+                lane_quality = 1.0
+
+            # Distance score: peaks at ideal pass distance, falls off either side.
+            pass_dist = math.hypot(
+                r.position[0] - ball_pos[0],
+                r.position[1] - ball_pos[1],
+            )
+            dist_score = max(
+                0.0,
+                1.0 - abs(pass_dist - cfg.pass_ideal_distance) / cfg.pass_distance_window,
+            )
+
+            # Receiver openness: how far the nearest opponent is (normalized).
+            if snap.enemy_robots:
+                min_opp_dist = min(
+                    math.hypot(r.position[0] - opp.position[0], r.position[1] - opp.position[1])
+                    for opp in snap.enemy_robots
                 )
+                openness = min(1.0, min_opp_dist / cfg.pass_openness_radius)
+            else:
+                openness = 1.0
+
+            # Goal proximity: how close the receiver is to the opponent goal.
+            dist_to_goal = math.hypot(r.position[0] - gx, r.position[1] - gy)
+            goal_proximity = 1.0 - min(1.0, dist_to_goal / cfg.max_field_dist)
+
+            score = (
+                cfg.pass_lane_weight     * lane_quality
+                + cfg.pass_distance_weight * dist_score
+                + cfg.pass_openness_weight * openness
+                + cfg.pass_goal_weight     * goal_proximity
+            )
+
+            # Attacker gets a bonus to prefer feeding the ball-carrier role.
+            if r.robot_id == cfg.attacker_id:
+                score *= cfg.attacker_pass_bonus
 
             if score > best_score:
                 best_score = score
                 best_id = r.robot_id
                 best_pos = r.position
 
-        if best_id is None or best_score < config.marked_threshold:
+        if best_id is None or best_score < cfg.marked_threshold:
             return py_trees.common.Status.FAILURE
 
         self._tree._pass_target_id = best_id
@@ -554,14 +632,28 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
         gx, gy = t.goal_position
         bx, by = snap.ball_position
 
+        # Precompute obstacle list for LOS scoring (all robots except self).
+        los_obstacles = list(snap.enemy_robots) + [
+            r for r in snap.own_robots if r.robot_id != bb.robot_id
+        ]
+        los_enabled = cfg.reposition_los_weight > 0.0
+
         cx = t.repo_x_min
         while cx <= t.repo_x_max:
             cy = t.repo_y_min
             while cy <= t.repo_y_max:
-                # Skip cells too near the ball (anti-crowding). Default 0.0
-                # disables the check so all cells stay in play.
+                dist_to_ball = math.hypot(cx - bx, cy - by)
+
+                # Hard filter: too close to ball (anti-crowding).
                 if cfg.reposition_min_ball_distance > 0.0 and (
-                    math.hypot(cx - bx, cy - by) < cfg.reposition_min_ball_distance
+                    dist_to_ball < cfg.reposition_min_ball_distance
+                ):
+                    cy += cfg.grid_step
+                    continue
+
+                # Hard filter: too far from ball to be a viable pass receiver.
+                if cfg.reposition_max_ball_distance > 0.0 and (
+                    dist_to_ball > cfg.reposition_max_ball_distance
                 ):
                     cy += cfg.grid_step
                     continue
@@ -583,10 +675,30 @@ class RepositionToSpace(py_trees.behaviour.Behaviour):
                         own_score = d
 
                 goal_dist = math.hypot(cx - gx, cy - gy)
-                # Openness, optionally biased toward the opponent goal. The goal
-                # term is 0 at the default weight, leaving the original score.
+
+                # LOS quality: how open is the pass corridor from the ball to
+                # this cell? 1.0 = clear, falling off as obstacles approach the
+                # corridor. Disabled (0.0 weight) by default.
+                if los_enabled:
+                    los = evaluate_line_of_sight(
+                        (bx, by), (cx, cy), los_obstacles,
+                        clearance=cfg.reposition_los_score_radius,
+                    )
+                    los_score = (
+                        1.0 if not los.blockers
+                        else min(1.0, los.blockers[0].distance_to_line
+                                 / cfg.reposition_los_score_radius)
+                    )
+                else:
+                    los_score = 0.0
+
                 cell_score = min(opp_score, own_score) + (
                     cfg.reposition_goal_weight * max(0.0, cfg.max_field_dist - goal_dist)
+                ) + (
+                    cfg.reposition_ball_proximity_weight
+                    * max(0.0, 1.0 - dist_to_ball / cfg.max_field_dist)
+                ) + (
+                    cfg.reposition_los_weight * los_score
                 )
 
                 if (cell_score > best_score

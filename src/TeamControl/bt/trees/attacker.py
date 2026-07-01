@@ -7,13 +7,16 @@ Topology:
     │   ├── HasBallControl
     │   └── PossessionAction (Selector)
     │       ├── ShootSequence (HasSettledPossession → HasClearShot → ShootAtGoal)
-    │       ├── PassSequence  (ShouldLookForPass → FindOpenPassTarget → …)
-    │       └── HoldPossession (dribble toward goal — the default)
+    │       ├── PassSequence  (FindOpenPassTarget → DribbleTowardPassTarget → PassToOpenTeammate)
+    │       └── HoldBall      (stay in place facing goal — accumulates possession ticks, no dribble)
     └── ChaseBall (always chase; throttles speed if not closest)
 
 Priority:
-    possession → shoot if settled+clear, pass if blocked/under pressure, else dribble
+    possession → shoot if settled+clear, else always look for a pass, else hold in place facing goal
     no possession → chase ball (throttled to CHASE_SLOW_SPEED if another robot is closer)
+
+Note: ShouldLookForPass gate is disabled so the attacker always tries to pass before holding.
+HoldPossession (dribble toward goal) is replaced by HoldBall (stationary, faces goal).
 
 Known bugs / areas for improvement
 -----------------------------------
@@ -170,6 +173,11 @@ class AttackerBehaviorConfig:
     press_crash_radius: float = PRESS_CRASH_RADIUS
     press_approach_speed: float = PRESS_APPROACH_SPEED
     press_possession_radius: float = PRESS_POSSESSION_RADIUS
+    # Voronoi-nearest press: attacker dribbles toward the opponent carrier only
+    # when it is the closest own robot (excl. goalie) to that carrier AND within
+    # this distance.  This is the sole scenario where the attacker uses
+    # IntentDribble.  Set to 0 to disable.
+    carrier_press_max_distance_m: float = 2.0
     # Counter-attack release (default OFF → behaviour unchanged). When on, an
     # attacker holding the ball in OUR half looks first for the most direct
     # forward pass to a teammate already in the opponent half, instead of
@@ -351,12 +359,17 @@ class HasSettledPossession(py_trees.behaviour.Behaviour):
 
 
 class HasClearShot(py_trees.behaviour.Behaviour):
-    """Succeed when shooting is safe: clear corridor, close enough, and facing goal.
+    """Succeed when the robot can fire immediately without repositioning.
 
-    Three checks:
-      1. No opponent within ``SHOT_CORRIDOR_RADIUS`` of the ball→goal line.
+    Selects the best goal mouth point satisfying ALL three constraints:
+      1. Corridor clear — no opponent within ``SHOT_CORRIDOR_RADIUS`` of ball→point.
       2. Robot is within ``SHOOT_DIST_THRESHOLD`` of the goal.
-      3. Robot is facing the goal within ``SHOT_HEADING_TOL``.
+      3. Ball→point angle is within ``shot_heading_tol`` of the robot's heading,
+         matching the adapter's ``KICK_ALIGN_TOL`` gate in ``_kick_pose_ready``.
+
+    Constraint 3 is critical: without it the BT picks a far-post aim point the
+    adapter cannot fire at from the current orientation, causing ``_kick_motion_target``
+    to issue a repositioning move that breaks possession and prevents the kick.
     """
 
     def __init__(self, tree_ref: AttackerTree) -> None:
@@ -382,26 +395,13 @@ class HasClearShot(py_trees.behaviour.Behaviour):
         if dist_to_goal > config.shoot_dist_threshold:
             return py_trees.common.Status.FAILURE
 
-        # Aim at the most open part of the net (away from the keeper), not always
-        # the centre. ShootAtGoal kicks at this same point.
-        ball = snap.ball_position
-        target = _best_goal_target(snap, goal, config.shot_corridor_radius)
-        self._tree._shot_target = target
-
-        angle_to_target = math.atan2(
-            target[1] - robot.position[1], target[0] - robot.position[0]
+        target = _alignable_shot_target(
+            snap, robot, goal, config.shot_corridor_radius, config.shot_heading_tol
         )
-        heading_err = (angle_to_target - robot.orientation + math.pi) % (2 * math.pi) - math.pi
-        if abs(heading_err) > config.shot_heading_tol:
+        if target is None:
             return py_trees.common.Status.FAILURE
 
-        for opp in snap.enemy_robots:
-            if (
-                _point_to_segment_dist(opp.position, ball, target)
-                <= config.shot_corridor_radius
-            ):
-                return py_trees.common.Status.FAILURE
-
+        self._tree._shot_target = target
         return py_trees.common.Status.SUCCESS
 
 
@@ -455,6 +455,68 @@ class ChaseBall(py_trees.behaviour.Behaviour):
             if d < my_dist or (d == my_dist and r.robot_id < my_id):
                 return False
         return True
+
+
+class IsNearestToOpponentCarrier(py_trees.behaviour.Behaviour):
+    """Succeed when an opponent controls the ball and this robot is the
+    nearest own robot (excluding goalie) to that carrier — the Voronoi-nearest
+    robot to the ball carrier.  This is the gate for the press-steal dribble.
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("IsNearestToOpponentCarrier")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        config = self._tree.behavior_config
+        carrier = _opponent_controlling_ball(snap, config.press_possession_radius)
+        if carrier is None:
+            return py_trees.common.Status.FAILURE
+        robot = _find_robot(snap, bb.robot_id)
+        if robot is None:
+            return py_trees.common.Status.FAILURE
+        my_dist = math.hypot(
+            robot.position[0] - carrier.position[0],
+            robot.position[1] - carrier.position[1],
+        )
+        if my_dist > config.carrier_press_max_distance_m:
+            return py_trees.common.Status.FAILURE
+        for r in snap.own_robots:
+            if r.robot_id in (GOALIE_ID, bb.robot_id):
+                continue
+            d = math.hypot(
+                r.position[0] - carrier.position[0],
+                r.position[1] - carrier.position[1],
+            )
+            if d < my_dist:
+                return py_trees.common.Status.FAILURE
+        return py_trees.common.Status.SUCCESS
+
+
+class PressOpponent(py_trees.behaviour.Behaviour):
+    """Close on the opponent ball carrier with the dribbler active to steal.
+
+    This is the ONLY case where the attacker initiates an IntentDribble.
+    It fires only when ``IsNearestToOpponentCarrier`` succeeds, ensuring
+    dribbling is reserved for the deliberate press-steal scenario.
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("PressOpponent")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        snap = self._tree._snapshot
+        bb = self._tree._blackboard_ref[0]
+        if snap is None or bb is None:
+            return py_trees.common.Status.FAILURE
+        bb.current_intent = IntentDribble(target_pos=snap.ball_position)
+        bb.intent_source = "PressOpponent"
+        return py_trees.common.Status.SUCCESS
 
 
 class IsBallInRangeOrMove(py_trees.behaviour.Behaviour):
@@ -667,6 +729,33 @@ class HoldPossession(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
         bb.current_intent = IntentDribble(target_pos=self._tree.goal_position)
         bb.intent_source = "HoldPossession"
+        return py_trees.common.Status.SUCCESS
+
+
+class HoldBall(py_trees.behaviour.Behaviour):
+    """Retain the ball while rotating toward the goal, waiting for a shot or pass.
+
+    Uses IntentDribble so the dribble skill's state machine keeps the ball on
+    the kicker plate (maintaining HasBallControl's heading check) while turning
+    toward the goal at zero forward velocity. This lets possession ticks
+    accumulate toward shot_settle_ticks without the robot advancing.
+
+    Why not IntentMove(angle_to_goal): that rotates the robot toward the goal
+    directly, but HasBallControl requires the ball to stay within
+    possession_heading_tol of the heading. If ball direction ≠ goal direction
+    the heading check fails, ticks reset, and ShootSequence never fires.
+    """
+
+    def __init__(self, tree_ref: AttackerTree) -> None:
+        super().__init__("HoldBall")
+        self._tree = tree_ref
+
+    def update(self) -> py_trees.common.Status:
+        bb = self._tree._blackboard_ref[0]
+        if bb is None:
+            return py_trees.common.Status.FAILURE
+        bb.current_intent = IntentDribble(target_pos=self._tree.goal_position)
+        bb.intent_source = "HoldBall"
         return py_trees.common.Status.SUCCESS
 
 
@@ -960,26 +1049,25 @@ class AttackerTree:
         # ├── PossessionSequence (Sequence)
         # │   ├── HasBallControl
         # │   └── PossessionAction (Selector)
-        # │       ├── ShootSequence (HasSettledPossession → HasClearShot → ShootAtGoal)
-        # │       ├── PassSequence  (ShouldLookForPass → FindOpenPassTarget → …)
-        # │       └── HoldPossession (dribble toward goal — the default)
-        # └── ChaseBall (always chase; throttles to CHASE_SLOW_SPEED if not closest)
+        # │       ├── ShootSequence (HasClearShot → ShootAtGoal)   ← ALWAYS first
+        # │       └── PassSequence  (FindOpenPassTarget → DribbleTowardPassTarget → PassToOpenTeammate)
+        # │           [no dribble fallback — PossessionAction fails → falls to no-ball path]
+        # ├── PressContainment [only when press_enabled]
+        # ├── PressOpponentSequence (Sequence)                      ← ONLY dribble case
+        # │   ├── IsNearestToOpponentCarrier  (Voronoi-nearest to carrier)
+        # │   └── PressOpponent               (IntentDribble toward ball to steal)
+        # └── ChaseBall
         #
-        # NOTE: WaitNearGoal / IsBallInOwnHalf branch was removed.
-        # When it was active, heuristic role-swap created a feedback loop:
-        # the robot nearest the ball would be promoted to ATTACKER, immediately
-        # U-turn toward the opponent half (WaitNearGoal), stop being closest,
-        # lose the role, and the next-nearest robot repeated the cycle — robots
-        # endlessly took turns approaching the ball without ever picking it up.
-        # Removing the branch makes the attacker chase regardless of which half
-        # the ball is in; ChaseBall's closest-robot check already throttles
-        # non-primary chasers so the team doesn't crowd the ball.
+        # Shooting is always evaluated first. HasClearShot checks distance and
+        # corridor only — the adapter's _kick_motion_target handles alignment and
+        # fires the kick when _kick_pose_ready passes (no heading gate in BT).
+        # IntentDribble is never used as a possession fallback; it is reserved
+        # exclusively for PressOpponent (steal from the Voronoi-nearest carrier).
 
         shoot_seq = py_trees.composites.Sequence(
             name="ShootSequence", memory=False
         )
         shoot_seq.add_children([
-            HasSettledPossession(self),
             HasClearShot(self),
             ShootAtGoal(self),
         ])
@@ -988,7 +1076,6 @@ class AttackerTree:
             name="PassSequence", memory=False
         )
         pass_seq.add_children([
-            ShouldLookForPass(self),
             FindOpenPassTarget(self),
             DribbleTowardPassTarget(self),
             PassToOpenTeammate(self),
@@ -996,9 +1083,8 @@ class AttackerTree:
 
         # Forward-release branch (counter_attack): advance with minimal passes.
         # Prefer a direct forward pass to the most-advanced open teammate; if
-        # there's no clean forward outlet, FindForwardOutlet fails and we fall
-        # through to HoldPossession (dribble forward). Reuses dribble-to-face +
-        # pass nodes (they read _pass_target_*).
+        # there's no clean forward outlet, FindForwardOutlet fails and possession
+        # falls back to ChaseBall (no dribble fallback in any mode).
         counter_seq = py_trees.composites.Sequence(
             name="CounterReleaseSequence", memory=False
         )
@@ -1013,20 +1099,9 @@ class AttackerTree:
             name="PossessionAction", memory=False
         )
         if self.behavior_config.counter_attack:
-            # Active attack: shoot a good spot → minimal forward pass to advance
-            # / keep it forward → else dribble toward goal. No backward/under-
-            # pressure passes — dribbling is the fallback when no good pass.
-            possession_action.add_children([
-                shoot_seq,
-                counter_seq,
-                HoldPossession(self),
-            ])
+            possession_action.add_children([shoot_seq, counter_seq])
         else:
-            possession_action.add_children([
-                shoot_seq,
-                pass_seq,
-                HoldPossession(self),
-            ])
+            possession_action.add_children([shoot_seq, pass_seq])
 
         possession_seq = py_trees.composites.Sequence(
             name="PossessionSequence", memory=False
@@ -1036,15 +1111,23 @@ class AttackerTree:
             possession_action,
         ])
 
+        # Press-steal: dribble toward carrier only when Voronoi-nearest to them.
+        # This is the sole IntentDribble case in the attacker tree.
+        press_carrier_seq = py_trees.composites.Sequence(
+            name="PressOpponentSequence", memory=False
+        )
+        press_carrier_seq.add_children([
+            IsNearestToOpponentCarrier(self),
+            PressOpponent(self),
+        ])
+
         root = py_trees.composites.Selector(
             name="AttackingSelector", memory=False
         )
         children = [possession_seq]
-        # GegenPressing: when enabled, contain the carrier before falling back to
-        # chasing. Only inserted when press_enabled so the default topology — and
-        # the tests asserting it — stay exactly as before.
         if self.behavior_config.press_enabled:
             children.append(PressContainment(self))
+        children.append(press_carrier_seq)
         children.append(ChaseBall(self))
         root.add_children(children)
         return root
