@@ -39,6 +39,7 @@ class Receiver(BaseSocket):
             try:
                 # listen
                 message, addr = self.sock.recvfrom(self.buffer_size)
+                # print(message)
                 # decode
                 decoded_message = self._decode(message)
                 # update variable

@@ -87,10 +87,10 @@ gc:
 network:
   robot_ip: 0.0.0.0
   vision_ip: 0.0.0.0
-use_grSim_vision: true
+use_grSim_vision: false
 us_yellow: true
 us_positive: true
-send_to_grSim: true
+send_to_grSim: false
 record_world_snapshots: false
 team_name: TurtleRabbit
 record_world_snapshot_dir: match_replays
