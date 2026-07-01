@@ -31,13 +31,9 @@ from TeamControl.ui.theme import (
 )
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.utils.yaml_config import Config
-from TeamControl.world.transform_cords import world2robot
 from TeamControl.skills.skills import BEHAVIOURS, BEHAVIOURS_BY_ID, Behaviour, reset_robot_state
-from TeamControl.bt.adapter import build_snapshot_from_world_model
-from TeamControl.bt.contracts.intent import (
-    IntentDribble, IntentKick, IntentMove, IntentOrient, IntentPass, IntentReceive,
-)
-from TeamControl.robot.Movement import get_movement
+from TeamControl.skills._shared import set_attack_sign
+from TeamControl.bt.adapter import build_snapshot_from_world_model, MotionExecutor
 
 
 _FALLBACK_LETTERS = [chr(ord("A") + i) for i in range(16)]  # used if ipconfig.yaml can't be read
@@ -98,6 +94,13 @@ class SkillLabPage(QWidget):
         self._target_point_mm: tuple[float, float] | None = None
         self._behaviour: Behaviour | None = None
         self._running = False
+        # Attack direction (+1 toward +x, -1 toward -x) for the running team.
+        # Set from config on Run so skills attack/defend the correct goal.
+        self._attack_sign: float = 1.0
+        # PD-backed motion layer — the same one the behaviour trees use, so the
+        # kicker actually fires (drive behind ball → align → strike on contact)
+        # and the approach is snappy. Recreated on each Run for fresh PD state.
+        self._motion_executor = MotionExecutor()
 
         # Robots are keyed by letter (A, B, C…) in ipconfig.yaml, mapping to
         # the numeric shell ID the dispatcher/RobotCommand actually use.
@@ -423,6 +426,23 @@ class SkillLabPage(QWidget):
         shell_id = self._robots_by_team.get(team_name, {}).get(letter, 0)
         return shell_id, is_yellow
 
+    def _attack_sign_for(self, is_yellow: bool) -> float:
+        """Attack direction (+1 toward +x, -1 toward -x) for a team, from config.
+
+        Reads us_yellow / us_positive from ipconfig.yaml. Our own team's side is
+        us_positive; the other team mirrors it. us_positive True means own goal
+        at +x, so that team attacks toward -x (sign -1).
+        """
+        try:
+            cfg = Config()
+            us_yellow = bool(cfg.us_yellow)
+            us_positive = bool(cfg.us_positive)
+        except Exception:
+            # Fall back to the shipped default (yellow, us_positive → attack -x).
+            us_yellow, us_positive = True, True
+        team_us_positive = us_positive if (is_yellow == us_yellow) else not us_positive
+        return -1.0 if team_us_positive else 1.0
+
     def _robot_label(self, is_yellow: bool, shell_id: int) -> str:
         team_name = "Yellow" if is_yellow else "Blue"
         letter = self._letter_for_shell_id(team_name, shell_id)
@@ -523,8 +543,9 @@ class SkillLabPage(QWidget):
 
         rid, is_yellow = self._get_rid_yellow()
         label = self._robot_label(is_yellow, rid)
+        self._attack_sign = self._attack_sign_for(is_yellow)
         reset_robot_state(rid)
-        get_movement(rid, is_yellow=is_yellow).reset()
+        self._motion_executor = MotionExecutor()
         self._engine.set_field_manual_control(rid, is_yellow, True)
         self._running = True
         self._timer.start()
@@ -537,7 +558,6 @@ class SkillLabPage(QWidget):
         self._timer.stop()
         self._running = False
         rid, is_yellow = self._get_rid_yellow()
-        get_movement(rid, is_yellow=is_yellow).reset()
         if self._engine and self._engine.is_running:
             cmd = RobotCommand(robot_id=rid, isYellow=is_yellow)
             self._engine.send_robot_command(cmd, runtime=0.05)
@@ -578,6 +598,7 @@ class SkillLabPage(QWidget):
             return
 
         rid, is_yellow = self._get_rid_yellow()
+        set_attack_sign(self._attack_sign)
         snap = build_snapshot_from_world_model(self._engine._wm, is_yellow)
         if snap is None:
             self._readout_label.setText("No vision frame yet")
@@ -605,59 +626,18 @@ class SkillLabPage(QWidget):
         self._update_readout(snap, robot, intent, cmd)
 
     def _intent_to_command(self, intent, snap, robot, rid: int, is_yellow: bool) -> RobotCommand | None:
-        """Intent -> RobotCommand via robot/Movement.py (no BT v2 PD-controller pipeline).
+        """Intent -> RobotCommand via the BT's PD-backed ``MotionExecutor``.
 
-        Mirrors the pattern already used by ``robot/goal.py``: world-frame
-        positions in mm, ``RobotMovement.velocity_to_target`` handles the
-        world->robot frame rotation internally.
+        Reuses the exact motion layer the behaviour trees use: a per-robot PD
+        heading controller, world→body velocity rotation, and the kick/dribble
+        logic. For a kick/pass ``_kick_motion_target`` drives behind the ball,
+        aligns, and ``_kick_pose_ready`` fires the kicker on contact (reachable
+        0.18 m / 0.22 rad tolerances). The old robot/Movement.py path never
+        reached that pose, so the kicker never triggered and the approach crawled.
         """
         if robot is None:
             return None
-        movement = get_movement(rid, is_yellow=is_yellow)
-        robot_pos_mm = (robot.position[0] * 1000.0, robot.position[1] * 1000.0, robot.orientation)
-
-        if isinstance(intent, IntentMove):
-            target_mm = (intent.target_pos[0] * 1000.0, intent.target_pos[1] * 1000.0)
-            turning_target = None
-            if intent.target_orientation is not None:
-                theta = intent.target_orientation
-                turning_target = (robot_pos_mm[0] + 1000.0 * math.cos(theta),
-                                   robot_pos_mm[1] + 1000.0 * math.sin(theta))
-            vx, vy, w = movement.velocity_to_target(
-                robot_pos=robot_pos_mm, target=target_mm, turning_target=turning_target,
-                speed=intent.max_speed, stop_threshold=0.0, stay_in_field=True)
-            return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w, isYellow=is_yellow)
-
-        if isinstance(intent, (IntentKick, IntentPass)):
-            ball_mm = (snap.ball_position[0] * 1000.0, snap.ball_position[1] * 1000.0)
-            target_mm = (intent.target_pos[0] * 1000.0, intent.target_pos[1] * 1000.0)
-            vx, vy, w = movement.velocity_to_target(
-                robot_pos=robot_pos_mm, target=ball_mm, turning_target=target_mm,
-                stop_threshold=0.0, stay_in_field=True)
-            ball_rel = world2robot(robot_pos_mm, ball_mm)
-            dist_to_ball = math.hypot(ball_rel[0], ball_rel[1])
-            target_rel = world2robot(robot_pos_mm, target_mm)
-            angle_to_target = math.atan2(target_rel[1], target_rel[0])
-            kick = 1 if (dist_to_ball < 150.0 and abs(angle_to_target) < 0.2) else 0
-            return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w, kick=kick, isYellow=is_yellow)
-
-        if isinstance(intent, IntentDribble):
-            target_mm = (intent.target_pos[0] * 1000.0, intent.target_pos[1] * 1000.0)
-            vx, vy, w = movement.velocity_to_target(
-                robot_pos=robot_pos_mm, target=target_mm, turning_target=target_mm, stay_in_field=True)
-            return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w, dribble=1, isYellow=is_yellow)
-
-        if isinstance(intent, IntentOrient):
-            theta = intent.target_orientation
-            turn_point = (robot_pos_mm[0] + 1000.0 * math.cos(theta), robot_pos_mm[1] + 1000.0 * math.sin(theta))
-            vx, vy, w = movement.velocity_to_target(
-                robot_pos=robot_pos_mm, target=robot_pos_mm[:2], turning_target=turn_point, stay_in_field=False)
-            return RobotCommand(robot_id=rid, vx=vx, vy=vy, w=w, isYellow=is_yellow)
-
-        if isinstance(intent, IntentReceive):
-            return RobotCommand(robot_id=rid, isYellow=is_yellow)
-
-        return None
+        return self._motion_executor.resolve_command(intent, rid, snap, is_yellow)
 
     def _update_readout(self, snap, robot, intent, cmd: RobotCommand):
         lines = [f"intent: {intent.__class__.__name__}{getattr(intent, 'target_pos', '')}"]
@@ -705,22 +685,28 @@ class SkillLabPage(QWidget):
 
         team_name = self._chaotic_team_combo.currentText()
         is_yellow = (team_name == "Yellow")
+        self._attack_sign = self._attack_sign_for(is_yellow)
         goalie_letter = self._chaotic_goalie_combo.currentText()
         goalie_id = self._robots_by_team.get(team_name, {}).get(goalie_letter, 0)
         defender_letter = self._strategy_defender_combo.currentText()
         defender_id = self._robots_by_team.get(team_name, {}).get(defender_letter, -1)
 
+        # Gegenpress shape (skills are now side-aware + counter-attack aware):
         goalie_beh = BEHAVIOURS_BY_ID["goalie_intercept"]
         if mode == "attack":
-            # Possession: everyone shoots, goalie stays back
+            # Possession → counter-attack: field players move to the ball and
+            # release it forward (outlet pass in our half, open-goal shot in the
+            # enemy half via move_then_attack); goalie stays back.
             defender_beh = BEHAVIOURS_BY_ID["move_then_attack"]
             attacker_beh = BEHAVIOURS_BY_ID["move_then_attack"]
         else:
-            # No possession: attackers chase ball, defender blocks goal, goalie intercepts
+            # No possession → press: attackers hunt the ball (win it back), the
+            # nominated defender screens our goal mouth, goalie intercepts.
             defender_beh = BEHAVIOURS_BY_ID["defender_block"]
             attacker_beh = BEHAVIOURS_BY_ID["move_to_ball"]
 
         self._chaotic_robots = {}
+        self._motion_executor = MotionExecutor()
         for letter, shell_id in self._robots_by_team.get(team_name, {}).items():
             if shell_id == goalie_id:
                 beh = goalie_beh
@@ -729,7 +715,6 @@ class SkillLabPage(QWidget):
             else:
                 beh = attacker_beh
             reset_robot_state(shell_id)
-            get_movement(shell_id, is_yellow=is_yellow).reset()
             self._engine.set_field_manual_control(shell_id, is_yellow, True)
             self._chaotic_robots[shell_id] = (beh, is_yellow)
 
@@ -759,6 +744,7 @@ class SkillLabPage(QWidget):
         if not self._engine or self._engine._wm is None or not self._chaotic_robots:
             return
         first_yellow = next(iter(self._chaotic_robots.values()))[1]
+        set_attack_sign(self._attack_sign)
         snap = build_snapshot_from_world_model(self._engine._wm, first_yellow)
         if snap is None:
             return
