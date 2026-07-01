@@ -14,6 +14,44 @@ from TeamControl.world.field_config import FIELD_LENGTH_MM, GOAL_HALF_WIDTH_MM
 HALF_LEN_M: float = FIELD_LENGTH_MM / 2.0 / 1000.0
 GOAL_HW_M:  float = GOAL_HALF_WIDTH_MM / 1000.0
 
+# ── Attack direction (side-awareness) ─────────────────────────────────────────
+# +1.0 means we attack toward +x (opponent goal at +HALF_LEN_M, own goal at
+# -HALF_LEN_M); -1.0 flips it. The Skill Lab sets this per selected team from the
+# configured us_positive/us_yellow so every skill attacks/defends the correct
+# goal. Default +1.0 keeps the historical convention (and unit tests) unchanged.
+_ATTACK_SIGN: float = 1.0
+
+
+def set_attack_sign(sign: float) -> None:
+    """Set the global attack direction (+1 = attack +x, -1 = attack -x)."""
+    global _ATTACK_SIGN
+    _ATTACK_SIGN = 1.0 if sign >= 0 else -1.0
+
+
+def attack_sign() -> float:
+    """Current attack direction: +1 attacking +x, -1 attacking -x."""
+    return _ATTACK_SIGN
+
+
+def opp_goal() -> tuple[float, float]:
+    """Centre of the opponent goal we attack."""
+    return (_ATTACK_SIGN * HALF_LEN_M, 0.0)
+
+
+def own_goal() -> tuple[float, float]:
+    """Centre of our own goal we defend."""
+    return (-_ATTACK_SIGN * HALF_LEN_M, 0.0)
+
+
+def forward_progress(x: float) -> float:
+    """Signed progress of an x-coordinate toward the opponent goal (higher = further forward)."""
+    return x * _ATTACK_SIGN
+
+
+def in_own_half(x: float) -> bool:
+    """True when x is on our defensive half (the own-goal side of centre)."""
+    return x * _ATTACK_SIGN < 0.0
+
 # ── Movement tuning ───────────────────────────────────────────────────────────
 BALL_APPROACH_OFFSET_M:  float = 0.15
 FACE_BALL_TOLERANCE_RAD: float = 0.10
@@ -26,7 +64,13 @@ KICK_BEHIND_DIST_M:    float = 0.25
 KICK_APPROACH_TOL_M:   float = 0.07
 KICK_ALIGN_TOL_RAD:    float = 0.08
 KICK_STRIKE_SPEED_M_S: float = 0.6
-KICK_READY_DIST_M:     float = 0.05
+# Robot centre → ball centre distance at which the strike phase fires the kick.
+# The kicker plate sits at the robot's front, so the closest a robot centre can
+# get to the ball centre is ROBOT_RADIUS (0.09 m) + ball radius (~0.02 m) ≈
+# 0.11 m — a value below that (the old 0.05 m) can NEVER be reached, so the kick
+# never fired. 0.13 m clears the contact distance with margin while staying
+# under the Skill Lab's 0.15 m command gate so the kick actually triggers.
+KICK_READY_DIST_M:     float = 0.13
 
 # ── Rule clearances ───────────────────────────────────────────────────────────
 STOP_CLEARANCE_M:    float = 0.60   # §5.4 STOPPED — legal ≥ 0.5 m; 0.6 m buffer
@@ -45,6 +89,15 @@ DEF_BLOCK_ADVANCE_M: float = 0.35
 
 # ── Intercept lookahead ───────────────────────────────────────────────────────
 INTERCEPT_LOOKAHEAD_S: float = 0.8
+
+# ── Forward-outlet (counter-attack release) tuning ────────────────────────────
+# A pass outlet must be at least this far ahead (toward the opponent goal) of the
+# carrier — a genuine forward pass, not a square/back ball.
+FORWARD_MIN_ADVANCE_M: float = 0.5
+# ...and its nearest opponent at least this far away — not tightly marked.
+OUTLET_MARK_CLEAR_M:   float = 0.5
+# Pass-lane half-width that must be clear of any robot.
+OUTLET_LANE_CLEAR_M:   float = 0.18
 
 # ── Per-robot caches (module-level so all skill files share the same state) ───
 approach_cache: dict[int, tuple[tuple[float, float], float]] = {}
@@ -150,6 +203,87 @@ def kick_sequence(snap: Snapshot, robot: RobotState,
     approach_cache.pop(rid, None)
     return IntentMove(target_pos=ball, target_orientation=kick_heading,
                       max_speed=KICK_STRIKE_SPEED_M_S)
+
+
+# ── Attack targeting helpers (shared by the counter-attack skills) ────────────
+
+def point_to_segment_dist(p: tuple[float, float],
+                          a: tuple[float, float],
+                          b: tuple[float, float]) -> float:
+    """Shortest distance from point *p* to the segment A→B."""
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    abx, aby = bx - ax, by - ay
+    ab2 = abx * abx + aby * aby
+    if ab2 < 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / ab2))
+    cx, cy = ax + t * abx, ay + t * aby
+    return math.hypot(px - cx, py - cy)
+
+
+def best_goal_target(snap: Snapshot) -> tuple[float, float]:
+    """Most open aim point across the opponent goal mouth (away from the keeper).
+
+    Samples points across the mouth and picks the one whose ball→point line is
+    farthest from any opponent; ties break toward the centre. Side-aware via the
+    global attack direction. Falls back to the goal centre when no opponents.
+    """
+    goal = opp_goal()
+    if not snap.enemy_robots:
+        return goal
+    ball = snap.ball_position
+    best_pt, best_score = goal, None
+    for frac in (-1.0, -0.5, 0.0, 0.5, 1.0):
+        pt = (goal[0], goal[1] + frac * GOAL_HW_M)
+        clearance = min(
+            point_to_segment_dist(o.position, ball, pt) for o in snap.enemy_robots
+        )
+        score = (clearance, -abs(frac))
+        if best_score is None or score > best_score:
+            best_score, best_pt = score, pt
+    return best_pt
+
+
+def forward_outlet(snap: Snapshot, robot: RobotState) -> tuple[float, float] | None:
+    """Most-advanced open teammate ahead of the carrier on a clear lane, or None.
+
+    "Ahead" and "advanced" are measured toward the opponent goal via the global
+    attack direction, so this works on either side of the field.
+    """
+    from TeamControl.bt.tactics.line_of_sight import line_of_sight_clear
+
+    ball = snap.ball_position
+    carrier_progress = forward_progress(robot.position[0])
+    best_pos: tuple[float, float] | None = None
+    best_progress = -math.inf
+    for tm in snap.own_robots:
+        if tm.robot_id == robot.robot_id:
+            continue
+        progress = forward_progress(tm.position[0])
+        if progress < carrier_progress + FORWARD_MIN_ADVANCE_M:
+            continue
+        nearest_opp = min(
+            (
+                math.hypot(tm.position[0] - o.position[0], tm.position[1] - o.position[1])
+                for o in snap.enemy_robots
+            ),
+            default=math.inf,
+        )
+        if nearest_opp < OUTLET_MARK_CLEAR_M:
+            continue
+        obstacles = list(snap.enemy_robots) + [
+            r for r in snap.own_robots if r.robot_id not in (robot.robot_id, tm.robot_id)
+        ]
+        if not line_of_sight_clear(
+            ball, tm.position, obstacles, clearance=OUTLET_LANE_CLEAR_M
+        ):
+            continue
+        if progress > best_progress:
+            best_progress = progress
+            best_pos = tm.position
+    return best_pos
 
 
 def seq_move_then_kick(snap: Snapshot, robot: RobotState,

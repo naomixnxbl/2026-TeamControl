@@ -136,14 +136,31 @@ def _mm_to_m(value: float) -> float:
 def _ball_pos_vel(frame) -> tuple[tuple[float, float], tuple[float, float]]:
     """Return (ball_position, ball_velocity) tuples from the latest frame.
 
-    Velocity is not currently estimated by ``Frame``/``Ball``; emit (0,0) and
-    leave the proper estimator hookup as a follow-up.
+    The raw ``Frame``/``Ball`` carries only a position, so the velocity here is
+    always (0, 0); ``build_snapshot_from_world_model`` fills in the real tracked
+    velocity via :func:`_ball_velocity_mps`.
     """
     ball = frame.ball if frame is not None else None
     if ball is None:
         return (0.0, 0.0), (0.0, 0.0)
     # Vision protocol sends positions in mm; BT uses metres.
     return (_mm_to_m(ball.x), _mm_to_m(ball.y)), (0.0, 0.0)
+
+
+def _ball_velocity_mps(wm) -> tuple[float, float]:
+    """Best-effort ball velocity in m/s from the tracked world map.
+
+    SSL-Vision frames carry only positions, so velocity is read from the world
+    map's tracked estimate (``get_ball_trajectory`` returns (pred_pos, vel) in
+    mm/s) and converted to m/s. Returns (0, 0) when the world model doesn't
+    expose a trajectory (e.g. minimal test stubs) or the ball isn't tracked yet.
+    """
+    getter = getattr(wm, "get_ball_trajectory", None)
+    traj = getter(horizon_ms=0) if getter is not None else None
+    if not traj:
+        return (0.0, 0.0)
+    _pred_pos, vel_mmps = traj
+    return (_mm_to_m(vel_mmps[0]), _mm_to_m(vel_mmps[1]))
 
 
 def _team_to_states(team) -> tuple[RobotState, ...]:
@@ -182,7 +199,8 @@ def build_snapshot_from_world_model(
     if frame is None:
         return None
 
-    ball_pos, ball_vel = _ball_pos_vel(frame)
+    ball_pos, _ = _ball_pos_vel(frame)
+    ball_vel = _ball_velocity_mps(wm)
 
     if is_yellow is None:
         is_yellow = bool(wm.us_yellow())

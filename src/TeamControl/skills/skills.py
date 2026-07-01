@@ -11,9 +11,12 @@ from TeamControl.skills.face_target             import face_target
 from TeamControl.skills.move_to_ball            import move_to_ball
 from TeamControl.skills.move_to_point           import move_to_point
 from TeamControl.skills.intercept_ball          import intercept_ball
+from TeamControl.skills.receive_pass            import receive_pass
 from TeamControl.skills.dribble_to_point        import dribble_to_point
 from TeamControl.skills.kick_at_goal            import kick_at_goal
+from TeamControl.skills.shoot_open_goal         import shoot_open_goal
 from TeamControl.skills.kick_at_point           import kick_at_point
+from TeamControl.skills.pass_to_outlet          import pass_to_outlet
 from TeamControl.skills.hold_goal_line          import hold_goal_line
 from TeamControl.skills.penalty_attacker_stance import penalty_attacker_stance
 from TeamControl.skills.kickoff_stance          import kickoff_stance
@@ -29,10 +32,13 @@ BEHAVIOURS: tuple[Behaviour, ...] = (
     Behaviour("move_to_ball",     "Move To Ball",          "Face ball then drive toward it, stopping 15 cm short.",                                       False, move_to_ball),
     Behaviour("move_to_point",    "Move To Point",         "Drive to a chosen field position.",                                                           True,  move_to_point),
     Behaviour("intercept_ball",   "Intercept Ball",        "Move to where ball will be in ~0.8 s (velocity prediction), not its current position.",       False, intercept_ball),
+    Behaviour("receive_pass",     "Receive Pass (Trap)",   "Hold a chosen spot facing the ball, then step onto it (dribbler on) to trap an incoming pass.", True,  receive_pass),
     Behaviour("dribble_to_point", "Dribble To Point",      "Carry (dribble) ball to a chosen point — ball placement (§9).",                              True,  dribble_to_point),
     # ── Kick / pass ───────────────────────────────────────────────────────────
     Behaviour("kick_at_goal",     "Kick At Goal",          "Get behind ball → align heading → strike toward the opponent goal.",                          False, kick_at_goal),
+    Behaviour("shoot_open_goal",  "Shoot (Open Side)",     "Get behind ball → aim at the most open part of the goal mouth (away from the keeper) → strike.", False, shoot_open_goal),
     Behaviour("kick_at_point",    "Pass (Kick To Point)",  "Get behind ball → align heading → strike toward a chosen point.",                            True,  kick_at_point),
+    Behaviour("pass_to_outlet",   "Pass (Best Outlet)",    "Auto-pick the most advanced open teammate and pass to them; face the ball if none is open.", False, pass_to_outlet),
     # ── Rule-based (SSL rulebook) ─────────────────────────────────────────────
     Behaviour("hold_goal_line",            "Hold Goal Line",               "Keeper holds on own goal line tracking ball y — §8.2 PENALTY_DEFEND.",        False, hold_goal_line),
     Behaviour("penalty_attacker_stance",   "Penalty Attacker Stance",      "Move to the penalty spot facing opponent goal — §8.2.3 PENALTY_SHOOT.",       False, penalty_attacker_stance),
