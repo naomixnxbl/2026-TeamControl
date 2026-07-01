@@ -80,21 +80,17 @@ grSim:
   port: 20011
 vision:
   multicast-group: 224.5.23.2
-<<<<<<< HEAD
-  port: 10030
-=======
-  port: 10002
->>>>>>> 737fcf607b569c1869e1b04ad2eec5b53ef2868a
+  port: 10006
 gc:
   multicast-group: 224.5.23.1
   port: 10003
 network:
   robot_ip: 0.0.0.0
   vision_ip: 0.0.0.0
-use_grSim_vision: true
+use_grSim_vision: false
 us_yellow: true
 us_positive: true
-send_to_grSim: true
+send_to_grSim: false
 record_world_snapshots: false
 team_name: TurtleRabbit
 record_world_snapshot_dir: match_replays

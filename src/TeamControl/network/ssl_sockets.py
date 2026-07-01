@@ -127,14 +127,10 @@ if __name__ == "__main__":
     is_running = Event()
     is_running.set()
     
-    vt = VisionTracker(is_running)
-    while True:
-        try:
-            if is_running.is_set():
-                data = vt.listen()
-                print(data)
-        except KeyboardInterrupt:
-            is_running.clear()
+    vt = Vision(is_running)
+
+    data = vt.listen()
+    print(data)
             
     # sender = grSimSender()
     # cmd = RobotCommand(1)
