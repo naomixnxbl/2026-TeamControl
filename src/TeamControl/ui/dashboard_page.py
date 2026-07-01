@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QGridLayout, QFrame, QScrollArea, QCheckBox, QTabWidget,
+    QPlainTextEdit, QPushButton,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
@@ -39,12 +40,38 @@ _PHASE_COLOR = {
 }
 
 
+_ROLE_ABBREV = {
+    "GOALIE":    "GK ",
+    "ATTACKER":  "ATK",
+    "SUPPORTER": "SUP",
+    "DEFENDER":  "DEF",
+    "MARKER":    "MKR",
+}
+
+_ROLE_LOG_COLOR = {
+    "GOALIE":    "#f1c40f",
+    "ATTACKER":  "#e74c3c",
+    "DEFENDER":  "#3498db",
+    "SUPPORTER": "#95a5a6",
+    "MARKER":    "#e67e22",
+}
+
+
 def _fmt_intent(intent_type, target):
     if not intent_type:
         return "—"
     if target:
         return f"{intent_type}({target[0]:.2f},{target[1]:.2f})"
     return intent_type
+
+
+def _fmt_log_intent(intent_type, target):
+    if not intent_type:
+        return "—"
+    abbrev = intent_type[:3]
+    if target:
+        return f"{abbrev}({target[0]:.2f},{target[1]:.2f})"
+    return abbrev
 
 
 class _BTInspectorPanel(QWidget):
@@ -117,7 +144,46 @@ class _BTInspectorPanel(QWidget):
         self._status_lbl = QLabel("Waiting for BT data…")
         self._status_lbl.setStyleSheet(f"color:{TEXT_DIM}; font-size:10px;")
         lay.addWidget(self._status_lbl)
-        lay.addStretch()
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        sep3.setStyleSheet(f"color:{BORDER};")
+        lay.addWidget(sep3)
+
+        log_hdr = QHBoxLayout()
+        log_title = QLabel("Tick Log")
+        log_title.setStyleSheet(f"color:{ACCENT}; font-weight:bold; font-size:11px;")
+        log_hdr.addWidget(log_title)
+        log_hdr.addStretch()
+        self._log_autoscroll = True
+        self._scroll_btn = QPushButton("Auto ✓")
+        self._scroll_btn.setFixedWidth(62)
+        self._scroll_btn.setFixedHeight(20)
+        self._scroll_btn.setStyleSheet(f"font-size:10px; padding:0 4px;")
+        self._scroll_btn.clicked.connect(self._toggle_log_scroll)
+        log_hdr.addWidget(self._scroll_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedWidth(44)
+        clear_btn.setFixedHeight(20)
+        clear_btn.setStyleSheet(f"font-size:10px; padding:0 4px;")
+        clear_btn.clicked.connect(self._clear_log)
+        log_hdr.addWidget(clear_btn)
+        lay.addLayout(log_hdr)
+
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumBlockCount(500)
+        self._log.setFont(QFont("Cascadia Code", 9))
+        self._log.setMinimumHeight(120)
+        self._log.setStyleSheet("background: #0d1117; border: 1px solid #2a2a2a; border-radius: 4px;")
+        lay.addWidget(self._log, 1)
+
+    def _toggle_log_scroll(self):
+        self._log_autoscroll = not self._log_autoscroll
+        self._scroll_btn.setText("Auto ✓" if self._log_autoscroll else "Auto ✗")
+
+    def _clear_log(self):
+        self._log.clear()
 
     def update_state(self, state: dict) -> None:
         tick  = state.get("tick", 0)
@@ -155,6 +221,27 @@ class _BTInspectorPanel(QWidget):
 
         self._status_lbl.setText(f"Live  ·  tick {tick}")
         self._status_lbl.setStyleSheet(f"color:{SUCCESS}; font-size:10px;")
+
+        # Build a compact log line: one entry per tick received
+        robot_parts = []
+        for rb in state.get("robots", []):
+            rid  = rb.get("id", "?")
+            role = rb.get("role") or "?"
+            it   = rb.get("intent_type")
+            tgt  = rb.get("intent_target")
+            src  = rb.get("intent_source") or ""
+            abbrev = _ROLE_ABBREV.get(role, role[:3])
+            intent_str = _fmt_log_intent(it, tgt)
+            src_str = f"[{src}]" if src else ""
+            robot_parts.append(f"R{rid}:{abbrev} {intent_str}{src_str}")
+
+        team_tag = "Y" if is_y else "B"
+        log_line = f"[t={tick:06d} {team_tag} {phase}] " + "  ".join(robot_parts)
+        self._log.appendPlainText(log_line)
+        if self._log_autoscroll:
+            self._log.verticalScrollBar().setValue(
+                self._log.verticalScrollBar().maximum()
+            )
 
 
 def _card(title_text):

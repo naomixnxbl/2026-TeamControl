@@ -38,7 +38,7 @@ role_swap:
 
     # Maximum defenders allowed. With 6v6, 2 is usually enough; higher values can
     # make the team sit too deep and stop supporting attacks.
-    max_defenders: 2
+    max_defenders: 0
 
     # Minimum supporters preserved for spacing/passing structure.
     min_supporters: 1
@@ -212,7 +212,7 @@ role_swap:
   supporter:
     # Rewards being spaced away from teammates.
     # Higher = supporters spread out more instead of clustering.
-    spacing: 0.30
+    spacing: 0.18
 
     # Rewards being closer to the opponent goal.
     # Higher = supporters take more advanced attacking support positions.
@@ -228,7 +228,7 @@ role_swap:
 
     # Rewards not being too close to the ball.
     # Higher = supporters avoid crowding the attacker.
-    not_crowding_ball: 0.10
+    not_crowding_ball: 0.05
 
     # Rewards being between the ball and opponent goal.
     # Higher = supporters prefer forward passing/shot-support lanes.
@@ -268,31 +268,33 @@ behavior_tree:
     # higher (e.g. 0.16) to stop the possession flag flickering tick-to-tick.
     possession_release_dist: 0.11
 
-    # Default: 0.3 radians. Ball must be this close to the robot's front
-    # heading before possession is accepted.
-    possession_heading_tol: 0.3
+    # Ball must be within this angle of the robot's front heading for possession.
+    # Set equal to the adapter's KICK_BALL_FRONT_TOL (0.45 rad) so HasBallControl
+    # stays satisfied while the adapter rotates in place to align for a kick.
+    possession_heading_tol: 0.45
 
     # Default: 0.20. Width of the shot-blocking corridor from ball to goal.
     # Higher = more shots count as blocked.
     shot_corridor_radius: 0.20
 
-    # Default: 0.25 radians (~14°). Robot must face the aim point within this
-    # error to shoot. Higher = shoots with looser alignment (less accurate);
-    # lower = waits for a cleaner line before pulling the trigger.
-    shot_heading_tol: 0.25
+    # Loose "roughly facing goal" gate in HasClearShot. Wide enough that the robot
+    # doesn't need to be precisely aligned — the adapter rotates in place to reach
+    # the exact KICK_ALIGN_TOL (0.22 rad) required for the kick to fire.
+    # Decrease to force a tighter pre-shot orientation check.
+    shot_heading_tol: 0.50
 
-    # Default: 5 ticks. Brief control confirmation before shooting (ball is on
-    # the dribbler). Low so we shoot the moment there's a good spot; raise it if
-    # the attacker shoots before stabilising a just-received ball.
-    shot_settle_ticks: 5
+    # NOTE: shot_settle_ticks is no longer used. HasSettledPossession was removed
+    # from ShootSequence so the attacker shoots on the first tick it has possession
+    # and a clear corridor. Kept here for reference; has no effect on behaviour.
+    shot_settle_ticks: 1
 
     # Default: 0.2 m/s. Max speed when chasing the ball but not the closest robot.
     # Lower = less crowding around the ball; higher = more aggressive secondary pressure.
     chase_slow_speed: 0.2
 
-    # Default: 2.0 metres. Max distance to goal where a clear shot is allowed.
-    # Higher = attempts longer shots; lower = carries/passes closer first.
-    shoot_dist_threshold: 2.0
+    # Max distance to goal where a clear shot is attempted.
+    # 2.5 m gives the attacker a wider window to prioritise shooting over passing.
+    shoot_dist_threshold: 2.5
 
     # Default: 0.08. Minimum pass distance as a fraction of field scale.
     # Higher = ignores short passes.
@@ -304,19 +306,20 @@ behavior_tree:
 
     # Default: 0.05. Receiver is rejected if an opponent is closer than this
     # fraction of field scale.
-    pass_marked_distance_frac: 0.05
+    pass_marked_distance_frac: 0.08
 
     # Default: 0.08. Opponent pressure radius used when deciding to look for a
     # pass instead of carrying/shooting.
-    pass_pressure_radius_frac: 0.08
+    pass_pressure_radius_frac: 0.12
 
     # Default: 0.02. Pass lane clearance as a fraction of field scale.
     # Higher = pass lanes are considered blocked more easily.
     pass_lane_clearance_frac: 0.02
 
-    # Default: 0.2 radians. Attacker must face the pass target within this error
-    # before firing the pass.
-    pass_orient_tol: 0.001
+    # Must match adapter KICK_ALIGN_TOL (0.22 rad): DribbleTowardPassTarget turns
+    # until within this error; PassToOpenTeammate then fires IntentPass and the
+    # adapter's _kick_pose_ready passes immediately with no further repositioning.
+    pass_orient_tol: 0.1
 
     # Default: 0.45. Weight for receiver openness in pass target scoring.
     pass_openness_weight: 0.45
@@ -339,11 +342,11 @@ behavior_tree:
     # Default: 0.25. Distance-score falloff window as a fraction of field scale.
     pass_distance_window_frac: 0.25
 
-    # Default: 0.0. Minimum pass-target score required to release a pass. The
-    # best teammate is still chosen by score; this only rejects a pass when even
-    # the best option is weak (the attacker then holds/dribbles instead). 0.0
-    # accepts any valid target. Try ~0.3 to suppress hopeful, low-quality passes.
-    pass_min_score: 0.0
+    # Minimum pass-target score required to release a pass. The best teammate is
+    # still chosen by score; if even the best option scores below this the attacker
+    # skips the pass (PossessionAction falls through to ChaseBall — stays near ball).
+    # 0.25 suppresses low-quality passes so shooting remains the clear first choice.
+    pass_min_score: 0.25
 
   supporter:
     # Default: 0.11. Centre-to-centre distance for claiming ball possession.
@@ -357,23 +360,66 @@ behavior_tree:
     # to the opponent goal.
     shoot_dist_threshold: 2.0
 
-    # Default: 0.5. Minimum teammate score required before passing.
-    # Higher = fewer passes; lower = passes to more contested teammates.
-    marked_threshold: 0.5
+    # Minimum combined pass score [0..1] required before passing.
+    # Scores are now normalized (see pass_lane/distance/openness/goal weights below),
+    # so 0.5 is too high. Default: 0.15 — rejects only completely poor options.
+    marked_threshold: 0.15
 
     # Default: 1. The attacker robot ID receives a pass-target scoring bonus.
     attacker_id: 1
 
-    # Default: 1.5. Multiplier for choosing the attacker as a pass target.
+    # Default: 1.5. Multiplier applied to the attacker's final pass score.
     # Higher = supporters prefer feeding the attacker.
     attacker_pass_bonus: 1.5
 
-    # Default: 1.2. Scales how much being closer to goal improves pass score.
+    # No longer used directly in scoring — kept for yaml compatibility.
     goal_proximity_weight: 1.2
 
     # Default: 10.82. Approximate maximum field distance used for normalizing
     # supporter pass target scoring.
     max_field_dist: 10.82
+
+    # --- Pass target selection (FindOpenTeammate) ---
+    # Minimum corridor half-width (m) a pass lane must have to be considered.
+    # Any lane with an obstacle closer than this is hard-rejected.
+    pass_lane_clearance: 0.15
+
+    # Wider scan radius (m) for continuous lane quality scoring.
+    # The closest obstacle within this radius sets lane_quality in [0, 1].
+    pass_lane_score_radius: 0.40
+
+    # Ideal pass distance (m). Distance score peaks here and falls off on both sides.
+    # Lower = prefer short passes that arrive quickly; higher = longer outlet passes.
+    pass_ideal_distance: 1.2
+
+    # Half-window (m) for distance scoring. Score reaches 0 at ±this from ideal.
+    pass_distance_window: 1.5
+
+    # Hard cap (m) on pass distance. Candidates beyond this are rejected entirely.
+    # 0.0 disables the check. Keeps passes short and reduces interception risk.
+    pass_max_distance: 2.5
+
+    # Nearest opponent must be at least this far (m) from receiver for openness = 1.
+    pass_openness_radius: 1.5
+
+    # Bonus added to a candidate's score when the ball→candidate angle is already
+    # within pass_orient_tol of the robot's current heading (no turning required).
+    # Higher = strongly prefer targets the robot can pass to immediately.
+    pass_heading_bonus: 0.30
+
+    # Scoring weights — should sum to 1.0.
+    # Higher pass_lane_weight = prioritise open corridors over receiver position.
+    # Higher pass_distance_weight = prefer receivers within ideal pass range.
+    # Lower pass_openness_weight = openness of receiver position matters less.
+    pass_lane_weight: 0.35
+    pass_distance_weight: 0.45
+    pass_openness_weight: 0.15
+    pass_goal_weight: 0.05
+
+    # Default: 0.2 radians. Supporter must face the pass target within this
+    # error before firing the pass. Set equal to adapter KICK_ALIGN_TOL (0.22 rad)
+    # so DribbleTowardTarget aligns the robot precisely enough for immediate kick.
+    pass_orient_tol: 0.1
 
     # Default: 0.5 metres. Spacing between grid points for repositioning.
     # Lower = finer search but more computation; higher = coarser positions.
@@ -391,10 +437,6 @@ behavior_tree:
     # Default: 2.5. Maximum y for supporter repositioning.
     reposition_y_max: 2.5
 
-    # Default: 0.2 radians. Supporter must face the pass target within this
-    # error before firing the pass.
-    pass_orient_tol: 0.001
-
     # Default: 100 ticks. How long a receiver holds for a pass signal before
     # giving up and returning to normal supporter behavior.
     pass_signal_timeout_ticks: 100
@@ -409,6 +451,26 @@ behavior_tree:
     # openness score. 0.0 keeps pure openness with a goal-distance tie-break.
     # Small values (~0.05) nudge supporters to take more advanced positions.
     reposition_goal_weight: 0.0
+
+    # Default: 0.0. Bias repositioning toward the ball carrier. Adds
+    # reposition_ball_proximity_weight * (1 - dist_to_ball/max_field_dist) to
+    # each cell's score. 0.0 = no bias (original behaviour). Raise to ~1.5 to
+    # make pass-receiving range the dominant factor so supporters stay close
+    # enough to receive a pass rather than spreading wide.
+    reposition_ball_proximity_weight: 1.5
+
+    # Hard cap on how far (m) from the ball a supporter will consider
+    # repositioning. Cells beyond this are skipped entirely, keeping supporters
+    # within viable pass range. 0.0 disables the check.
+    reposition_max_ball_distance: 3.5
+
+    # Corridor radius (m) for scoring line-of-sight quality from the ball to
+    # each candidate cell. Closest obstacle within this radius sets los_score.
+    reposition_los_score_radius: 0.30
+
+    # Weight for LOS quality score (0 = disabled, ~1.0 = strong preference for
+    # cells with a clear pass corridor from the ball carrier).
+    reposition_los_weight: 1.0
 
   defender:
     positioning:

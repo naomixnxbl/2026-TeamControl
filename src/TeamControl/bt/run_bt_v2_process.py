@@ -31,6 +31,7 @@ from TeamControl.bt.trees.defender import DefenderTree
 from TeamControl.bt.trees.goalie import GoalieTree
 from TeamControl.bt.trees.marker import MarkerTree
 from TeamControl.bt.trees.supporter import SupporterTree
+from TeamControl.bt.tick_logger import TickLogger
 from TeamControl.network.robot_command import RobotCommand
 from TeamControl.utils.yaml_config import Config as _YamlConfig
 from TeamControl.world.model import WorldModel
@@ -276,6 +277,7 @@ def run_bt_v2_process(
     last_phase = None
     tick_count = 0
     _last_printed: dict = {}  # rid -> (intent_type, target_1dp)
+    tick_logger = TickLogger(robot_ids=robot_ids, team="yellow" if is_yellow else "blue")
 
     try:
         while is_running.is_set():
@@ -303,6 +305,7 @@ def run_bt_v2_process(
                 last_phase = phase
 
             coordinator.tick(snapshot, robot_ids)
+            tick_logger.log_tick(tick_count, snapshot, coordinator.blackboards, robot_ids)
 
             tick_count += 1
 
@@ -369,3 +372,5 @@ def run_bt_v2_process(
             time.sleep(tick_period)
     except KeyboardInterrupt:
         print("[BT] KeyboardInterrupt — exiting", flush=True)
+    finally:
+        tick_logger.close()
