@@ -169,6 +169,12 @@ CLASH_MAX_TICKS: int = 40          # stop jiggling after this many ticks (give u
 CLASH_HALF_PERIOD: int = 5         # ticks per oscillation half-cycle (in/out)
 CLASH_RETREAT: float = 0.35        # retreat distance (m) away from the ball
 CLASH_SHOVE: float = 0.12          # shove distance (m) past the ball
+# Interception: when the opponent hogs the ball too long, the presser stops
+# merely containing and goes IN to win it back, using the clash jiggle to knock
+# it off the carrier's dribbler once in contact.
+OPP_POSSESS_RADIUS: float = 0.25   # opp within this & nearest the ball = holding it
+INTERCEPT_AFTER_TICKS: int = 180   # opp holding this long (≈1.8 s @100 Hz) → intercept
+INTERCEPT_CHARGE_GAIN: float = 3.0 # speed gain charging onto the ball
 # When we control the wedged ball, pass out instead of jiggling.
 CLASH_POSSESS_DIST: float = 0.16   # within this of ball = we may control it
 CLASH_POSSESS_HEADING: float = 0.6 # ball must be within this heading error of front
@@ -498,6 +504,7 @@ class Coordinator:
         self.clash_royale_enabled: bool = bool(clash_royale)
         self._last_ball_pos: tuple[float, float] | None = None
         self._ball_stall_ticks: int = 0
+        self._opp_hold_ticks: int = 0   # consecutive ticks the opponent holds the ball
         self._clash_phase: int = 0
         self._clash_active_ticks: int = 0
         # Orbit-defender state (the "extra" defender while defending our half).
@@ -572,6 +579,7 @@ class Coordinator:
             self._gegenpress_active = False
             self._press_streak = 0
             self._release_streak = 0
+            self._opp_hold_ticks = 0
             self._incoming_pass = None
             self._free_kick_kicker_id = None
             self._free_kick_support_slots = {}
@@ -788,7 +796,11 @@ class Coordinator:
         #  - clash escape (pass out / jiggle) for a ball wedged in a clash.
         self._apply_pass_receive_sync(snapshot, robot_ids)
         self._apply_orbit_defender(snapshot, robot_ids)
-        self._apply_clash_royale(snapshot, robot_ids)
+        # Interception escalation pre-empts the stall clash: when the opponent
+        # has hogged the ball too long, charge in (and jiggle on contact) to win
+        # it back rather than wait for a dead-ball clash.
+        if not self._apply_interception(snapshot, robot_ids):
+            self._apply_clash_royale(snapshot, robot_ids)
         # Final declutter: spread teammates whose move targets bunch together.
         self._apply_teammate_spacing(snapshot, robot_ids)
         return self._finalize_intents(snapshot, robot_ids)
@@ -931,7 +943,8 @@ class Coordinator:
         bb_recv.intent_source = "ReceivePass"
 
     def _update_ball_stall(self, snapshot: Snapshot) -> None:
-        """Track how long the ball has been ~stationary (a frozen/wedged ball)."""
+        """Clock the ball: how long it's been ~stationary, and how long the
+        opponent has held it (drives clash_royale and interception)."""
         ball = snapshot.ball_position
         if self._last_ball_pos is None:
             moved = math.inf
@@ -944,6 +957,103 @@ class Coordinator:
             self._ball_stall_ticks = 0
         else:
             self._ball_stall_ticks += 1
+
+        # Opponent "holds" the ball when it is the nearest robot to it and within
+        # control range.
+        if snapshot.enemy_robots:
+            opp_d = min(
+                math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                for r in snapshot.enemy_robots
+            )
+            own_d = min(
+                (
+                    math.hypot(r.position[0] - ball[0], r.position[1] - ball[1])
+                    for r in snapshot.own_robots
+                ),
+                default=math.inf,
+            )
+            if opp_d <= OPP_POSSESS_RADIUS and opp_d < own_d:
+                self._opp_hold_ticks += 1
+            else:
+                self._opp_hold_ticks = 0
+        else:
+            self._opp_hold_ticks = 0
+
+    def _nearest_field_robot(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> int | None:
+        """Our nearest present non-goalie robot to the ball, or None."""
+        ball = snapshot.ball_position
+        candidates = [
+            rid
+            for rid in robot_ids
+            if rid in self.blackboards
+            and not self._is_goalie(rid)
+            and _find_robot(snapshot, rid) is not None
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda r: math.hypot(
+                _find_robot(snapshot, r).position[0] - ball[0],
+                _find_robot(snapshot, r).position[1] - ball[1],
+            ),
+        )
+
+    def _clash_jiggle(self, rid: int, robot, ball, source: str) -> None:
+        """Oscillate the robot in/out along the robot↔ball axis to pop the ball
+        loose (shared by clash_royale and interception)."""
+        nx = robot.position[0] - ball[0]
+        ny = robot.position[1] - ball[1]
+        n = math.hypot(nx, ny)
+        if n < 1e-9:
+            ux, uy = math.cos(robot.orientation), math.sin(robot.orientation)
+        else:
+            ux, uy = nx / n, ny / n  # unit vector pointing from ball to robot
+        face = math.atan2(ball[1] - robot.position[1], ball[0] - robot.position[0])
+        half = (self._clash_phase // CLASH_HALF_PERIOD) % 2
+        self._clash_phase += 1
+        if half == 0:
+            target = (robot.position[0] + ux * CLASH_RETREAT, robot.position[1] + uy * CLASH_RETREAT)
+        else:
+            target = (ball[0] - ux * CLASH_SHOVE, ball[1] - uy * CLASH_SHOVE)
+        bb = self.blackboards[rid]
+        bb.current_intent = IntentMove(target_pos=target, target_orientation=face)
+        bb.intent_source = source
+
+    def _apply_interception(
+        self, snapshot: Snapshot, robot_ids: list[int]
+    ) -> bool:
+        """Escalate to interception when the opponent has hogged the ball.
+
+        Once an opponent has held the ball for ``INTERCEPT_AFTER_TICKS``, our
+        nearest field robot stops containing and CHARGES the ball to win it back;
+        on contact it uses the clash jiggle to knock the ball off the carrier's
+        dribbler. Returns True when it took over the robot's intent this tick.
+        """
+        if not (self.gegenpress.enabled and self.clash_royale_enabled):
+            return False
+        if self._opp_hold_ticks < INTERCEPT_AFTER_TICKS or not snapshot.enemy_robots:
+            return False
+        rid = self._nearest_field_robot(snapshot, robot_ids)
+        if rid is None:
+            return False
+        robot = _find_robot(snapshot, rid)
+        ball = snapshot.ball_position
+        dist_to_ball = math.hypot(robot.position[0] - ball[0], robot.position[1] - ball[1])
+        if dist_to_ball <= CLASH_BALL_CONTACT:
+            # In contact with the carrier — jiggle to knock the ball loose.
+            self._clash_jiggle(rid, robot, ball, "InterceptJiggle")
+        else:
+            # Charge onto the ball.
+            face = math.atan2(ball[1] - robot.position[1], ball[0] - robot.position[0])
+            bb = self.blackboards[rid]
+            bb.current_intent = IntentMove(
+                target_pos=ball, target_orientation=face, speed_gain=INTERCEPT_CHARGE_GAIN
+            )
+            bb.intent_source = "InterceptCharge"
+        return True
 
     def _apply_clash_royale(
         self, snapshot: Snapshot, robot_ids: list[int]
@@ -1014,31 +1124,7 @@ class Coordinator:
             self._clash_active_ticks = 0
             return
         self._clash_active_ticks += 1
-
-        nx = robot.position[0] - ball[0]
-        ny = robot.position[1] - ball[1]
-        n = math.hypot(nx, ny)
-        if n < 1e-9:
-            ux, uy = math.cos(robot.orientation), math.sin(robot.orientation)
-        else:
-            ux, uy = nx / n, ny / n  # unit vector pointing from ball to robot
-
-        face = math.atan2(ball[1] - robot.position[1], ball[0] - robot.position[0])
-        half = (self._clash_phase // CLASH_HALF_PERIOD) % 2
-        self._clash_phase += 1
-        if half == 0:
-            # Retreat: pull back away from the ball.
-            target = (
-                robot.position[0] + ux * CLASH_RETREAT,
-                robot.position[1] + uy * CLASH_RETREAT,
-            )
-        else:
-            # Shove: drive in toward (and just past) the ball.
-            target = (ball[0] - ux * CLASH_SHOVE, ball[1] - uy * CLASH_SHOVE)
-
-        bb = self.blackboards[rid]
-        bb.current_intent = IntentMove(target_pos=target, target_orientation=face)
-        bb.intent_source = "ClashRoyale"
+        self._clash_jiggle(rid, robot, ball, "ClashRoyale")
 
     @staticmethod
     def _controls_ball(robot, ball: tuple[float, float]) -> bool:

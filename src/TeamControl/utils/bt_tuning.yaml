@@ -43,6 +43,13 @@ role_swap:
     # Minimum supporters preserved for spacing/passing structure.
     min_supporters: 1
 
+    # Number of MARKER (man-marking) robots the heuristic assigns WHILE DEFENDING
+    # (opponent has the ball, or it's in our half). 0 = off (default). Set to 1-2
+    # to have the team dynamically man-mark opponent outlets; the coordinator
+    # then matches each marker to a specific opponent. Capped so at least
+    # min_supporters robots stay in support.
+    markers: 0
+
   context:
     # Line-of-sight clearance, as a fraction of field scale.
     # Higher = shot/pass lanes are considered blocked more easily.
@@ -186,6 +193,22 @@ role_swap:
     # dedicated sweeper that resists being pulled up the pitch.
     last_man: 0.0
 
+  marker:
+    # Markers matter when the opponent has the ball.
+    opponent_has_ball: 0.30
+
+    # Defensive context: the ball is in our half.
+    ball_in_our_half: 0.20
+
+    # An opponent is close to this robot (someone to mark right here).
+    near_opponent: 0.30
+
+    # Sitting goal-side of the ball (between the ball and our own goal).
+    goal_side: 0.12
+    
+    # Not the lone ball-chaser — markers shadow outlets, not the ball.
+    not_crowding_ball: 0.08
+
   supporter:
     # Rewards being spaced away from teammates.
     # Higher = supporters spread out more instead of clustering.
@@ -258,9 +281,10 @@ behavior_tree:
     # lower = waits for a cleaner line before pulling the trigger.
     shot_heading_tol: 0.25
 
-    # Default: 15 ticks. Continuous possession required before shooting.
-    # Higher = less instant shooting after receiving; lower = shoots sooner.
-    shot_settle_ticks: 15
+    # Default: 5 ticks. Brief control confirmation before shooting (ball is on
+    # the dribbler). Low so we shoot the moment there's a good spot; raise it if
+    # the attacker shoots before stabilising a just-received ball.
+    shot_settle_ticks: 5
 
     # Default: 0.2 m/s. Max speed when chasing the ball but not the closest robot.
     # Lower = less crowding around the ball; higher = more aggressive secondary pressure.

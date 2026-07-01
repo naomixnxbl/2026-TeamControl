@@ -38,12 +38,18 @@ LEGACY_HEURISTIC_WEIGHT_FILENAME = "heuristic_weight.yaml"
 
 @dataclass(frozen=True)
 class RoleTargetCounts:
-    """Team-level role bounds for the future scorer."""
+    """Team-level role bounds for the scorer."""
 
     attackers: int = 1
     min_defenders: int = 1
     max_defenders: int = 2
     min_supporters: int = 1
+    # How many MARKER (man-marking) robots to assign while defending. Default 0
+    # = off (behaviour unchanged). Raise it to have the heuristic dynamically
+    # man-mark opponents when the opponent has the ball / it's in our half; the
+    # Coordinator then matches each marker to a specific opponent. Capped so at
+    # least ``min_supporters`` robots remain in support.
+    markers: int = 0
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,28 @@ class SupporterScoreWeights:
     # Bonus for lateral separation from the ball (stretching the play wide,
     # relative to teammates). Default 0.0 = off; raise it for wider support.
     width: float = 0.0
+
+
+@dataclass(frozen=True)
+class MarkerScoreWeights:
+    """Weights for the marker score (man-to-man defending).
+
+    A robot scores well as a MARKER when the team is defending (the opponent has
+    the ball, or it's in our half) AND there is an opponent close enough to
+    shadow. The Coordinator then matches each MARKER robot to a specific
+    opponent. Only used when ``role_targets.markers`` > 0.
+    """
+
+    # Defending context — markers matter when the opponent threatens.
+    opponent_has_ball: float = 0.30
+    ball_in_our_half: float = 0.20
+    # An opponent is close to this robot (opponent_pressure), i.e. there is
+    # someone to mark right here.
+    near_opponent: float = 0.30
+    # Goal-side of the ball (sitting between the ball and our own goal).
+    goal_side: float = 0.12
+    # Not the lone ball-chaser — markers shadow outlets, they don't dive at the ball.
+    not_crowding_ball: float = 0.08
 
 
 @dataclass(frozen=True)
@@ -153,6 +181,7 @@ class RoleHeuristicWeights:
     attacker: AttackerScoreWeights = field(default_factory=AttackerScoreWeights)
     defender: DefenderScoreWeights = field(default_factory=DefenderScoreWeights)
     supporter: SupporterScoreWeights = field(default_factory=SupporterScoreWeights)
+    marker: MarkerScoreWeights = field(default_factory=MarkerScoreWeights)
     stability: RoleStabilityWeights = field(default_factory=RoleStabilityWeights)
     defender_stability: DefenderStabilityWeights = field(default_factory=DefenderStabilityWeights)
     context: ContextScaleWeights = field(default_factory=ContextScaleWeights)
@@ -221,6 +250,7 @@ class RoleScores:
     attacker: float
     defender: float
     supporter: float
+    marker: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -265,6 +295,10 @@ def load_role_heuristic_weights(
         supporter=_dataclass_from_section(
             SupporterScoreWeights,
             role_swap.get("supporter"),
+        ),
+        marker=_dataclass_from_section(
+            MarkerScoreWeights,
+            role_swap.get("marker"),
         ),
         stability=_dataclass_from_section(
             RoleStabilityWeights,
@@ -414,6 +448,20 @@ def assign_roles_heuristically(
     )
     for rid in selected_defenders:
         roles[rid] = RoleType.DEFENDER
+
+    # Markers — man-mark opponents while defending (off unless role_targets.markers
+    # > 0). The Coordinator matches each MARKER to a specific opponent afterwards.
+    remaining = [rid for rid in candidates if rid not in roles]
+    marker_target = _target_marker_count(contexts, targets, len(remaining))
+    selected_markers = _select_role_ids(
+        remaining,
+        scores,
+        current_roles,
+        RoleType.MARKER,
+        marker_target,
+    )
+    for rid in selected_markers:
+        roles[rid] = RoleType.MARKER
 
     for rid in candidates:
         roles.setdefault(rid, RoleType.SUPPORTER)
@@ -603,6 +651,8 @@ def _score_contexts(
         attacker_weights = weights.attacker
         defender_weights = weights.defender
         supporter_weights = weights.supporter
+        marker_weights = weights.marker
+        ball_in_our_half_score = 1.0 if ctx.ball_in_our_half else 0.0
 
         attacker = (
             attacker_weights.ball_close * ball_close[rid]
@@ -635,11 +685,19 @@ def _score_contexts(
             + supporter_weights.own_has_ball * own_has_ball
             + supporter_weights.width * width[rid]
         )
+        marker = (
+            marker_weights.opponent_has_ball * opponent_has_ball
+            + marker_weights.ball_in_our_half * ball_in_our_half_score
+            + marker_weights.near_opponent * ctx.opponent_pressure
+            + marker_weights.goal_side * own_lane
+            + marker_weights.not_crowding_ball * not_crowding_ball
+        )
         scores[rid] = _apply_role_stability(
             RoleScores(
                 attacker=_clamp(attacker),
                 defender=_clamp(defender),
                 supporter=_clamp(supporter),
+                marker=_clamp(marker),
             ),
             ctx,
             weights.stability,
@@ -666,6 +724,7 @@ def _apply_role_stability(
             attacker=scores.attacker,
             defender=scores.defender + defender_bias,
             supporter=scores.supporter,
+            marker=scores.marker,
         )
 
     bias = weights.current_role_bias
@@ -676,6 +735,7 @@ def _apply_role_stability(
         attacker=scores.attacker + (bias if context.current_role == RoleType.ATTACKER else 0.0),
         defender=scores.defender + (bias if context.current_role == RoleType.DEFENDER else 0.0),
         supporter=scores.supporter + (bias if context.current_role == RoleType.SUPPORTER else 0.0),
+        marker=scores.marker + (bias if context.current_role == RoleType.MARKER else 0.0),
     )
 
 
@@ -809,6 +869,8 @@ def _score_for_role(scores: RoleScores, role: RoleType) -> float:
         return scores.defender
     if role == RoleType.SUPPORTER:
         return scores.supporter
+    if role == RoleType.MARKER:
+        return scores.marker
     return 0.0
 
 
@@ -843,6 +905,30 @@ def _target_defender_count(
     return max(targets.min_defenders, min(targets.max_defenders, desired))
 
 
+def _target_marker_count(
+    contexts: Mapping[int, RoleSwapContext],
+    targets: RoleTargetCounts,
+    remaining_count: int,
+) -> int:
+    """How many MARKER robots to assign this tick.
+
+    Markers only appear while DEFENDING (the opponent has the ball or it's in
+    our half) — man-marking when we're on the front foot makes no sense. Capped
+    so at least ``min_supporters`` robots stay in support. 0 when
+    ``role_targets.markers`` is 0 (the default → feature off).
+    """
+    if targets.markers <= 0 or remaining_count <= 0 or not contexts:
+        return 0
+    any_ctx = next(iter(contexts.values()))
+    defending = (
+        any_ctx.current_ball_holder == "opponent" or any_ctx.ball_in_our_half
+    )
+    if not defending:
+        return 0
+    allowed = max(0, remaining_count - max(0, targets.min_supporters))
+    return max(0, min(targets.markers, allowed))
+
+
 def _role_reason(
     robot_id: int,
     role: RoleType,
@@ -864,6 +950,12 @@ def _role_reason(
             f"defender score={scores.defender:.2f}; "
             f"between_ball_and_goal={context.robot_between_ball_and_own_goal}; "
             f"ball_in_our_half={context.ball_in_our_half}"
+        )
+    if role == RoleType.MARKER:
+        return (
+            f"marker score={scores.marker:.2f}; "
+            f"opponent_pressure={context.opponent_pressure:.2f}; "
+            f"ball_holder={context.current_ball_holder}"
         )
     return (
         f"supporter score={scores.supporter:.2f}; "

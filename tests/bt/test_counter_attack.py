@@ -55,9 +55,9 @@ def test_counter_release_passes_forward_from_our_half() -> None:
     assert bb.current_intent.target_robot_id == 2
 
 
-def test_no_counter_release_once_in_opponent_half() -> None:
-    # Same outlet, but the carrier has advanced into the opponent half: we should
-    # KEEP possession up there (dribble/hold), not force another release.
+def test_forward_pass_also_works_on_opponent_field() -> None:
+    # On the opponent field with a more-advanced open teammate (closer to goal),
+    # we still play the minimal forward pass — that keeps possession advancing.
     tree = AttackerTree(
         us_positive=False,
         behavior_config=AttackerBehaviorConfig(counter_attack=True),
@@ -65,12 +65,30 @@ def test_no_counter_release_once_in_opponent_half() -> None:
     ball = (1.0, 0.0)
     own = [
         _carrier_with_ball(1, (0.92, 0.0), orientation=0.0),
-        RobotState(robot_id=2, position=(3.0, 0.0), orientation=0.0),
+        RobotState(robot_id=2, position=(3.0, 0.0), orientation=0.0),  # ahead, near goal
+    ]
+    bb = _tick(tree, _snapshot(ball, own), robot_id=1)
+
+    assert isinstance(bb.current_intent, IntentPass)
+    assert bb.current_intent.target_robot_id == 2
+
+
+def test_dribbles_forward_when_no_forward_outlet() -> None:
+    # No teammate meaningfully ahead of the carrier → dribble forward (the
+    # fallback when no good pass is seen), not a square/backward pass.
+    tree = AttackerTree(
+        us_positive=False,
+        behavior_config=AttackerBehaviorConfig(counter_attack=True),
+    )
+    ball = (1.0, 0.0)
+    own = [
+        _carrier_with_ball(1, (0.92, 0.0), orientation=0.0),
+        RobotState(robot_id=2, position=(-1.0, 0.0), orientation=0.0),  # behind carrier
     ]
     bb = _tick(tree, _snapshot(ball, own), robot_id=1)
 
     assert not isinstance(bb.current_intent, IntentPass)
-    assert isinstance(bb.current_intent, IntentDribble)  # HoldPossession
+    assert isinstance(bb.current_intent, IntentDribble)  # HoldPossession (carry forward)
 
 
 def test_counter_release_disabled_by_default() -> None:

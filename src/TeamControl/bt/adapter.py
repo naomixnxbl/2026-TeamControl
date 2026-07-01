@@ -576,6 +576,8 @@ class _RobotMovement:
 
     def __init__(self, angular_kp: float, angular_kd: float, angular_limit: float) -> None:
         self.angular_pd = PDController(angular_kp, angular_kd, angular_limit)
+        # Phase for the left↔right dribble nudge (keeps the ball on the dribbler).
+        self.dribble_phase: int = 0
 
 
 class MotionExecutor:
@@ -597,6 +599,11 @@ class MotionExecutor:
     ANGULAR_KP: float = 4.0   # matches the legacy proportional heading gain
     ANGULAR_KD: float = 0.35  # derivative braking (damps turn overshoot)
     ANGULAR_LIMIT: float = 6.0
+    # Dribble nudge: while carrying the ball, weave the body left↔right a touch
+    # so the ball stays worked against the dribbler instead of rolling off.
+    DRIBBLE_NUDGE_AMP: float = 0.25    # lateral velocity amplitude (m/s)
+    DRIBBLE_NUDGE_FREQ: float = 0.35   # rad/tick (≈0.18 s period @100 Hz)
+    DRIBBLE_NUDGE_RANGE: float = 0.20  # only nudge while the ball is this close
 
     def __init__(
         self,
@@ -643,11 +650,12 @@ class MotionExecutor:
             return None
 
         current_o = robot.orientation
+        movement = self._get_movement(robot_id)
         # PD heading control. Error wrapped to [-pi, pi]; a None target
         # orientation resolves (via the skill layer) to the current heading, so
         # the error is 0 and w is 0.
         err = (target.target_orientation - current_o + math.pi) % (2 * math.pi) - math.pi
-        w = float(self._get_movement(robot_id).angular_pd.update(err))
+        w = float(movement.angular_pd.update(err))
 
         # Skills produce target_velocity in WORLD frame; grSim wants body frame.
         vx_world, vy_world = target.target_velocity
@@ -655,6 +663,18 @@ class MotionExecutor:
         sin_o = math.sin(current_o)
         vt = vx_world * cos_o + vy_world * sin_o    # forward along heading
         vn = -vx_world * sin_o + vy_world * cos_o   # left perpendicular
+
+        # Left↔right dribble nudge: while we're carrying the ball, add a small
+        # oscillating lateral velocity so the ball stays worked on the dribbler.
+        if isinstance(intent, IntentDribble):
+            bx, by = snapshot.ball_position
+            if math.hypot(robot.position[0] - bx, robot.position[1] - by) <= self.DRIBBLE_NUDGE_RANGE:
+                movement.dribble_phase += 1
+                vn += self.DRIBBLE_NUDGE_AMP * math.sin(
+                    movement.dribble_phase * self.DRIBBLE_NUDGE_FREQ
+                )
+            else:
+                movement.dribble_phase = 0
 
         wants_kick = isinstance(intent, (IntentKick, IntentPass))
         kick = (

@@ -89,7 +89,9 @@ SHOT_CORRIDOR_RADIUS: float = 0.20
 # Tightened from 0.4 → 0.25 rad (~14°) so the team only pulls the trigger when
 # genuinely lined up — a big accuracy win for finishing.
 SHOT_HEADING_TOL: float = 0.25
-SHOT_SETTLE_TICKS: int = 30
+# Brief control confirmation before shooting — just enough that the ball is on
+# the dribbler, not a long wait. We want to shoot the moment there's a good spot.
+SHOT_SETTLE_TICKS: int = 5
 # Half-width of the goal mouth (m). Aim points are sampled across ±this around
 # the goal centre to find the most open part of the net.
 GOAL_MOUTH_HALF_WIDTH: float = 0.45
@@ -129,6 +131,10 @@ PASS_LANE_CLEARANCE_FRAC: float = 0.02
 PASS_ORIENT_TOL: float = 0.2
 COUNTER_ATTACK: bool = False
 COUNTER_OUTLET_MARKED_FRAC: float = 0.05
+# A forward-pass outlet must be at least this far ahead of the carrier (fraction
+# of field scale) before we release to it — keeps it a genuine forward pass, not
+# a square/marginal one, so we advance with minimal passes.
+COUNTER_MIN_ADVANCE_FRAC: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -173,6 +179,9 @@ class AttackerBehaviorConfig:
     # least this far (fraction of field scale) — avoids releasing into a marked
     # man.
     counter_outlet_marked_frac: float = COUNTER_OUTLET_MARKED_FRAC
+    # ...and at least this far ahead of the carrier toward goal (fraction of
+    # field scale) — keeps the release a genuine forward, advancing pass.
+    counter_min_advance_frac: float = COUNTER_MIN_ADVANCE_FRAC
     pass_openness_weight: float = 0.45
     pass_forward_score_weight: float = 0.25
     pass_distance_score_weight: float = 0.20
@@ -810,30 +819,20 @@ class PressContainment(py_trees.behaviour.Behaviour):
 
 
 class ShouldCounterRelease(py_trees.behaviour.Behaviour):
-    """Succeed when a counter-attack release should be attempted.
-
-    Gate for the counter-attack branch: only when ``counter_attack`` is enabled
-    AND the ball carrier is still in OUR half. Once we have advanced into the
-    opponent half we fall through to the normal possession actions (shoot / pass
-    / hold) so we KEEP possession there rather than forcing more releases.
-    """
+    """Gate for the forward-release branch — active whenever ``counter_attack``
+    is enabled. Whether we actually pass is decided by FindForwardOutlet: it
+    only succeeds when there's an open teammate meaningfully ahead of the
+    carrier, so a forward pass is preferred over carrying — and we fall through
+    to dribbling when no such outlet exists."""
 
     def __init__(self, tree_ref: AttackerTree) -> None:
         super().__init__("ShouldCounterRelease")
         self._tree = tree_ref
 
     def update(self) -> py_trees.common.Status:
-        if not self._tree.behavior_config.counter_attack:
-            return py_trees.common.Status.FAILURE
-        snap = self._tree._snapshot
-        if snap is None:
-            return py_trees.common.Status.FAILURE
-        # Our half is the side opposite the attacking goal.
-        goal_x = self._tree.goal_position[0]
-        ball_in_our_half = snap.ball_position[0] * goal_x < 0.0
         return (
             py_trees.common.Status.SUCCESS
-            if ball_in_our_half
+            if self._tree.behavior_config.counter_attack
             else py_trees.common.Status.FAILURE
         )
 
@@ -995,10 +994,11 @@ class AttackerTree:
             PassToOpenTeammate(self),
         ])
 
-        # Counter-attack release — fires only while counter_attack is enabled and
-        # the ball is still in our half. Reuses the dribble-to-face then pass
-        # nodes (they read _pass_target_*). Placed before the normal pass so a
-        # forward outlet is preferred over carrying the ball up ourselves.
+        # Forward-release branch (counter_attack): advance with minimal passes.
+        # Prefer a direct forward pass to the most-advanced open teammate; if
+        # there's no clean forward outlet, FindForwardOutlet fails and we fall
+        # through to HoldPossession (dribble forward). Reuses dribble-to-face +
+        # pass nodes (they read _pass_target_*).
         counter_seq = py_trees.composites.Sequence(
             name="CounterReleaseSequence", memory=False
         )
@@ -1012,12 +1012,21 @@ class AttackerTree:
         possession_action = py_trees.composites.Selector(
             name="PossessionAction", memory=False
         )
-        possession_action.add_children([
-            shoot_seq,
-            counter_seq,
-            pass_seq,
-            HoldPossession(self),
-        ])
+        if self.behavior_config.counter_attack:
+            # Active attack: shoot a good spot → minimal forward pass to advance
+            # / keep it forward → else dribble toward goal. No backward/under-
+            # pressure passes — dribbling is the fallback when no good pass.
+            possession_action.add_children([
+                shoot_seq,
+                counter_seq,
+                HoldPossession(self),
+            ])
+        else:
+            possession_action.add_children([
+                shoot_seq,
+                pass_seq,
+                HoldPossession(self),
+            ])
 
         possession_seq = py_trees.composites.Sequence(
             name="PossessionSequence", memory=False
@@ -1091,21 +1100,25 @@ def _find_forward_outlet(
     goal: tuple[float, float],
     config: AttackerBehaviorConfig,
 ) -> tuple[int | None, tuple[float, float] | None]:
-    """Pick the most direct forward teammate in the opponent half to release to.
+    """Pick the most-advanced open teammate ahead of the carrier to release to.
 
-    "Most direct" = the open teammate that is furthest advanced toward the
-    opponent goal with a clear ball→teammate lane and no tight marker. Returns
-    (id, pos), or (None, None) when there is no clean forward outlet (the caller
-    then falls back to carrying / a normal pass).
+    The forward outlet for minimal-pass attacking: an open teammate (clear lane,
+    not tightly marked) that is at least ``counter_min_advance_frac`` of the
+    field *ahead of the carrier* toward goal; the furthest-advanced such teammate
+    wins so each pass gains the most ground. Returns (id, pos), or (None, None)
+    when there is no clean forward outlet — the caller then dribbles forward.
     """
     passer = _find_robot(snap, passer_id)
     if passer is None:
         return None, None
 
     goal_x = goal[0]
+    forward_sign = 1.0 if goal_x >= 0 else -1.0  # +x or -x is "toward goal"
+    carrier_progress = passer.position[0] * forward_sign
     field_scale = _field_scale(snap, goal)
     marked_distance = field_scale * config.counter_outlet_marked_frac
     lane_clearance = field_scale * config.pass_lane_clearance_frac
+    min_advance = field_scale * config.counter_min_advance_frac
 
     best_id: int | None = None
     best_pos: tuple[float, float] | None = None
@@ -1114,8 +1127,9 @@ def _find_forward_outlet(
     for teammate in snap.own_robots:
         if teammate.robot_id in (GOALIE_ID, passer_id):
             continue
-        # Must already be in the opponent half (same side as the attacking goal).
-        if teammate.position[0] * goal_x <= 0.0:
+        # Must be meaningfully ahead of the carrier toward goal (forward only).
+        progress = teammate.position[0] * forward_sign
+        if progress < carrier_progress + min_advance:
             continue
         # Reject tightly marked outlets.
         if _nearest_opponent_distance(snap, teammate.position) < marked_distance:
@@ -1135,7 +1149,6 @@ def _find_forward_outlet(
         ):
             continue
         # Furthest forward (most advanced toward goal) wins — the most direct ball.
-        progress = teammate.position[0] * (1.0 if goal_x >= 0 else -1.0)
         if progress > best_progress:
             best_progress = progress
             best_id = teammate.robot_id
